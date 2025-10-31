@@ -17,7 +17,7 @@ import yfinance as yf
 BKK = pytz.timezone("Asia/Bangkok")
 UTC = pytz.UTC
 
-HEADER = "pytron • Stock Price @ timestamp (Yahoo Finance)"
+# HEADER = "pytron • Stock Price @ timestamp (Yahoo Finance)"
 INPUT_HELP = (
     "รูปแบบอินพุต: `DD/MM/YYYY HH:MM:SS TICKER`  "
     "เช่น `27/10/2025 20:38:59 APLS`  "
