@@ -48,8 +48,8 @@ def parse_user_input(s: str) -> Tuple[datetime, str, str]:
     dt_naive = datetime(year, month, day, hour, minute, second)
     dt_bkk = BKK.localize(dt_naive)
 
-    header_stamp = f"{day:02d}/{month:02d}/{year:04d},{hour:02d}:{minute:02d}:{second:02d},{ticker}"
-    return dt_bkk, ticker, header_stamp
+    _stamp = f"{day:02d}/{month:02d}/{year:04d},{hour:02d}:{minute:02d}:{second:02d},{ticker}"
+    return dt_bkk, ticker, _stamp
 
 # --- Finance helpers ---
 def _fetch_history(ticker: str, start_utc: datetime, end_utc: datetime, interval: str) -> Optional[pd.DataFrame]:
@@ -128,7 +128,7 @@ def get_price_for_timestamp_strict_minute(ticker: str, dt_bkk: datetime) -> floa
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="pytron • stock_price", page_icon="📈", layout="centered")
-st.title(HEADER)
+# st.title(HEADER)
 st.caption(INPUT_HELP)
 
 default_text = "27/10/2025 20:38:59 APLS"
