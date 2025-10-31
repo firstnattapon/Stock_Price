@@ -1,0 +1,16 @@
+numpy
+pandas
+streamlit
+yfinance  
+thingspeak
+plotly
+stocksymbol
+telebot
+numba
+curl_cffi
+pytz
+alpha_vantage
+requests
+numpy-financial
+matplotlib
+requests_cache
