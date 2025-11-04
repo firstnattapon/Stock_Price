@@ -1,8 +1,8 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-02T07:47:09.214Z",
+  "_generatedAt": "2025-11-04T04:21:57.687Z",
   "_meta": {
-    "count": 54,
+    "count": 56,
     "columns": [
       "id",
       "symbol",
@@ -861,24 +861,6 @@
       "strike": 1,
       "expiry": "16/01/2026",
       "action": "BUY",
-      "premium": 0.25,
-      "stockPrice": 0.82,
-      "quantity": 5,
-      "sortableTimestamp": "2025-08-05T20:30:00",
-      "iv": 0,
-      "ev": 0.25,
-      "evSigned": -0.25
-    },
-    {
-      "id": 47,
-      "symbol": "AGL",
-      "date": "05/08/2025",
-      "rawDate": "05/08/2025",
-      "rawTime": "20:30:00,GMT+07",
-      "type": "CALL",
-      "strike": 1,
-      "expiry": "16/01/2026",
-      "action": "BUY",
       "premium": 0.2,
       "stockPrice": 0.82,
       "quantity": 5,
@@ -888,7 +870,7 @@
       "evSigned": -0.2
     },
     {
-      "id": 48,
+      "id": 47,
       "symbol": "AGL",
       "date": "13/08/2025",
       "rawDate": "13/08/2025",
@@ -906,7 +888,7 @@
       "evSigned": 0.25
     },
     {
-      "id": 49,
+      "id": 48,
       "symbol": "AGL",
       "date": "18/08/2025",
       "rawDate": "18/08/2025",
@@ -924,7 +906,7 @@
       "evSigned": 0.10000000000000003
     },
     {
-      "id": 50,
+      "id": 49,
       "symbol": "AGL",
       "date": "22/08/2025",
       "rawDate": "22/08/2025",
@@ -942,7 +924,7 @@
       "evSigned": 0.10999999999999993
     },
     {
-      "id": 51,
+      "id": 50,
       "symbol": "DJT",
       "date": "01/08/2025",
       "rawDate": "01/08/2025",
@@ -960,7 +942,7 @@
       "evSigned": -2.93
     },
     {
-      "id": 52,
+      "id": 51,
       "symbol": "FFWM",
       "date": "10/06/2025",
       "rawDate": "10/06/2025",
@@ -978,7 +960,7 @@
       "evSigned": -0.7599999999999998
     },
     {
-      "id": 53,
+      "id": 52,
       "symbol": "GERN",
       "date": "02/07/2025",
       "rawDate": "02/07/2025",
@@ -994,6 +976,60 @@
       "iv": 0,
       "ev": 0.36,
       "evSigned": -0.36
+    },
+    {
+      "id": 53,
+      "symbol": "SG",
+      "date": "03/11/2025",
+      "rawDate": "03/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "CALL",
+      "strike": 3.5,
+      "expiry": "16/01/2026",
+      "action": "BUY",
+      "premium": 3.5,
+      "stockPrice": 6.39,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-03T20:30:00",
+      "iv": 2.8899999999999997,
+      "ev": 0.6100000000000003,
+      "evSigned": -0.6100000000000003
+    },
+    {
+      "id": 54,
+      "symbol": "CLSK",
+      "date": "03/11/2025",
+      "rawDate": "03/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "CALL",
+      "strike": 8,
+      "expiry": "19/12/2025",
+      "action": "BUY",
+      "premium": 9.58,
+      "stockPrice": 17.51,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-03T20:30:00",
+      "iv": 9.510000000000002,
+      "ev": 0.06999999999999851,
+      "evSigned": -0.06999999999999851
+    },
+    {
+      "id": 55,
+      "symbol": "GERN",
+      "date": "04/11/2025",
+      "rawDate": "04/11/2025",
+      "rawTime": "00:52:00,GMT+07",
+      "type": "CALL",
+      "strike": 1,
+      "expiry": "19/12/2025",
+      "action": "BUY",
+      "premium": 0.3,
+      "stockPrice": 1.225000023841858,
+      "quantity": 3,
+      "sortableTimestamp": "2025-11-04T00:52:00",
+      "iv": 0.2250000238418579,
+      "ev": 0.07499997615814208,
+      "evSigned": -0.07499997615814208
     }
   ]
 }
