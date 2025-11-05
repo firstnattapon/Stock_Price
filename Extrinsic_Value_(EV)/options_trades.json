@@ -1,8 +1,8 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-05T14:44:21.366Z",
+  "_generatedAt": "2025-11-05T15:41:33.974Z",
   "_meta": {
-    "count": 58,
+    "count": 59,
     "columns": [
       "id",
       "symbol",
@@ -1066,6 +1066,24 @@
       "iv": 2.0999999999999996,
       "ev": 4.440892098500626e-16,
       "evSigned": -4.440892098500626e-16
+    },
+    {
+      "id": 58,
+      "symbol": "RIVN",
+      "date": "05/11/2025",
+      "rawDate": "05/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "PUT",
+      "strike": 17.5,
+      "expiry": "19/12/2025",
+      "action": "BUY",
+      "premium": 3.65,
+      "stockPrice": 14.2,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-05T20:30:00",
+      "iv": 3.3000000000000007,
+      "ev": 0.3499999999999992,
+      "evSigned": -0.3499999999999992
     }
   ]
 }
