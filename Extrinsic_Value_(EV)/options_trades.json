@@ -1,8 +1,8 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-07T14:51:16.980Z",
+  "_generatedAt": "2025-11-08T04:35:51.861Z",
   "_meta": {
-    "count": 60,
+    "count": 61,
     "columns": [
       "id",
       "symbol",
@@ -1102,6 +1102,24 @@
       "iv": 2.3499999999999996,
       "ev": 0.050000000000000266,
       "evSigned": -0.050000000000000266
+    },
+    {
+      "id": 60,
+      "symbol": "AGL",
+      "date": "08/11/2025",
+      "rawDate": "08/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "CALL",
+      "strike": 0.5,
+      "expiry": "16/01/2026",
+      "action": "BUY",
+      "premium": 0.26,
+      "stockPrice": 0.66,
+      "quantity": 4,
+      "sortableTimestamp": "2025-11-08T20:30:00",
+      "iv": 0.16000000000000003,
+      "ev": 0.09999999999999998,
+      "evSigned": -0.09999999999999998
     }
   ]
 }
