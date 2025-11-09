@@ -499,7 +499,7 @@ def generate_comparison_data(params, toggles, effective_b1, effective_b2):
     cols_d1 = ['y1_delta1', 'y2_delta1', 'y4_piece', 'y5_piece', 'y8_call_intrinsic', 'y9_put_intrinsic', 'y10_long_pl', 'y11_short_pl']
     active_cols_d1 = [col for i, col in enumerate(cols_d1) if actives_d1[i]]
     
-    actives_d2 = [t['showY1'], t['showY2'], t['showY4'], t['showY5'], t['showY8'], t['showY9'], t['showY10'], t['showY11']]
+    actives_d2 = [t['showY11'], t['showY2'], t['showY4'], t['showY5'], t['showY8'], t['showY9'], t['showY10'], t['showY11']]
     cols_d2 = ['y1_delta2', 'y2_delta2', 'y4_piece', 'y5_piece', 'y8_call_intrinsic', 'y9_put_intrinsic', 'y10_long_pl', 'y11_short_pl']
     active_cols_d2 = [col for i, col in enumerate(cols_d2) if actives_d2[i]]
 
@@ -909,11 +909,50 @@ def run_app():
             
             st.divider()
             st.button("รีเซ็ตช่วงแกน X", on_click=reset_chart_range, use_container_width=True)
+            
+            # --- ⬇️ START: โค้ดที่แก้ไข ---
+            
+            # 1. สร้าง callbacks เฉพาะกิจสำหรับ x-range
+            #    (เราต้องใช้ clamp จาก math helpers ซึ่งถูกกำหนดไว้ด้านบนแล้ว)
+            def _update_x_min():
+                new_min = st.session_state['widget_x_min']
+                current_max = st.session_state.params['chart']['x1Range'][1]
+                # ตรวจสอบว่า min ไม่ข้าม max
+                new_min = clamp(new_min, X_RANGE_MIN, current_max - 0.1)
+                st.session_state.params['chart']['x1Range'][0] = new_min
+
+            def _update_x_max():
+                new_max = st.session_state['widget_x_max']
+                current_min = st.session_state.params['chart']['x1Range'][0]
+                # ตรวจสอบว่า max ไม่ข้าม min
+                new_max = clamp(new_max, current_min + 0.1, X_RANGE_MAX)
+                st.session_state.params['chart']['x1Range'][1] = new_max
+
+            # 2. ใช้ st.number_input โดยตรง (ไม่ใช่ ui_param_number_input)
             c1, c2 = st.columns(2)
             with c1:
-                ui_param_number_input("x₁ min", 'chart', 'x1Range', X_RANGE_MIN, X_RANGE_MAX - 0.1, 0.1, key="x1Min_input")
+                st.number_input(
+                    "x₁ min",
+                    min_value=X_RANGE_MIN,
+                    max_value=X_RANGE_MAX - 0.1, # max ของ min
+                    value=st.session_state.params['chart']['x1Range'][0], # ดึงค่า [0]
+                    step=0.1,
+                    key="widget_x_min", # key สำหรับ callback
+                    on_change=_update_x_min, # เรียก callback ที่สร้างไว้
+                    format="%.2f"
+                )
             with c2:
-                ui_param_number_input("x₁ max", 'chart', 'x1Range', X_RANGE_MIN + 0.1, X_RANGE_MAX, 0.1, key="x1Max_input")
+                st.number_input(
+                    "x₁ max",
+                    min_value=X_RANGE_MIN + 0.1, # min ของ max
+                    max_value=X_RANGE_MAX,
+                    value=st.session_state.params['chart']['x1Range'][1], # ดึงค่า [1]
+                    step=0.1,
+                    key="widget_x_max", # key สำหรับ callback
+                    on_change=_update_x_max, # เรียก callback ที่สร้างไว้
+                    format="%.2f"
+                )
+            # --- ⬆️ END: โค้ดที่แก้ไข ---
 
 
         with ctrl_t2: # y1/y5, y2/y4
@@ -1117,7 +1156,7 @@ def run_app():
             'y1_delta2': lines_comp['y1_delta2'],
             'y2_delta2': lines_comp['y2_delta2'],
             'y4_piece': lines_comp['y4_piece'],
-            'y5_piece': lines_comp['y5_piece'],
+F           'y5_piece': lines_comp['y5_piece'],
             'y3_delta2': lines_comp['y3_delta2'],
             'y6_ref_delta2': lines_comp['y6_ref_delta2'],
             'y7_ref_delta2': lines_comp['y7_ref_delta2'],
