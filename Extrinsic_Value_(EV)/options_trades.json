@@ -1,6 +1,6 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-10T15:30:34.825Z",
+  "_generatedAt": "2025-11-10T15:51:46.479Z",
   "_meta": {
     "count": 65,
     "columns": [
@@ -1131,13 +1131,13 @@
       "strike": 20,
       "expiry": "16/01/2026",
       "action": "BUY",
-      "premium": 3.14,
-      "stockPrice": 23.38,
+      "premium": 3.2,
+      "stockPrice": 23.14,
       "quantity": 1,
       "sortableTimestamp": "2025-11-10T20:30:00",
       "iv": 0,
-      "ev": 3.14,
-      "evSigned": -3.14
+      "ev": 3.2,
+      "evSigned": -3.2
     },
     {
       "id": 62,
@@ -1159,24 +1159,6 @@
     },
     {
       "id": 63,
-      "symbol": "FLNC",
-      "date": "10/11/2025",
-      "rawDate": "10/11/2025",
-      "rawTime": "20:30:00,GMT+07",
-      "type": "PUT",
-      "strike": 20,
-      "expiry": "16/01/2026",
-      "action": "BUY",
-      "premium": 3.2,
-      "stockPrice": 23.14,
-      "quantity": 1,
-      "sortableTimestamp": "2025-11-10T20:30:00",
-      "iv": 0,
-      "ev": 3.2,
-      "evSigned": -3.2
-    },
-    {
-      "id": 64,
       "symbol": "NVTS",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1192,6 +1174,24 @@
       "iv": 2.9700000000000006,
       "ev": 0.9299999999999993,
       "evSigned": -0.9299999999999993
+    },
+    {
+      "id": 64,
+      "symbol": "NVTS",
+      "date": "10/11/2025",
+      "rawDate": "10/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "CALL",
+      "strike": 7,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 2.6,
+      "stockPrice": 8.91,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-10T20:30:00",
+      "iv": 1.9100000000000001,
+      "ev": 0.69,
+      "evSigned": 0.69
     }
   ]
 }
