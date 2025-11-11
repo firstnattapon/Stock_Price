@@ -1,8 +1,8 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-10T16:54:28.868Z",
+  "_generatedAt": "2025-11-11T14:37:58.461Z",
   "_meta": {
-    "count": 67,
+    "count": 69,
     "columns": [
       "id",
       "symbol",
@@ -1228,6 +1228,42 @@
       "iv": 4.880000000000001,
       "ev": 0.5199999999999996,
       "evSigned": -0.5199999999999996
+    },
+    {
+      "id": 67,
+      "symbol": "NVTS",
+      "date": "11/11/2025",
+      "rawDate": "11/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "CALL",
+      "strike": 8.5,
+      "expiry": "12/12/2025",
+      "action": "BUY",
+      "premium": 1.75,
+      "stockPrice": 9.7,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-11T20:30:00",
+      "iv": 1.1999999999999993,
+      "ev": 0.5500000000000007,
+      "evSigned": -0.5500000000000007
+    },
+    {
+      "id": 68,
+      "symbol": "RIVN",
+      "date": "11/11/2025",
+      "rawDate": "11/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "PUT",
+      "strike": 17.5,
+      "expiry": "19/12/2025",
+      "action": "BUY",
+      "premium": 2,
+      "stockPrice": 16.42,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-11T20:30:00",
+      "iv": 1.0799999999999983,
+      "ev": 0.9200000000000017,
+      "evSigned": -0.9200000000000017
     }
   ]
 }
