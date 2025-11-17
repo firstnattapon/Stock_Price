@@ -1,8 +1,8 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-17T14:58:54.095Z",
+  "_generatedAt": "2025-11-17T15:19:14.801Z",
   "_meta": {
-    "count": 71,
+    "count": 72,
     "columns": [
       "id",
       "symbol",
@@ -1300,6 +1300,24 @@
       "iv": 4.98,
       "ev": 0.5699999999999994,
       "evSigned": 0.5699999999999994
+    },
+    {
+      "id": 71,
+      "symbol": "FLNC",
+      "date": "17/11/2025",
+      "rawDate": "17/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "PUT",
+      "strike": 20,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 5.1,
+      "stockPrice": 17.53,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-17T20:30:00",
+      "iv": 2.469999999999999,
+      "ev": 2.630000000000001,
+      "evSigned": 2.630000000000001
     }
   ]
 }
