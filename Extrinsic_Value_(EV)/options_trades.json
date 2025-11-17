@@ -1,8 +1,8 @@
 {
   "_schema": "options_trades.v1",
-  "_generatedAt": "2025-11-14T04:57:37.081Z",
+  "_generatedAt": "2025-11-17T14:58:54.095Z",
   "_meta": {
-    "count": 70,
+    "count": 71,
     "columns": [
       "id",
       "symbol",
@@ -1282,6 +1282,24 @@
       "iv": 3.6499999999999986,
       "ev": 2.1500000000000012,
       "evSigned": 2.1500000000000012
+    },
+    {
+      "id": 70,
+      "symbol": "CLSK",
+      "date": "17/11/2025",
+      "rawDate": "17/11/2025",
+      "rawTime": "20:30:00,GMT+07",
+      "type": "PUT",
+      "strike": 16,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 5.55,
+      "stockPrice": 11.02,
+      "quantity": 1,
+      "sortableTimestamp": "2025-11-17T20:30:00",
+      "iv": 4.98,
+      "ev": 0.5699999999999994,
+      "evSigned": 0.5699999999999994
     }
   ]
 }
