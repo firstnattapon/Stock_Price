@@ -1009,7 +1009,7 @@
       "evSigned": 1.4
     },
     {
-      "id": 54,
+      "id": 53,
       "symbol": "CLSK",
       "date": "03/11/2025",
       "rawDate": "03/11/2025",
@@ -1028,7 +1028,7 @@
       "evSigned": -0.06999999999999851
     },
     {
-      "id": 53,
+      "id": 54,
       "symbol": "SG",
       "date": "03/11/2025",
       "rawDate": "03/11/2025",
@@ -1288,7 +1288,7 @@
       "stockPrice": 9.7,
       "quantity": 1,
       "sortableTimestamp": "2025-11-11T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 1.1999999999999993,
       "ev": 0.5500000000000007,
       "evSigned": -0.5500000000000007
