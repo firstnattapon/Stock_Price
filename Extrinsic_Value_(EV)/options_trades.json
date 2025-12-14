@@ -1250,7 +1250,7 @@
       "stockPrice": 15.88,
       "quantity": 1,
       "sortableTimestamp": "2025-11-10T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 4.880000000000001,
       "ev": 0.5199999999999996,
       "evSigned": -0.5199999999999996
@@ -1387,6 +1387,25 @@
       "iv": 1.5899999999999999,
       "ev": 2.21,
       "evSigned": -2.21
+    },
+    {
+      "id": 73,
+      "symbol": "RIVN",
+      "date": "12/12/2025",
+      "rawDate": "12/12/2025",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 11,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 7.7,
+      "stockPrice": 18.67,
+      "quantity": 1,
+      "sortableTimestamp": "2025-12-12T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 7.670000000000002,
+      "ev": 0.029999999999998472,
+      "evSigned": 0.029999999999998472
     }
   ]
 }
