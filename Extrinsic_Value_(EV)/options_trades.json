@@ -1098,7 +1098,7 @@
       "stockPrice": 5.1,
       "quantity": 1,
       "sortableTimestamp": "2025-11-05T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 2.0999999999999996,
       "ev": 4.440892098500626e-16,
       "evSigned": -4.440892098500626e-16
@@ -1136,7 +1136,7 @@
       "stockPrice": 4.35,
       "quantity": 1,
       "sortableTimestamp": "2025-11-07T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 2.3499999999999996,
       "ev": 0.050000000000000266,
       "evSigned": -0.050000000000000266
@@ -1425,6 +1425,44 @@
       "iv": 3.5700000000000003,
       "ev": 0.06999999999999984,
       "evSigned": -0.06999999999999984
+    },
+    {
+      "id": 75,
+      "symbol": "RXRX",
+      "date": "19/12/2025",
+      "rawDate": "19/12/2025",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 3,
+      "expiry": "19/12/2025",
+      "action": "SELL",
+      "premium": 1.25,
+      "stockPrice": 4.26,
+      "quantity": 1,
+      "sortableTimestamp": "2025-12-19T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 1.2599999999999998,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 76,
+      "symbol": "RXRX",
+      "date": "19/12/2025",
+      "rawDate": "19/12/2025",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 2,
+      "expiry": "19/12/2025",
+      "action": "SELL",
+      "premium": 2.46,
+      "stockPrice": 4.26,
+      "quantity": 1,
+      "sortableTimestamp": "2025-12-19T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 2.26,
+      "ev": 0.20000000000000018,
+      "evSigned": 0.20000000000000018
     }
   ]
 }
