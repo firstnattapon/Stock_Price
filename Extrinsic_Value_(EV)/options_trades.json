@@ -1022,7 +1022,7 @@
       "stockPrice": 17.51,
       "quantity": 1,
       "sortableTimestamp": "2025-11-03T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 9.510000000000002,
       "ev": 0.06999999999999851,
       "evSigned": -0.06999999999999851
@@ -1060,7 +1060,7 @@
       "stockPrice": 1.225000023841858,
       "quantity": 3,
       "sortableTimestamp": "2025-11-04T00:52:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0.2250000238418579,
       "ev": 0.07499997615814208,
       "evSigned": -0.07499997615814208
@@ -1117,7 +1117,7 @@
       "stockPrice": 14.2,
       "quantity": 1,
       "sortableTimestamp": "2025-11-05T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 3.3000000000000007,
       "ev": 0.3499999999999992,
       "evSigned": -0.3499999999999992
@@ -1307,7 +1307,7 @@
       "stockPrice": 16.42,
       "quantity": 1,
       "sortableTimestamp": "2025-11-11T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 1.0799999999999983,
       "ev": 0.9200000000000017,
       "evSigned": -0.9200000000000017
@@ -1463,6 +1463,44 @@
       "iv": 2.26,
       "ev": 0.20000000000000018,
       "evSigned": 0.20000000000000018
+    },
+    {
+      "id": 77,
+      "symbol": "CLSK",
+      "date": "19/12/2025",
+      "rawDate": "19/12/2025",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 8,
+      "expiry": "19/12/2025",
+      "action": "SELL",
+      "premium": 3.45,
+      "stockPrice": 12.03,
+      "quantity": 1,
+      "sortableTimestamp": "2025-12-19T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 4.029999999999999,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 78,
+      "symbol": "GERN",
+      "date": "19/12/2025",
+      "rawDate": "19/12/2025",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 1,
+      "expiry": "19/12/2025",
+      "action": "SELL",
+      "premium": 0.3,
+      "stockPrice": 1.33,
+      "quantity": 3,
+      "sortableTimestamp": "2025-12-19T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 0.33000000000000007,
+      "ev": 0,
+      "evSigned": 0
     }
   ]
 }
