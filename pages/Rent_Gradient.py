@@ -49,7 +49,7 @@ with st.sidebar:
         format_func=lambda x: "🚗 ขับรถ" if x == "driving-car" else ("🚶 เดินเท้า" if x == "foot-walking" else "🚲 ปั่นจักรยาน")
     )
     
-    time_minutes = st.slider("เวลาเดินทาง (นาที)", 1, 60, 15)
+    time_minutes = st.slider("เวลาเดินทาง (นาที)", 1, 60, 5)
     
     submit_button = st.button("🚀 คำนวณพื้นที่", use_container_width=True)
 
