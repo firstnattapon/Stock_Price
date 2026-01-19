@@ -19,7 +19,7 @@ DEFAULT_LON = 100.534966
 if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None
 
-# 🟢 Logic ป้องกันหน้าจอกระพริบ (Anti-flicker)
+# Logic ป้องกันหน้าจอกระพริบ
 if 'temp_lat' in st.session_state and 'temp_lon' in st.session_state:
     st.session_state.lat_input = st.session_state.temp_lat
     st.session_state.lon_input = st.session_state.temp_lon
@@ -28,17 +28,38 @@ if 'temp_lat' in st.session_state and 'temp_lon' in st.session_state:
 
 st.title("⏱️ แผนที่คำนวณระยะเวลาเดินทาง (TravelTime API)")
 
-# --- 2. Sidebar: ตั้งค่า API ---
+# --- 2. Sidebar: ตั้งค่า ---
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
     
-    # 🟢 ค่า Default (Key ของคุณ)
+    # Key เริ่มต้น
     default_app_id = "9aef939d"
     default_api_key = "0f7019f3ef3242dbd3cc6bf776e2ebb6"
     
     app_id = st.text_input("App ID", value=default_app_id, type="password")
     api_key = st.text_input("API Key", value=default_api_key, type="password")
     
+    st.markdown("---")
+    
+    # 🟢 1. ส่วนเลือกสไตล์แผนที่ (เพิ่มใหม่)
+    st.write("🎨 ปรับแต่งแผนที่:")
+    map_style_name = st.selectbox(
+        "เลือกสไตล์พื้นหลัง",
+        options=["Light (สะอาดตา)", "Dark (โหมดมืด)", "Street (ถนนปกติ)", "Satellite (ดาวเทียม)"],
+        index=0
+    )
+    
+    # Mapping ชื่อที่เลือก ให้เป็นค่าที่ Folium เข้าใจ
+    map_tiles_dict = {
+        "Light (สะอาดตา)": "CartoDB positron",
+        "Dark (โหมดมืด)": "CartoDB dark_matter",
+        "Street (ถนนปกติ)": "OpenStreetMap",
+        "Satellite (ดาวเทียม)": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    }
+    selected_tiles = map_tiles_dict[map_style_name]
+    # กำหนด attribution สำหรับแผนที่ดาวเทียม (จำเป็นต้องมี)
+    tile_attr = "Esri" if "Satellite" in map_style_name else None
+
     st.markdown("---")
     
     # เลือกโหมดการเดินทาง
@@ -54,7 +75,6 @@ with st.sidebar:
         }[x]
     )
     
-    # เลือกเวลา
     st.write("⏱️ เลือกช่วงเวลา (นาที):")
     time_intervals = st.multiselect(
         "ระบุเวลา (เลือกได้หลายค่า)",
@@ -87,11 +107,9 @@ if submit_button:
         with st.spinner('กำลังเชื่อมต่อระบบ TravelTime...'):
             try:
                 sorted_times = sorted(time_intervals)
-                
-                # สร้าง GeoJSON สำหรับเก็บข้อมูลทั้งหมด
                 all_features = []
                 
-                # เรียก API สำหรับแต่ละช่วงเวลา
+                # ยิง API
                 for time_min in sorted_times:
                     payload = {
                         "departure_searches": [
@@ -122,18 +140,17 @@ if submit_button:
                     
                     if response.status_code == 200:
                         result = response.json()
-                        
-                        # แปลงผลลัพธ์เป็น GeoJSON Features
                         for search in result.get("results", []):
                             for shape in search.get("shapes", []):
-                                # แปลง shell coordinates
                                 coordinates = [[pt["lng"], pt["lat"]] for pt in shape["shell"]]
+                                # จัดการรูเจาะ (Holes) ถ้ามี
+                                holes = [[[pt["lng"], pt["lat"]] for pt in hole] for hole in shape.get("holes", [])]
                                 
                                 feature = {
                                     "type": "Feature",
                                     "geometry": {
                                         "type": "Polygon",
-                                        "coordinates": [coordinates]
+                                        "coordinates": [coordinates] + holes
                                     },
                                     "properties": {
                                         "travel_time": time_min * 60,
@@ -142,23 +159,17 @@ if submit_button:
                                 }
                                 all_features.append(feature)
                     else:
-                        st.error(f"❌ API Error ({time_min}min): {response.status_code}")
-                        st.code(response.text)
+                        st.error(f"❌ API Error: {response.status_code}")
                 
                 if all_features:
-                    geojson_data = {
+                    st.session_state.isochrone_data = {
                         "type": "FeatureCollection",
                         "features": all_features
                     }
-                    st.session_state.isochrone_data = geojson_data
-                    st.success(f"✅ คำนวณสำเร็จ! ({len(all_features)} พื้นที่)")
-                else:
-                    st.error("❌ ไม่สามารถดึงข้อมูลได้")
+                    st.success(f"✅ คำนวณสำเร็จ!")
                 
             except Exception as e:
                 st.error(f"❌ เกิดข้อผิดพลาด: {e}")
-                import traceback
-                st.code(traceback.format_exc())
 
 # --- 5. ฟังก์ชันเลือกสี ---
 def get_color(seconds):
@@ -173,7 +184,14 @@ def display_map():
     current_lat = st.session_state.lat_input
     current_lon = st.session_state.lon_input
     
-    m = folium.Map(location=[current_lat, current_lon], zoom_start=13, tiles="CartoDB positron")
+    # 🟢 2. สร้างแผนที่โดยใช้ tiles ที่เลือกจาก Sidebar
+    # ถ้าเลือก Satellite ต้องระบุ attr ด้วย
+    m = folium.Map(
+        location=[current_lat, current_lon], 
+        zoom_start=13, 
+        tiles=selected_tiles, 
+        attr=tile_attr 
+    )
     
     if st.session_state.isochrone_data:
         folium.GeoJson(
@@ -203,29 +221,25 @@ def display_map():
     else:
         folium.Marker(
             [current_lat, current_lon], 
-            popup="📍 คลิกปุ่มคำนวณพื้นที่", 
+            popup="📍 คลิกแผนที่เพื่อเปลี่ยนจุด", 
             icon=folium.Icon(color="blue", icon="info-sign")
         ).add_to(m)
 
-    # แสดงผล
     map_output = st_folium(m, width=1200, height=600, key="traveltime_map")
 
-    # รับค่าคลิก
     if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
         
-        # เช็คว่าคลิกตำแหน่งใหม่จริงๆ (ไม่ใช่ตำแหน่งเดิม)
         if abs(clicked_lat - st.session_state.lat_input) > 0.000001 or \
            abs(clicked_lng - st.session_state.lon_input) > 0.000001:
             st.session_state.temp_lat = clicked_lat
             st.session_state.temp_lon = clicked_lng
             st.rerun()
 
-# รันฟังก์ชัน
 display_map()
 
-# --- 7. ส่วนแสดงข้อมูลเพิ่มเติม ---
+# --- 7. Debug Info ---
 if st.session_state.isochrone_data:
     with st.expander("📊 ข้อมูล GeoJSON"):
         st.json(st.session_state.isochrone_data)
