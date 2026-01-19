@@ -14,7 +14,7 @@ st.set_page_config(
 if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None  # เก็บข้อมูล JSON ที่ได้จาก API
 if 'map_center' not in st.session_state:
-    st.session_state.map_center = [13.7649, 100.5382] # เก็บจุดศูนย์กลางล่าสุด
+    st.session_state.map_center = [20.219442967279928 , 100.40362955876192] # เก็บจุดศูนย์กลางล่าสุด
 
 st.title("🗺️ แผนที่คำนวณระยะการเดินทาง (Isochrone Map)")
 
