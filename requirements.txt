@@ -19,4 +19,4 @@ geopy
 openrouteservice
 folium
 streamlit-folium
-traveltimepy
+traveltimepy 4.4.0
