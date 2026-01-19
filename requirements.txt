@@ -17,3 +17,5 @@ requests_cache
 altair
 geopy
 openrouteservice
+folium
+streamlit-folium
