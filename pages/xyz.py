@@ -2,7 +2,7 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 from datetime import datetime
-import traveltimepy  # 🟢 แก้ไข: Import แบบนี้ชัวร์กว่า
+import requests
 
 # --- 1. การตั้งค่าหน้าเว็บ ---
 st.set_page_config(
@@ -86,26 +86,79 @@ if submit_button:
     else:
         with st.spinner('กำลังเชื่อมต่อระบบ TravelTime...'):
             try:
-                # 🟢 แก้ไข: เรียก SDK ผ่านชื่อ Library โดยตรง (แก้ Error หาไม่เจอ)
-                sdk = traveltimepy.TravelTimeSdk(app_id=app_id, api_key=api_key)
-                
-                # เรียงเวลาและแปลงเป็นวินาที
                 sorted_times = sorted(time_intervals)
-                range_seconds = [t * 60 for t in sorted_times]
                 
-                # เรียก API
-                geojson_result = sdk.time_map_geojson(
-                    coordinates=[{"lat": st.session_state.lat_input, "lng": st.session_state.lon_input}],
-                    transportation={"type": travel_mode},
-                    travel_time=range_seconds,
-                    departure_time=datetime.now().isoformat()
-                )
+                # สร้าง GeoJSON สำหรับเก็บข้อมูลทั้งหมด
+                all_features = []
                 
-                st.session_state.isochrone_data = geojson_result
+                # เรียก API สำหรับแต่ละช่วงเวลา
+                for time_min in sorted_times:
+                    payload = {
+                        "departure_searches": [
+                            {
+                                "id": f"isochrone_{time_min}min",
+                                "coords": {
+                                    "lat": st.session_state.lat_input,
+                                    "lng": st.session_state.lon_input
+                                },
+                                "transportation": {"type": travel_mode},
+                                "departure_time": datetime.now().isoformat(),
+                                "travel_time": time_min * 60
+                            }
+                        ]
+                    }
+                    
+                    headers = {
+                        "Content-Type": "application/json",
+                        "X-Application-Id": app_id,
+                        "X-Api-Key": api_key
+                    }
+                    
+                    response = requests.post(
+                        "https://api.traveltimeapp.com/v4/time-map",
+                        json=payload,
+                        headers=headers
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        
+                        # แปลงผลลัพธ์เป็น GeoJSON Features
+                        for search in result.get("results", []):
+                            for shape in search.get("shapes", []):
+                                # แปลง shell coordinates
+                                coordinates = [[pt["lng"], pt["lat"]] for pt in shape["shell"]]
+                                
+                                feature = {
+                                    "type": "Feature",
+                                    "geometry": {
+                                        "type": "Polygon",
+                                        "coordinates": [coordinates]
+                                    },
+                                    "properties": {
+                                        "travel_time": time_min * 60,
+                                        "travel_time_minutes": time_min
+                                    }
+                                }
+                                all_features.append(feature)
+                    else:
+                        st.error(f"❌ API Error ({time_min}min): {response.status_code}")
+                        st.code(response.text)
+                
+                if all_features:
+                    geojson_data = {
+                        "type": "FeatureCollection",
+                        "features": all_features
+                    }
+                    st.session_state.isochrone_data = geojson_data
+                    st.success(f"✅ คำนวณสำเร็จ! ({len(all_features)} พื้นที่)")
+                else:
+                    st.error("❌ ไม่สามารถดึงข้อมูลได้")
                 
             except Exception as e:
                 st.error(f"❌ เกิดข้อผิดพลาด: {e}")
-                st.info("ลองเช็คว่าติดตั้ง library ถูกต้องหรือไม่ (pip install traveltimepy)")
+                import traceback
+                st.code(traceback.format_exc())
 
 # --- 5. ฟังก์ชันเลือกสี ---
 def get_color(seconds):
@@ -133,30 +186,46 @@ def display_map():
                 'fillOpacity': 0.6
             },
             tooltip=folium.GeoJsonTooltip(
-                fields=['travel_time'],
-                aliases=['Time (sec):'],
+                fields=['travel_time_minutes'],
+                aliases=['เวลา (นาที):'],
                 localize=True
             )
         ).add_to(m)
         
-        folium.Marker([current_lat, current_lon], popup="จุดเริ่มต้น", icon=folium.Icon(color="red", icon="home")).add_to(m)
-        st.markdown("**ความหมายสี:** 🟢 <10น. | 🟡 10-20น. | 🟠 20-30น. | 🔴 >30น.")
+        folium.Marker(
+            [current_lat, current_lon], 
+            popup="📍 จุดเริ่มต้น", 
+            icon=folium.Icon(color="red", icon="home", prefix='fa')
+        ).add_to(m)
+        
+        st.markdown("**ความหมายสี:** 🟢 ≤10น. | 🟡 10-20น. | 🟠 20-30น. | 🔴 >30น.")
         
     else:
-        folium.Marker([current_lat, current_lon], popup="Start", icon=folium.Icon(color="blue", icon="info-sign")).add_to(m)
+        folium.Marker(
+            [current_lat, current_lon], 
+            popup="📍 คลิกปุ่มคำนวณพื้นที่", 
+            icon=folium.Icon(color="blue", icon="info-sign")
+        ).add_to(m)
 
     # แสดงผล
     map_output = st_folium(m, width=1200, height=600, key="traveltime_map")
 
     # รับค่าคลิก
-    if map_output['last_clicked']:
+    if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
         
-        if abs(clicked_lat - st.session_state.lat_input) > 0.000001:
+        # เช็คว่าคลิกตำแหน่งใหม่จริงๆ (ไม่ใช่ตำแหน่งเดิม)
+        if abs(clicked_lat - st.session_state.lat_input) > 0.000001 or \
+           abs(clicked_lng - st.session_state.lon_input) > 0.000001:
             st.session_state.temp_lat = clicked_lat
             st.session_state.temp_lon = clicked_lng
             st.rerun()
 
 # รันฟังก์ชัน
 display_map()
+
+# --- 7. ส่วนแสดงข้อมูลเพิ่มเติม ---
+if st.session_state.isochrone_data:
+    with st.expander("📊 ข้อมูล GeoJSON"):
+        st.json(st.session_state.isochrone_data)
