@@ -1,159 +1,125 @@
 import streamlit as st
-import numpy as np
-import pandas as pd
-import pydeck as pdk
+import openrouteservice
+import folium
+from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Rent Gradient Map", layout="wide")
-
-st.title("📍 Rent Gradient Map (Urban Economics Theory)")
-st.markdown(
-    """
-    แผนที่นี้จำลอง **rent gradient** (ค่าเช่าลดลงตามระยะห่างจากศูนย์กลางเมือง - CBD)  
-    ใช้โมเดลเชิงทฤษฎีแบบง่าย ๆ เพื่อเล่นกับไอเดียเชิง Urban Economics
-    """
+# --- 1. การตั้งค่าหน้าเว็บ ---
+st.set_page_config(
+    page_title="Isochrone Map Generator",
+    page_icon="🗺️",
+    layout="wide"
 )
 
-# ---------------- Sidebar Controls ----------------
-st.sidebar.header("🔧 Parameters")
+st.title("🗺️ แผนที่คำนวณระยะการเดินทาง (Isochrone Map)")
+st.markdown("""
+แอปพลิเคชันนี้ช่วยคำนวณพื้นที่ที่คุณสามารถเดินทางไปถึงได้ภายในเวลาที่กำหนด 
+โดยใช้ข้อมูลจาก **OpenRouteService**
+""")
 
-city = st.sidebar.selectbox(
-    "City Center (for visualization)",
-    options=["Bangkok (CBD)", "Custom"],
-    index=0,
-)
-
-if city == "Bangkok (CBD)":
-    center_lat = 13.7563
-    center_lon = 100.5018
-else:
-    center_lat = st.sidebar.number_input("Center Latitude", value=13.7563, format="%.6f")
-    center_lon = st.sidebar.number_input("Center Longitude", value=100.5018, format="%.6f")
-
-max_radius_km = st.sidebar.slider("Max radius from center (km)", 5.0, 50.0, 25.0, 1.0)
-
-model_type = st.sidebar.radio("Rent gradient model", ["Linear", "Exponential"])
-
-base_rent = st.sidebar.number_input("Base rent at CBD (R₀)", value=1000.0, min_value=0.0, step=10.0)
-min_rent = st.sidebar.number_input("Minimum rent floor", value=0.0, min_value=0.0, step=10.0)
-
-if model_type == "Linear":
-    slope = st.sidebar.number_input("Slope per km (β)", value=20.0, min_value=0.0, step=1.0)
-else:
-    decay = st.sidebar.number_input("Decay rate per km (λ)", value=0.10, min_value=0.0, step=0.01, format="%.2f")
-
-n_radial = st.sidebar.slider("Radial steps", 10, 60, 30)
-n_angular = st.sidebar.slider("Angular steps", 16, 72, 36)
-
-# ---------------- Rent Gradient Model ----------------
-def rent_function(distance_km: np.ndarray) -> np.ndarray:
-    if model_type == "Linear":
-        rent = base_rent - slope * distance_km
-    else:
-        rent = base_rent * np.exp(-decay * distance_km)
-    return np.maximum(rent, min_rent)
-
-# ---------------- Generate Grid ----------------
-# Create polar grid (distance, angle) then project to lat/lon (equirectangular approximation)
-r = np.linspace(0, max_radius_km, n_radial)
-theta = np.linspace(0, 2 * np.pi, n_angular, endpoint=False)
-
-R, T = np.meshgrid(r, theta)  # shape (n_angular, n_radial)
-
-# Convert to local x/y in km
-x_km = R * np.cos(T)  # east-west
-y_km = R * np.sin(T)  # north-south
-
-# Convert km offsets to lat/lon (rough approximation, good enough for city scale)
-lat0_rad = np.radians(center_lat)
-lat = center_lat + (y_km / 110.574)  # 1 degree latitude ~ 110.574 km
-lon = center_lon + (x_km / (111.320 * np.cos(lat0_rad)))  # adjust for latitude
-
-distance_km = np.sqrt(x_km**2 + y_km**2)
-rent = rent_function(distance_km)
-
-df = pd.DataFrame(
-    {
-        "lat": lat.ravel(),
-        "lon": lon.ravel(),
-        "distance_km": distance_km.ravel(),
-        "rent": rent.ravel(),
-    }
-)
-
-# Normalize rent for color mapping / weight
-if df["rent"].max() > 0:
-    df["rent_norm"] = df["rent"] / df["rent"].max()
-else:
-    df["rent_norm"] = 0.0
-
-# ---------------- Map (PyDeck) ----------------
-st.subheader("🗺️ Rent Gradient Heatmap")
-
-view_state = pdk.ViewState(
-    latitude=center_lat,
-    longitude=center_lon,
-    zoom=10,
-    pitch=45,
-)
-
-heatmap_layer = pdk.Layer(
-    "HeatmapLayer",
-    data=df,
-    get_position="[lon, lat]",
-    get_weight="rent",
-    radius_pixels=60,
-)
-
-scatter_layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=df,
-    get_position="[lon, lat]",
-    get_fill_color="[255 * rent_norm, 50, 255 * (1-rent_norm)]",
-    get_radius=150,
-    pickable=True,
-)
-
-cbd_layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=pd.DataFrame({"lat": [center_lat], "lon": [center_lon]}),
-    get_position="[lon, lat]",
-    get_fill_color="[0, 0, 0]",
-    get_radius=300,
-)
-
-deck = pdk.Deck(
-    layers=[heatmap_layer, scatter_layer, cbd_layer],
-    initial_view_state=view_state,
-    tooltip={
-        "html": "<b>Rent</b>: {rent} <br/> <b>Distance</b>: {distance_km} km",
-        "style": {"color": "white"},
-    },
-)
-
-st.pydeck_chart(deck)
-
-# ---------------- Rent vs Distance Chart ----------------
-st.subheader("📉 Rent vs Distance (theoretical gradient)")
-
-max_r_for_chart = max_radius_km
-r_line = np.linspace(0, max_r_for_chart, 200)
-rent_line = rent_function(r_line)
-chart_df = pd.DataFrame({"distance_km": r_line, "rent": rent_line})
-
-st.line_chart(chart_df.set_index("distance_km"))
-
-# ---------------- Text Explanation ----------------
-with st.expander("อธิบายทฤษฎีแบบสั้น ๆ"):
-    st.markdown(
-        """
-        **Rent Gradient Theory (Bid-Rent Function)**  
-        - ในโมเดลเมืองศูนย์กลางเดียว (monocentric city model) สมมติว่าทุกคนต้องเดินทางเข้า CBD  
-        - ค่าใช้จ่ายในการเดินทางยิ่งไกลยิ่งแพง → คนยอมจ่ายค่าเช่าน้อยลงเมื่ออยู่ไกล CBD  
-        - เลยได้ฟังก์ชันค่าเช่าแบบลดลงตามระยะทาง เช่น  
-            - Linear: `R(d) = R₀ − β d`  
-            - Exponential: `R(d) = R₀ · exp(−λ d)`  
-        
-        App นี้ไม่ได้ใช้ข้อมูลจริง แต่เป็น **sandbox** ให้ลองเล่นกับไอเดียว่า
-        ถ้าเราเปลี่ยน `R₀`, `β` หรือ `λ` แล้วรูปของ rent gradient และ pattern บนแผนที่จะเปลี่ยนไปยังไง
-        """
+# --- 2. Sidebar สำหรับตั้งค่าตัวแปร ---
+with st.sidebar:
+    st.header("⚙️ การตั้งค่า")
+    
+    # ใส่ Default Key ที่คุณให้มา (ถ้าต้องการเปลี่ยน สามารถลบและพิมพ์ใหม่ในหน้าเว็บได้)
+    default_key = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjA0ZWVmNTA0Y2Y4YzQ3ZDZhZTYzNTFjNDEyZWY3OTRiIiwiaCI6Im11cm11cjY0In0="
+    
+    api_key = st.text_input(
+        "OpenRouteService API Key", 
+        value=default_key, # <--- ใส่ค่าเริ่มต้นตรงนี้
+        type="password", 
+        help="สมัครฟรีที่ openrouteservice.org"
     )
+    
+    st.markdown("---")
+    
+    # เลือกรูปแบบการเดินทาง
+    travel_mode = st.selectbox(
+        "รูปแบบการเดินทาง",
+        options=["driving-car", "foot-walking", "cycling-regular"],
+        index=0,
+        format_func=lambda x: "🚗 ขับรถ" if x == "driving-car" else ("🚶 เดินเท้า" if x == "foot-walking" else "🚲 ปั่นจักรยาน")
+    )
+    
+    # เลือกเวลา (นาที)
+    time_minutes = st.slider("เวลาเดินทาง (นาที)", min_value=1, max_value=60, value=15)
+    
+    # ปุ่มกดเพื่อคำนวณ
+    submit_button = st.button("🚀 สร้างแผนที่", use_container_width=True)
+
+# --- 3. ส่วนกำหนดพิกัด (Layout แบบ 2 คอลัมน์) ---
+col1, col2 = st.columns(2)
+with col1:
+    # ตั้งค่าเริ่มต้นเป็น อนุสาวรีย์ชัยสมรภูมิ
+    lat_input = st.number_input("ละติจูด (Latitude)", value=13.7649, format="%.6f")
+with col2:
+    lon_input = st.number_input("ลองจิจูด (Longitude)", value=100.5382, format="%.6f")
+
+# --- 4. ฟังก์ชันหลักในการทำงาน ---
+def generate_map():
+    if not api_key:
+        st.warning("⚠️ กรุณาใส่ API Key ก่อนเริ่มใช้งาน")
+        return
+
+    # แสดงสถานะกำลังทำงาน
+    with st.spinner('กำลังเชื่อมต่อดาวเทียมและคำนวณเส้นทาง... โปรดรอสักครู่'):
+        try:
+            client = openrouteservice.Client(key=api_key)
+            
+            # แปลงเวลาเป็นวินาที
+            range_seconds = time_minutes * 60
+            
+            # พิกัดสำหรับ ORS ต้องเป็น [Lon, Lat]
+            center_point_ors = [lon_input, lat_input]
+            
+            # ขอข้อมูล Isochrone
+            isochrone = client.isochrones(
+                locations=[center_point_ors],
+                profile=travel_mode,
+                range=[range_seconds]
+            )
+            
+            # สร้างแผนที่ Folium (พิกัดต้องเป็น [Lat, Lon])
+            m = folium.Map(location=[lat_input, lon_input], zoom_start=13, tiles="CartoDB positron")
+            
+            # วาดพื้นที่ (Polygon)
+            folium.GeoJson(
+                isochrone,
+                name='Available Area',
+                style_function=lambda x: {
+                    'fillColor': '#00C896', # สีเขียวมินต์
+                    'color': '#008F6B',     # สีขอบ
+                    'weight': 2,
+                    'fillOpacity': 0.4
+                }
+            ).add_to(m)
+            
+            # ปักหมุดจุดเริ่มต้น
+            folium.Marker(
+                [lat_input, lon_input],
+                popup="จุดเริ่มต้น",
+                tooltip="Start Here",
+                icon=folium.Icon(color="red", icon="home")
+            ).add_to(m)
+
+            # --- 5. แสดงผลแผนที่ ---
+            st.success(f"✅ คำนวณเสร็จสิ้น! พื้นที่ที่เดินทางได้ใน {time_minutes} นาที ({travel_mode})")
+            st_folium(m, width=1200, height=600)
+
+            # แสดงข้อมูล JSON ดิบ (เผื่ออยากดูโครงสร้างข้อมูล)
+            with st.expander("🛠️ ดูข้อมูล JSON ดิบ"):
+                st.json(isochrone)
+
+        except openrouteservice.exceptions.ApiError as api_err:
+             st.error(f"❌ API Key ผิดพลาด หรือโควต้าเต็ม: {api_err}")
+             st.warning("ลองเช็ค API Key ที่ dashboard.openrouteservice.org อีกครั้ง")
+        except Exception as e:
+            st.error(f"❌ เกิดข้อผิดพลาด: {e}")
+
+# --- เรียกใช้งานเมื่อกดปุ่ม ---
+if submit_button:
+    generate_map()
+else:
+    # แสดงแผนที่ว่างๆ เริ่มต้น
+    m_start = folium.Map(location=[lat_input, lon_input], zoom_start=13, tiles="CartoDB positron")
+    folium.Marker([lat_input, lon_input], icon=folium.Icon(color="gray", icon="info-sign")).add_to(m_start)
+    st_folium(m_start, width=1200, height=500)
