@@ -10,24 +10,28 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- พิกัดเริ่มต้น (เชียงของ, เชียงราย) ---
+# --- พิกัดเริ่มต้น ---
 DEFAULT_LAT = 20.219443
 DEFAULT_LON = 100.403630
 
-# --- เตรียมตัวแปรจำค่า (Session State) ---
+# --- เตรียมตัวแปร Session State ---
 if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None
-# ใช้ตัวแปรนี้สำหรับกำหนดจุดศูนย์กลางแผนที่
-if 'map_center' not in st.session_state:
-    st.session_state.map_center = [DEFAULT_LAT, DEFAULT_LON]
+
+# 🟢 ส่วนสำคัญ 1: เช็คว่ามีการคลิกจากรอบที่แล้วหรือไม่ (ต้องทำก่อนวาด Input Box)
+if 'temp_lat' in st.session_state and 'temp_lon' in st.session_state:
+    # อัปเดตค่าลงใน key ของ widget โดยตรง "ก่อน" ที่ widget จะถูกสร้าง
+    st.session_state.lat_input = st.session_state.temp_lat
+    st.session_state.lon_input = st.session_state.temp_lon
+    # ลบค่าทิ้ง เพื่อไม่ให้มันอัปเดตซ้ำซ้อน
+    del st.session_state.temp_lat
+    del st.session_state.temp_lon
 
 st.title("🗺️ แผนที่คำนวณระยะการเดินทาง (Isochrone Map)")
-st.caption("ℹ️ Tip: คุณสามารถ **คลิกที่แผนที่** เพื่อเปลี่ยนจุดเริ่มต้นได้เลย")
 
 # --- 2. Sidebar ---
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
-    
     default_key = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjA0ZWVmNTA0Y2Y4YzQ3ZDZhZTYzNTFjNDEyZWY3OTRiIiwiaCI6Im11cm11cjY0In0="
     api_key = st.text_input("API Key", value=default_key, type="password")
     
@@ -49,19 +53,20 @@ with st.sidebar:
     
     submit_button = st.button("🚀 คำนวณพื้นที่", use_container_width=True)
 
-# --- 3. ส่วนกำหนดพิกัด (เชื่อมกับ Session State) ---
+# --- 3. ส่วนกำหนดพิกัด ---
 col1, col2 = st.columns(2)
 
-# ฟังก์ชัน Callback (ไม่จำเป็นต้องใช้ในกรณีนี้ แต่เขียนไว้เผื่อ)
-def on_input_change():
-    # เมื่อแก้ตัวเลข อัปเดต map_center ด้วย
-    st.session_state.map_center = [st.session_state.lat_input, st.session_state.lon_input]
+# กำหนดค่าเริ่มต้นให้กับ key ถ้ายังไม่มี (เพื่อป้องกัน error ในครั้งแรกสุด)
+if "lat_input" not in st.session_state:
+    st.session_state.lat_input = DEFAULT_LAT
+if "lon_input" not in st.session_state:
+    st.session_state.lon_input = DEFAULT_LON
 
 with col1:
-    # key="lat_input" ทำให้เราสามารถแก้ค่านี้จากโค้ดได้
-    st.number_input("ละติจูด (Latitude)", value=DEFAULT_LAT, format="%.6f", key="lat_input", on_change=on_input_change)
+    # 🟢 ลบ on_change ออก เพื่อลดความซับซ้อน (Streamlit จะจัดการ key ให้อัตโนมัติ)
+    st.number_input("ละติจูด (Latitude)", format="%.6f", key="lat_input")
 with col2:
-    st.number_input("ลองจิจูด (Longitude)", value=DEFAULT_LON, format="%.6f", key="lon_input", on_change=on_input_change)
+    st.number_input("ลองจิจูด (Longitude)", format="%.6f", key="lon_input")
 
 # --- 4. Logic เรียก API ---
 if submit_button:
@@ -71,7 +76,7 @@ if submit_button:
         with st.spinner('กำลังคำนวณ...'):
             try:
                 client = openrouteservice.Client(key=api_key)
-                # ดึงค่าจาก input ที่อาจเปลี่ยนไปแล้ว
+                # ดึงค่าจาก st.session_state โดยตรง
                 current_lat = st.session_state.lat_input
                 current_lon = st.session_state.lon_input
                 
@@ -84,22 +89,18 @@ if submit_button:
                 )
                 
                 st.session_state.isochrone_data = isochrone
-                # อัปเดตจุดศูนย์กลางแผนที่ให้ไปโฟกัสจุดที่คำนวณ
-                st.session_state.map_center = [current_lat, current_lon]
                 
             except Exception as e:
                 st.error(f"❌ เกิดข้อผิดพลาด: {e}")
 
-# --- 5. ฟังก์ชันวาดและรับค่าคลิก ---
+# --- 5. ฟังก์ชันวาดแผนที่ ---
 def display_map():
-    # ใช้พิกัดปัจจุบันจาก Input Box
+    # ดึงค่าปัจจุบัน
     current_lat = st.session_state.lat_input
     current_lon = st.session_state.lon_input
     
-    # สร้างแผนที่
     m = folium.Map(location=[current_lat, current_lon], zoom_start=13, tiles=map_style)
     
-    # ถ้ามีข้อมูล Isochrone ให้วาด
     if st.session_state.isochrone_data:
         area_color = '#00C896' if map_style != "CartoDB dark_matter" else '#FFD700'
         folium.GeoJson(
@@ -107,26 +108,29 @@ def display_map():
             name='Available Area',
             style_function=lambda x: {'fillColor': area_color, 'color': area_color, 'weight': 2, 'fillOpacity': 0.4}
         ).add_to(m)
-        
-        # ปักหมุดจุดที่คำนวณไว้ล่าสุด
         folium.Marker([current_lat, current_lon], popup="จุดที่คำนวณ", icon=folium.Icon(color="red", icon="home")).add_to(m)
     else:
-        # ปักหมุดตำแหน่งปัจจุบัน
         folium.Marker([current_lat, current_lon], popup="จุดปัจจุบัน", icon=folium.Icon(color="blue", icon="info-sign")).add_to(m)
 
-    # 🟢 แสดงแผนที่และรับค่าการคลิก (Click Event)
+    # แสดงแผนที่
     map_output = st_folium(m, width=1200, height=600, key="main_map")
 
-    # --- 🟢 Logic การคลิกเปลี่ยนพิกัด ---
+    # 🟢 ส่วนสำคัญ 2: Logic รับค่าคลิกที่แก้ไขแล้ว
     if map_output['last_clicked']:
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
         
-        # เช็คว่าพิกัดเปลี่ยนไปจากเดิมไหม (เพื่อป้องกันการรีรันซ้ำซ้อน)
-        if clicked_lat != st.session_state.lat_input or clicked_lng != st.session_state.lon_input:
-            st.session_state.lat_input = clicked_lat
-            st.session_state.lon_input = clicked_lng
-            st.rerun() # รีโหลดหน้าเว็บเพื่ออัปเดตตัวเลขในช่อง
+        # เช็คว่าค่าเปลี่ยนไปจริงไหม (ป้องกัน loop)
+        # หมายเหตุ: เปรียบเทียบกับ session state ปัจจุบัน
+        if abs(clicked_lat - st.session_state.lat_input) > 0.000001 or abs(clicked_lng - st.session_state.lon_input) > 0.000001:
+            
+            # ❌ อย่าแก้ st.session_state.lat_input ตรงนี้ (จะ error)
+            # ✅ ให้ฝากค่าไว้ในตัวแปรชั่วคราวแทน
+            st.session_state.temp_lat = clicked_lat
+            st.session_state.temp_lon = clicked_lng
+            
+            # สั่งรันใหม่ -> เพื่อให้โค้ดส่วนบนสุด (ส่วนสำคัญ 1) ทำงาน
+            st.rerun()
 
 # เรียกใช้งาน
 display_map()
