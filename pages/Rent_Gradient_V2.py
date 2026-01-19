@@ -5,7 +5,7 @@ from datetime import datetime
 
 # พยายาม Import Library (พร้อมดัก Error แจ้งเตือน)
 try:
-    from traveltimepy import TravelTimeSdk
+    from traveltimepy
 except ImportError:
     st.error("❌ ไม่พบ Library 'traveltimepy' กรุณาพิมพ์คำสั่งนี้ใน Terminal: pip install traveltimepy")
     st.stop()
@@ -46,6 +46,8 @@ with st.sidebar:
     
     app_id = st.text_input("App ID", value=default_app_id, type="password")
     api_key = st.text_input("API Key", value=default_api_key, type="password")
+
+    
     
     st.markdown("---")
     
@@ -96,7 +98,7 @@ if submit_button:
         with st.spinner('กำลังเชื่อมต่อระบบ TravelTime...'):
             try:
                 # เริ่มต้น SDK
-                sdk = TravelTimeSdk(app_id=app_id, api_key=api_key)
+                sdk = traveltimepy.TravelTimeSdk(app_id=app_id, api_key=api_key)
                 
                 # เตรียมข้อมูลเวลา
                 sorted_times = sorted(time_intervals)
