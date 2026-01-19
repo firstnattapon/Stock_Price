@@ -84,7 +84,7 @@ with st.sidebar:
     tile_attr = "Esri" if "Satellite" in map_style_name else None
 
     travel_mode = st.selectbox("การเดินทาง", ["public_transport", "driving", "walking", "cycling"])
-    time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 30, 45, 60], default=[5)
+    time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 30, 45, 60], default=[5])
     
     # ตั้งค่าสีพื้นที่
     with st.expander("🎨 ตั้งค่าสีพื้นที่ (Fill Colors)"):
