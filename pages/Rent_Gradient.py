@@ -10,6 +10,10 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- 🟢 ส่วนที่เพิ่ม: ตั้งค่าตัวแปรจำค่า (Session State) ---
+if 'map_generated' not in st.session_state:
+    st.session_state.map_generated = False
+
 st.title("🗺️ แผนที่คำนวณระยะการเดินทาง (Isochrone Map)")
 st.markdown("""
 แอปพลิเคชันนี้ช่วยคำนวณพื้นที่ที่คุณสามารถเดินทางไปถึงได้ภายในเวลาที่กำหนด 
@@ -20,19 +24,17 @@ st.markdown("""
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
     
-    # ใส่ Default Key ที่คุณให้มา (ถ้าต้องการเปลี่ยน สามารถลบและพิมพ์ใหม่ในหน้าเว็บได้)
     default_key = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjA0ZWVmNTA0Y2Y4YzQ3ZDZhZTYzNTFjNDEyZWY3OTRiIiwiaCI6Im11cm11cjY0In0="
     
     api_key = st.text_input(
         "OpenRouteService API Key", 
-        value=default_key, # <--- ใส่ค่าเริ่มต้นตรงนี้
+        value=default_key,
         type="password", 
         help="สมัครฟรีที่ openrouteservice.org"
     )
     
     st.markdown("---")
     
-    # เลือกรูปแบบการเดินทาง
     travel_mode = st.selectbox(
         "รูปแบบการเดินทาง",
         options=["driving-car", "foot-walking", "cycling-regular"],
@@ -40,16 +42,15 @@ with st.sidebar:
         format_func=lambda x: "🚗 ขับรถ" if x == "driving-car" else ("🚶 เดินเท้า" if x == "foot-walking" else "🚲 ปั่นจักรยาน")
     )
     
-    # เลือกเวลา (นาที)
     time_minutes = st.slider("เวลาเดินทาง (นาที)", min_value=1, max_value=60, value=15)
     
-    # ปุ่มกดเพื่อคำนวณ
-    submit_button = st.button("🚀 สร้างแผนที่", use_container_width=True)
+    # 🟢 แก้ไขปุ่ม: เมื่อกดปุ่ม ให้ไปจำค่าใน session_state ว่า True
+    if st.button("🚀 สร้างแผนที่", use_container_width=True):
+        st.session_state.map_generated = True
 
-# --- 3. ส่วนกำหนดพิกัด (Layout แบบ 2 คอลัมน์) ---
+# --- 3. ส่วนกำหนดพิกัด ---
 col1, col2 = st.columns(2)
 with col1:
-    # ตั้งค่าเริ่มต้นเป็น อนุสาวรีย์ชัยสมรภูมิ
     lat_input = st.number_input("ละติจูด (Latitude)", value=13.7649, format="%.6f")
 with col2:
     lon_input = st.number_input("ลองจิจูด (Longitude)", value=100.5382, format="%.6f")
@@ -60,40 +61,32 @@ def generate_map():
         st.warning("⚠️ กรุณาใส่ API Key ก่อนเริ่มใช้งาน")
         return
 
-    # แสดงสถานะกำลังทำงาน
+    # แสดงสถานะกำลังทำงาน (ย้าย spinner มาไว้ข้างนอก try เพื่อให้ครอบคลุม)
     with st.spinner('กำลังเชื่อมต่อดาวเทียมและคำนวณเส้นทาง... โปรดรอสักครู่'):
         try:
             client = openrouteservice.Client(key=api_key)
-            
-            # แปลงเวลาเป็นวินาที
             range_seconds = time_minutes * 60
-            
-            # พิกัดสำหรับ ORS ต้องเป็น [Lon, Lat]
             center_point_ors = [lon_input, lat_input]
             
-            # ขอข้อมูล Isochrone
             isochrone = client.isochrones(
                 locations=[center_point_ors],
                 profile=travel_mode,
                 range=[range_seconds]
             )
             
-            # สร้างแผนที่ Folium (พิกัดต้องเป็น [Lat, Lon])
             m = folium.Map(location=[lat_input, lon_input], zoom_start=13, tiles="CartoDB positron")
             
-            # วาดพื้นที่ (Polygon)
             folium.GeoJson(
                 isochrone,
                 name='Available Area',
                 style_function=lambda x: {
-                    'fillColor': '#00C896', # สีเขียวมินต์
-                    'color': '#008F6B',     # สีขอบ
+                    'fillColor': '#00C896',
+                    'color': '#008F6B',
                     'weight': 2,
                     'fillOpacity': 0.4
                 }
             ).add_to(m)
             
-            # ปักหมุดจุดเริ่มต้น
             folium.Marker(
                 [lat_input, lon_input],
                 popup="จุดเริ่มต้น",
@@ -101,25 +94,26 @@ def generate_map():
                 icon=folium.Icon(color="red", icon="home")
             ).add_to(m)
 
-            # --- 5. แสดงผลแผนที่ ---
             st.success(f"✅ คำนวณเสร็จสิ้น! พื้นที่ที่เดินทางได้ใน {time_minutes} นาที ({travel_mode})")
-            st_folium(m, width=1200, height=600)
+            
+            # 🟢 ปรับตรงนี้: กำหนด key ให้ st_folium เพื่อป้องกันการรีโหลดซ้ำซ้อน
+            st_folium(m, width=1200, height=600, key="isochrone_map")
 
-            # แสดงข้อมูล JSON ดิบ (เผื่ออยากดูโครงสร้างข้อมูล)
             with st.expander("🛠️ ดูข้อมูล JSON ดิบ"):
                 st.json(isochrone)
 
         except openrouteservice.exceptions.ApiError as api_err:
              st.error(f"❌ API Key ผิดพลาด หรือโควต้าเต็ม: {api_err}")
-             st.warning("ลองเช็ค API Key ที่ dashboard.openrouteservice.org อีกครั้ง")
         except Exception as e:
             st.error(f"❌ เกิดข้อผิดพลาด: {e}")
 
-# --- เรียกใช้งานเมื่อกดปุ่ม ---
-if submit_button:
+# --- 🟢 ส่วนควบคุมการแสดงผล (Logic ใหม่) ---
+
+# ถ้า session_state บอกว่าเคยกดสร้างแล้ว -> ให้รันฟังก์ชันสร้างแผนที่
+if st.session_state.map_generated:
     generate_map()
+# ถ้ายังไม่เคย -> โชว์แผนที่เปล่า
 else:
-    # แสดงแผนที่ว่างๆ เริ่มต้น
     m_start = folium.Map(location=[lat_input, lon_input], zoom_start=13, tiles="CartoDB positron")
     folium.Marker([lat_input, lon_input], icon=folium.Icon(color="gray", icon="info-sign")).add_to(m_start)
-    st_folium(m_start, width=1200, height=500)
+    st_folium(m_start, width=1200, height=500, key="start_map")
