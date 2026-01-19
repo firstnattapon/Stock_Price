@@ -6,8 +6,8 @@ import requests
 
 # --- 1. การตั้งค่าหน้าเว็บ ---
 st.set_page_config(
-    page_title="Custom Color Isochrone",
-    page_icon="🎨",
+    page_title="Multi-Color Markers",
+    page_icon="📍",
     layout="wide"
 )
 
@@ -18,24 +18,29 @@ if 'markers' not in st.session_state:
 if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None
 
-# 🟢 เตรียมตัวแปรเก็บสี (ค่าเริ่มต้น)
+# 🟢 เตรียมสีสำหรับ Gradient (พื้นที่)
 if 'colors' not in st.session_state:
     st.session_state.colors = {
-        'step1': '#2A9D8F', # เขียว (ใกล้สุด)
+        'step1': '#2A9D8F', # เขียว
         'step2': '#E9C46A', # เหลือง
         'step3': '#F4A261', # ส้ม
-        'step4': '#D62828'  # แดง (ไกลสุด)
+        'step4': '#D62828'  # แดง
     }
+
+# 🟢 เตรียมชุดสีสำหรับหมุด (Markers)
+# Folium รองรับสีเหล่านี้: 'red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 'beige', 'darkblue', 'darkgreen', 'cadetblue', 'darkpurple', 'white', 'pink', 'lightblue', 'lightgreen', 'gray', 'black', 'lightgray'
+MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
+HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978'] # คู่สี Hex สำหรับเส้นขอบ
 
 DEFAULT_LAT = 13.746385
 DEFAULT_LON = 100.534966
 
-st.title("🎨 แผนที่คำนวณพื้นที่ (ปรับสีได้)")
-st.caption("ℹ️ คลิกที่แผนที่เพื่อเพิ่มจุด -> ตั้งค่า -> กดคำนวณ")
+st.title("📍 แผนที่หลายจุด หลายสี (Multi-Color Points)")
+st.caption("ℹ️ คลิกเพิ่มจุดได้เลย ระบบจะเปลี่ยนสีหมุดให้อัตโนมัติ (แดง -> น้ำเงิน -> เขียว...)")
 
 # --- 2. Sidebar ---
 with st.sidebar:
-    st.header("⚙️ ตั้งค่า API & ข้อมูล")
+    st.header("⚙️ ตั้งค่า")
     # Key
     default_app_id = "9aef939d"
     default_api_key = "0f7019f3ef3242dbd3cc6bf776e2ebb6"
@@ -56,11 +61,20 @@ with st.sidebar:
             st.session_state.markers = []
             st.session_state.isochrone_data = None
             st.rerun()
-    st.write(f"📍 จุดปัจจุบัน: **{len(st.session_state.markers)}** จุด")
+    
+    # แสดงรายการจุดพร้อมสี
+    st.write(f"📍 จำนวนจุด: **{len(st.session_state.markers)}**")
+    if st.session_state.markers:
+        st.markdown("---")
+        st.write("📋 **รายการจุด:**")
+        for i, m in enumerate(st.session_state.markers):
+            color_name = MARKER_COLORS[i % len(MARKER_COLORS)] # วนลูปสี
+            # แสดงชื่อสีคู่กับพิกัด
+            st.markdown(f"<span style='color:{color_name};'>●</span> จุดที่ {i+1} ({color_name})", unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ตั้งค่าแผนที่ & เวลา
+    # ตั้งค่าแผนที่
     map_style_name = st.selectbox("สไตล์พื้นหลัง", ["Light", "Dark", "Street", "Satellite"])
     map_tiles_dict = {
         "Light": "CartoDB positron", "Dark": "CartoDB dark_matter",
@@ -70,25 +84,19 @@ with st.sidebar:
     tile_attr = "Esri" if "Satellite" in map_style_name else None
 
     travel_mode = st.selectbox("การเดินทาง", ["public_transport", "driving", "walking", "cycling"])
-    
     time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 30, 45, 60], default=[15, 30])
     
-    # 🟢 🟢 ส่วนตั้งค่าสี (เพิ่มใหม่ตรงนี้) 🟢 🟢
-    st.markdown("---")
-    with st.expander("🎨 ตั้งค่าสีพื้นที่ (Color Settings)", expanded=True):
-        st.write("เลือกสีตามช่วงเวลา:")
-        # ใช้ st.color_picker และอัปเดตค่าลง Session State ทันที
+    # ตั้งค่าสีพื้นที่
+    with st.expander("🎨 ตั้งค่าสีพื้นที่ (Fill Colors)"):
         st.session_state.colors['step1'] = st.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
         st.session_state.colors['step2'] = st.color_picker("11 - 20 นาที", st.session_state.colors['step2'])
         st.session_state.colors['step3'] = st.color_picker("21 - 30 นาที", st.session_state.colors['step3'])
         st.session_state.colors['step4'] = st.color_picker("> 30 นาที", st.session_state.colors['step4'])
-        
-        st.markdown("💡 *Tip: เลือกสีอ่อนๆ หรือปรับ Opacity ในแผนที่เพื่อให้เห็นการซ้อนทับชัดเจน*")
 
     st.markdown("---")
     submit_button = st.button("🚀 คำนวณทุกจุด", type="primary", use_container_width=True)
 
-# --- 4. Logic เรียก API (Multi-Point) ---
+# --- 4. Logic เรียก API ---
 if submit_button:
     if not api_key or not app_id:
         st.warning("⚠️ กรุณาใส่ API Key")
@@ -101,10 +109,12 @@ if submit_button:
             try:
                 departure_searches = []
                 sorted_times = sorted(time_intervals)
+                
+                # Loop สร้าง Search โดยผูก ID กับ index ของหมุด (i)
                 for i, marker in enumerate(st.session_state.markers):
                     for time_min in sorted_times:
                         departure_searches.append({
-                            "id": f"search_{i}_{time_min}",
+                            "id": f"search_{i}_{time_min}", # ID เก็บ index ของหมุดไว้ด้วย
                             "coords": {"lat": marker['lat'], "lng": marker['lng']},
                             "transportation": {"type": travel_mode},
                             "departure_time": datetime.now().isoformat(),
@@ -121,14 +131,21 @@ if submit_button:
                     result = response.json()
                     all_features = []
                     for search in result.get("results", []):
-                        time_val = int(search['search_id'].split('_')[-1]) 
+                        # แกะ ID: search_{marker_index}_{time_minute}
+                        parts = search['search_id'].split('_')
+                        marker_idx = int(parts[1])
+                        time_val = int(parts[2])
+                        
                         for shape in search.get("shapes", []):
                             coords = [[pt["lng"], pt["lat"]] for pt in shape["shell"]]
                             holes = [[[pt["lng"], pt["lat"]] for pt in hole] for hole in shape.get("holes", [])]
                             all_features.append({
                                 "type": "Feature",
                                 "geometry": {"type": "Polygon", "coordinates": [coords] + holes},
-                                "properties": {"travel_time_minutes": time_val}
+                                "properties": {
+                                    "travel_time_minutes": time_val,
+                                    "marker_index": marker_idx # เก็บไว้ใช้เลือกสีขอบ
+                                }
                             })
                     st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
                     st.success(f"✅ คำนวณสำเร็จ!")
@@ -137,13 +154,17 @@ if submit_button:
             except Exception as e:
                 st.error(f"❌ Error: {e}")
 
-# --- 5. ฟังก์ชันเลือกสี (อัปเดตให้ใช้สีจาก Session State) ---
-def get_color(minutes):
-    c = st.session_state.colors # ดึงสีปัจจุบันมาใช้
+# --- 5. ฟังก์ชันเลือกสี ---
+def get_fill_color(minutes):
+    c = st.session_state.colors
     if minutes <= 10: return c['step1']
     elif minutes <= 20: return c['step2']
     elif minutes <= 30: return c['step3']
     else: return c['step4']
+
+def get_border_color(marker_idx):
+    # เลือกสีขอบตามลำดับหมุด
+    return HEX_COLORS[marker_idx % len(HEX_COLORS)]
 
 # --- 6. แสดงแผนที่ ---
 def display_map():
@@ -155,58 +176,45 @@ def display_map():
 
     m = folium.Map(location=center, zoom_start=12, tiles=selected_tiles, attr=tile_attr)
 
-    # วาด Isochrones
+    # 1. วาด Isochrones
     if st.session_state.isochrone_data:
         folium.GeoJson(
             st.session_state.isochrone_data,
             name='TravelTime Area',
             style_function=lambda feature: {
-                'fillColor': get_color(feature['properties']['travel_time_minutes']), # ใช้ฟังก์ชันใหม่
-                'color': 'white',
-                'weight': 1,
-                'fillOpacity': 0.5 # ความโปร่งแสง (สำคัญมากสำหรับการซ้อนทับ)
+                'fillColor': get_fill_color(feature['properties']['travel_time_minutes']),
+                'color': get_border_color(feature['properties']['marker_index']), # 🟢 สีขอบตามสีหมุด
+                'weight': 2,
+                'fillOpacity': 0.4
             },
             tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['นาที:'])
         ).add_to(m)
 
-    # วาดหมุด
+    # 2. วาดหมุด (Markers) พร้อมสีที่เปลี่ยนไปเรื่อยๆ
     for i, marker in enumerate(st.session_state.markers):
+        # เลือกสีจาก list ตามลำดับ
+        color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
+        
         folium.Marker(
             [marker['lat'], marker['lng']],
-            popup=f"จุดที่ {i+1}",
-            icon=folium.Icon(color="red", icon="map-marker", prefix='fa')
+            popup=f"จุดที่ {i+1} ({color_name})",
+            # 🟢 ใช้สีที่เลือกไว้
+            icon=folium.Icon(color=color_name, icon="map-marker", prefix='fa')
         ).add_to(m)
 
-    # 🟢 แสดง Legend แบบ Dynamic ตามสีที่เลือก
-    if st.session_state.isochrone_data:
-        c = st.session_state.colors
-        # สร้าง HTML เล็กๆ เพื่อโชว์กล่องสี
-        legend_html = f"""
-        <div style="
-            position: fixed; 
-            bottom: 50px; left: 50px; width: 200px; height: 130px; 
-            background-color: white; z-index:9999; font-size:14px;
-            padding: 10px; border: 2px solid grey; border-radius: 5px;
-            opacity: 0.9;">
-            <b>คำอธิบายสี (Legend)</b><br>
-            <i style="background:{c['step1']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> ≤ 10 นาที<br>
-            <i style="background:{c['step2']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> 11 - 20 นาที<br>
-            <i style="background:{c['step3']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> 21 - 30 นาที<br>
-            <i style="background:{c['step4']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> > 30 นาที
-        </div>
-        """
-        m.get_root().html.add_child(folium.Element(legend_html))
-
     # แสดงแผนที่ & รับคลิก
-    map_output = st_folium(m, width=1200, height=600, key="multi_color_map")
+    map_output = st_folium(m, width=1200, height=600, key="multi_color_markers_map")
+    
     if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
+        
         is_new = True
         if st.session_state.markers:
             last_mk = st.session_state.markers[-1]
             if abs(clicked_lat - last_mk['lat']) < 0.00001 and abs(clicked_lng - last_mk['lng']) < 0.00001:
                 is_new = False
+        
         if is_new:
             st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
             st.rerun()
