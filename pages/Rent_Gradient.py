@@ -40,7 +40,7 @@ with st.sidebar:
         format_func=lambda x: "🚗 ขับรถ" if x == "driving-car" else ("🚶 เดินเท้า" if x == "foot-walking" else "🚲 ปั่นจักรยาน")
     )
     
-    time_minutes = st.slider("เวลาเดินทาง (นาที)", min_value=1, max_value=60, value=15)
+    time_minutes = st.slider("เวลาเดินทาง (นาที)", min_value=1, max_value=60, value=5)
     
     # ปุ่มกด
     submit_button = st.button("🚀 สร้างแผนที่", use_container_width=True)
