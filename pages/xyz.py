@@ -6,30 +6,36 @@ import requests
 
 # --- 1. การตั้งค่าหน้าเว็บ ---
 st.set_page_config(
-    page_title="Multi-Point Isochrone",
-    page_icon="📍",
+    page_title="Custom Color Isochrone",
+    page_icon="🎨",
     layout="wide"
 )
 
-# --- เตรียม Session State สำหรับเก็บหลายจุด ---
+# --- เตรียม Session State ---
 if 'markers' not in st.session_state:
-    # เก็บ list ของ dictionary: [{'lat': 13.x, 'lng': 100.x}, ...]
     st.session_state.markers = [] 
 
 if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None
 
-# ค่าเริ่มต้น (ถ้ายังไม่มีหมุดเลย ให้เริ่มแถวสยาม)
+# 🟢 เตรียมตัวแปรเก็บสี (ค่าเริ่มต้น)
+if 'colors' not in st.session_state:
+    st.session_state.colors = {
+        'step1': '#2A9D8F', # เขียว (ใกล้สุด)
+        'step2': '#E9C46A', # เหลือง
+        'step3': '#F4A261', # ส้ม
+        'step4': '#D62828'  # แดง (ไกลสุด)
+    }
+
 DEFAULT_LAT = 13.746385
 DEFAULT_LON = 100.534966
 
-st.title("📍 แผนที่คำนวณพื้นที่จากหลายจุด (Multi-Point)")
-st.caption("ℹ️ วิธีใช้: **คลิกที่แผนที่** เพื่อเพิ่มหมุดใหม่ (เพิ่มได้หลายจุด) -> แล้วกด **คำนวณ**")
+st.title("🎨 แผนที่คำนวณพื้นที่ (ปรับสีได้)")
+st.caption("ℹ️ คลิกที่แผนที่เพื่อเพิ่มจุด -> ตั้งค่า -> กดคำนวณ")
 
 # --- 2. Sidebar ---
 with st.sidebar:
-    st.header("⚙️ การตั้งค่า")
-    
+    st.header("⚙️ ตั้งค่า API & ข้อมูล")
     # Key
     default_app_id = "9aef939d"
     default_api_key = "0f7019f3ef3242dbd3cc6bf776e2ebb6"
@@ -39,7 +45,6 @@ with st.sidebar:
     st.markdown("---")
     
     # จัดการหมุด
-    st.write(f"📍 จำนวนหมุดปัจจุบัน: **{len(st.session_state.markers)}** จุด")
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
@@ -51,136 +56,97 @@ with st.sidebar:
             st.session_state.markers = []
             st.session_state.isochrone_data = None
             st.rerun()
+    st.write(f"📍 จุดปัจจุบัน: **{len(st.session_state.markers)}** จุด")
 
     st.markdown("---")
 
-    # ตั้งค่าแผนที่
-    map_style_name = st.selectbox(
-        "🎨 สไตล์แผนที่",
-        options=["Light", "Dark", "Street", "Satellite"],
-        index=0
-    )
-    
+    # ตั้งค่าแผนที่ & เวลา
+    map_style_name = st.selectbox("สไตล์พื้นหลัง", ["Light", "Dark", "Street", "Satellite"])
     map_tiles_dict = {
-        "Light": "CartoDB positron",
-        "Dark": "CartoDB dark_matter",
-        "Street": "OpenStreetMap",
-        "Satellite": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        "Light": "CartoDB positron", "Dark": "CartoDB dark_matter",
+        "Street": "OpenStreetMap", "Satellite": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
     }
     selected_tiles = map_tiles_dict[map_style_name]
     tile_attr = "Esri" if "Satellite" in map_style_name else None
 
-    # โหมดเดินทาง
-    travel_mode = st.selectbox(
-        "รูปแบบการเดินทาง",
-        options=["public_transport", "driving", "walking", "cycling"],
-        index=0,
-        format_func=lambda x: {"public_transport": "🚌 รถสาธารณะ", "driving": "🚗 ขับรถ", "walking": "🚶 เดินเท้า", "cycling": "🚲 จักรยาน"}[x]
-    )
+    travel_mode = st.selectbox("การเดินทาง", ["public_transport", "driving", "walking", "cycling"])
     
-    # เวลา
-    st.write("⏱️ ช่วงเวลา (นาที):")
-    time_intervals = st.multiselect(
-        "ระบุเวลา",
-        options=[5, 10, 15, 30, 45, 60],
-        default=[15]
-    )
+    time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 30, 45, 60], default=[15, 30])
     
+    # 🟢 🟢 ส่วนตั้งค่าสี (เพิ่มใหม่ตรงนี้) 🟢 🟢
+    st.markdown("---")
+    with st.expander("🎨 ตั้งค่าสีพื้นที่ (Color Settings)", expanded=True):
+        st.write("เลือกสีตามช่วงเวลา:")
+        # ใช้ st.color_picker และอัปเดตค่าลง Session State ทันที
+        st.session_state.colors['step1'] = st.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
+        st.session_state.colors['step2'] = st.color_picker("11 - 20 นาที", st.session_state.colors['step2'])
+        st.session_state.colors['step3'] = st.color_picker("21 - 30 นาที", st.session_state.colors['step3'])
+        st.session_state.colors['step4'] = st.color_picker("> 30 นาที", st.session_state.colors['step4'])
+        
+        st.markdown("💡 *Tip: เลือกสีอ่อนๆ หรือปรับ Opacity ในแผนที่เพื่อให้เห็นการซ้อนทับชัดเจน*")
+
+    st.markdown("---")
     submit_button = st.button("🚀 คำนวณทุกจุด", type="primary", use_container_width=True)
 
-# --- 3. แสดงรายการพิกัด (Optional) ---
-with st.expander("📝 ดูรายการพิกัดทั้งหมด"):
-    if not st.session_state.markers:
-        st.info("ยังไม่มีหมุด กรุณาคลิกบนแผนที่")
-    else:
-        for i, mk in enumerate(st.session_state.markers):
-            st.text(f"จุดที่ {i+1}: {mk['lat']:.5f}, {mk['lng']:.5f}")
-
-# --- 4. Logic เรียก API (รองรับหลายจุด) ---
+# --- 4. Logic เรียก API (Multi-Point) ---
 if submit_button:
     if not api_key or not app_id:
         st.warning("⚠️ กรุณาใส่ API Key")
     elif not st.session_state.markers:
-        st.warning("⚠️ กรุณาคลิกเพิ่มหมุดบนแผนที่อย่างน้อย 1 จุด")
+        st.warning("⚠️ กรุณาคลิกเพิ่มหมุดก่อน")
     elif not time_intervals:
         st.warning("⚠️ กรุณาเลือกเวลา")
     else:
-        with st.spinner(f'กำลังคำนวณ {len(st.session_state.markers)} จุด...'):
+        with st.spinner(f'กำลังคำนวณ...'):
             try:
-                # สร้าง Payload สำหรับ Multi-Point
                 departure_searches = []
                 sorted_times = sorted(time_intervals)
-                
-                # Loop สร้าง search object ให้ครบทุกจุด x ทุกเวลา
-                req_id_counter = 0
                 for i, marker in enumerate(st.session_state.markers):
                     for time_min in sorted_times:
-                        search_item = {
-                            "id": f"search_{i}_{time_min}", # ID ไม่ซ้ำกัน
+                        departure_searches.append({
+                            "id": f"search_{i}_{time_min}",
                             "coords": {"lat": marker['lat'], "lng": marker['lng']},
                             "transportation": {"type": travel_mode},
                             "departure_time": datetime.now().isoformat(),
                             "travel_time": time_min * 60
-                        }
-                        departure_searches.append(search_item)
+                        })
 
-                payload = {"departure_searches": departure_searches}
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "X-Application-Id": app_id,
-                    "X-Api-Key": api_key
-                }
-                
-                # ยิง API ครั้งเดียว (TravelTime รองรับ Batch Request)
                 response = requests.post(
                     "https://api.traveltimeapp.com/v4/time-map",
-                    json=payload,
-                    headers=headers
+                    json={"departure_searches": departure_searches},
+                    headers={"Content-Type": "application/json", "X-Application-Id": app_id, "X-Api-Key": api_key}
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
                     all_features = []
-                    
                     for search in result.get("results", []):
-                        # แกะเวลาออกมาจาก search_id (เช่น search_0_15 -> 15)
-                        search_id = search['search_id']
-                        time_val = int(search_id.split('_')[-1]) 
-                        
+                        time_val = int(search['search_id'].split('_')[-1]) 
                         for shape in search.get("shapes", []):
                             coords = [[pt["lng"], pt["lat"]] for pt in shape["shell"]]
                             holes = [[[pt["lng"], pt["lat"]] for pt in hole] for hole in shape.get("holes", [])]
-                            
-                            feature = {
+                            all_features.append({
                                 "type": "Feature",
                                 "geometry": {"type": "Polygon", "coordinates": [coords] + holes},
-                                "properties": {
-                                    "travel_time_minutes": time_val
-                                }
-                            }
-                            all_features.append(feature)
-                    
+                                "properties": {"travel_time_minutes": time_val}
+                            })
                     st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
-                    st.success(f"✅ คำนวณสำเร็จ! ได้พื้นที่ทั้งหมด {len(all_features)} วง")
-                    
+                    st.success(f"✅ คำนวณสำเร็จ!")
                 else:
-                    st.error(f"❌ API Error: {response.status_code}")
-                    st.code(response.text)
-                    
+                    st.error(f"❌ Error: {response.status_code} - {response.text}")
             except Exception as e:
                 st.error(f"❌ Error: {e}")
 
-# --- 5. ฟังก์ชันเลือกสี ---
+# --- 5. ฟังก์ชันเลือกสี (อัปเดตให้ใช้สีจาก Session State) ---
 def get_color(minutes):
-    if minutes <= 10: return '#2A9D8F'   # เขียว
-    elif minutes <= 20: return '#E9C46A' # เหลือง
-    elif minutes <= 30: return '#F4A261' # ส้ม
-    else: return '#D62828'               # แดง
+    c = st.session_state.colors # ดึงสีปัจจุบันมาใช้
+    if minutes <= 10: return c['step1']
+    elif minutes <= 20: return c['step2']
+    elif minutes <= 30: return c['step3']
+    else: return c['step4']
 
 # --- 6. แสดงแผนที่ ---
 def display_map():
-    # หาจุดกึ่งกลางแผนที่ (ถ้ามีหมุด ให้เอาตัวล่าสุด ถ้าไม่มีเอาสยาม)
     if st.session_state.markers:
         last_m = st.session_state.markers[-1]
         center = [last_m['lat'], last_m['lng']]
@@ -189,21 +155,21 @@ def display_map():
 
     m = folium.Map(location=center, zoom_start=12, tiles=selected_tiles, attr=tile_attr)
 
-    # 1. วาด Isochrones (พื้นที่)
+    # วาด Isochrones
     if st.session_state.isochrone_data:
         folium.GeoJson(
             st.session_state.isochrone_data,
             name='TravelTime Area',
             style_function=lambda feature: {
-                'fillColor': get_color(feature['properties']['travel_time_minutes']),
+                'fillColor': get_color(feature['properties']['travel_time_minutes']), # ใช้ฟังก์ชันใหม่
                 'color': 'white',
                 'weight': 1,
-                'fillOpacity': 0.5
+                'fillOpacity': 0.5 # ความโปร่งแสง (สำคัญมากสำหรับการซ้อนทับ)
             },
             tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['นาที:'])
         ).add_to(m)
 
-    # 2. วาดหมุดทั้งหมด (Markers)
+    # วาดหมุด
     for i, marker in enumerate(st.session_state.markers):
         folium.Marker(
             [marker['lat'], marker['lng']],
@@ -211,24 +177,37 @@ def display_map():
             icon=folium.Icon(color="red", icon="map-marker", prefix='fa')
         ).add_to(m)
 
-    # 3. แสดงผลและรับค่าคลิก
-    map_output = st_folium(m, width=1200, height=600, key="multi_map")
+    # 🟢 แสดง Legend แบบ Dynamic ตามสีที่เลือก
+    if st.session_state.isochrone_data:
+        c = st.session_state.colors
+        # สร้าง HTML เล็กๆ เพื่อโชว์กล่องสี
+        legend_html = f"""
+        <div style="
+            position: fixed; 
+            bottom: 50px; left: 50px; width: 200px; height: 130px; 
+            background-color: white; z-index:9999; font-size:14px;
+            padding: 10px; border: 2px solid grey; border-radius: 5px;
+            opacity: 0.9;">
+            <b>คำอธิบายสี (Legend)</b><br>
+            <i style="background:{c['step1']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> ≤ 10 นาที<br>
+            <i style="background:{c['step2']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> 11 - 20 นาที<br>
+            <i style="background:{c['step3']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> 21 - 30 นาที<br>
+            <i style="background:{c['step4']};width:15px;height:15px;display:inline-block;margin-right:5px;"></i> > 30 นาที
+        </div>
+        """
+        m.get_root().html.add_child(folium.Element(legend_html))
 
-    # --- Logic: คลิกเพื่อเพิ่มจุด ---
+    # แสดงแผนที่ & รับคลิก
+    map_output = st_folium(m, width=1200, height=600, key="multi_color_map")
     if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
-        
-        # เช็คว่าไม่ได้คลิกซ้ำจุดเดิม (ป้องกัน Loop)
         is_new = True
         if st.session_state.markers:
             last_mk = st.session_state.markers[-1]
-            # ถ้าคลิกใกล้จุดเดิมมากๆ (เช่น กดเบิ้ล) ไม่ต้องเพิ่ม
             if abs(clicked_lat - last_mk['lat']) < 0.00001 and abs(clicked_lng - last_mk['lng']) < 0.00001:
                 is_new = False
-        
         if is_new:
-            # ✅ เพิ่มจุดลงใน List
             st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
             st.rerun()
 
