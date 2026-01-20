@@ -2,7 +2,7 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import requests
-from shapely.geometry import shape, mapping
+from shapely.geometry import shape, mapping 
 import json
 
 # --- 1. การตั้งค่าหน้าเว็บ ---
