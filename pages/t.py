@@ -265,7 +265,7 @@ def display_map():
     # Layer Control เพื่อเปิด-ปิด Layer ได้
     folium.LayerControl().add_to(m)
 
-    map_output = st_folium(m, width=1200, height=800, key="geoapify_ck_map")
+    map_output = st_folium(m, width=1200, height=600, key="geoapify_ck_map")
     
     # Logic การคลิกเพิ่มจุด
     if map_output and map_output.get('last_clicked'):
