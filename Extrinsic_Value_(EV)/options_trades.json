@@ -2,7 +2,7 @@
   "_schema": "options_trades.v2",
   "rows": [
     {
-      "id": 85,
+      "id": 38,
       "symbol": "NVTS",
       "date": "22/05/2025",
       "rawDate": "22/05/2025",
@@ -21,7 +21,7 @@
       "evSigned": -1.36
     },
     {
-      "id": 86,
+      "id": 39,
       "symbol": "NVTS",
       "date": "22/05/2025",
       "rawDate": "22/05/2025",
@@ -40,7 +40,7 @@
       "evSigned": 0.95
     },
     {
-      "id": 55,
+      "id": 40,
       "symbol": "AGL",
       "date": "09/06/2025",
       "rawDate": "09/06/2025",
@@ -53,13 +53,13 @@
       "stockPrice": 2.27,
       "quantity": 5,
       "sortableTimestamp": "2025-06-09T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 0.538,
       "evSigned": -0.538
     },
     {
-      "id": 54,
+      "id": 41,
       "symbol": "FFWM",
       "date": "10/06/2025",
       "rawDate": "10/06/2025",
@@ -72,13 +72,13 @@
       "stockPrice": 5.41,
       "quantity": 2,
       "sortableTimestamp": "2025-06-10T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0.41000000000000014,
       "ev": 0.7599999999999998,
       "evSigned": -0.7599999999999998
     },
     {
-      "id": 84,
+      "id": 42,
       "symbol": "FLNC",
       "date": "13/06/2025",
       "rawDate": "13/06/2025",
@@ -97,7 +97,7 @@
       "evSigned": -0.98
     },
     {
-      "id": 53,
+      "id": 43,
       "symbol": "GERN",
       "date": "02/07/2025",
       "rawDate": "02/07/2025",
@@ -110,13 +110,13 @@
       "stockPrice": 1.31,
       "quantity": 8,
       "sortableTimestamp": "2025-07-02T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 0.36,
       "evSigned": -0.36
     },
     {
-      "id": 83,
+      "id": 44,
       "symbol": "DYN",
       "date": "14/07/2025",
       "rawDate": "14/07/2025",
@@ -135,7 +135,7 @@
       "evSigned": -2.6
     },
     {
-      "id": 82,
+      "id": 45,
       "symbol": "NVTS",
       "date": "17/07/2025",
       "rawDate": "17/07/2025",
@@ -154,7 +154,7 @@
       "evSigned": -1.26
     },
     {
-      "id": 81,
+      "id": 46,
       "symbol": "NVTS",
       "date": "21/07/2025",
       "rawDate": "21/07/2025",
@@ -173,7 +173,7 @@
       "evSigned": 1.2500000000000004
     },
     {
-      "id": 52,
+      "id": 47,
       "symbol": "DJT",
       "date": "01/08/2025",
       "rawDate": "01/08/2025",
@@ -186,13 +186,13 @@
       "stockPrice": 17.2,
       "quantity": 1,
       "sortableTimestamp": "2025-08-01T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 2.93,
       "evSigned": -2.93
     },
     {
-      "id": 51,
+      "id": 48,
       "symbol": "AGL",
       "date": "05/08/2025",
       "rawDate": "05/08/2025",
@@ -205,7 +205,7 @@
       "stockPrice": 0.82,
       "quantity": 5,
       "sortableTimestamp": "2025-08-05T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 0.2,
       "evSigned": -0.2
@@ -262,7 +262,7 @@
       "stockPrice": 2.54,
       "quantity": 6,
       "sortableTimestamp": "2025-08-11T20:37:31",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0.040000000000000036,
       "ev": 0.71,
       "evSigned": -0.71
@@ -281,13 +281,13 @@
       "stockPrice": 9.48,
       "quantity": 1,
       "sortableTimestamp": "2025-08-11T23:26:26",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 1.95,
       "evSigned": -1.95
     },
     {
-      "id": 80,
+      "id": 49,
       "symbol": "AGL",
       "date": "13/08/2025",
       "rawDate": "13/08/2025",
@@ -306,7 +306,7 @@
       "evSigned": 0.25
     },
     {
-      "id": 79,
+      "id": 50,
       "symbol": "CLSK",
       "date": "15/08/2025",
       "rawDate": "15/08/2025",
@@ -325,7 +325,7 @@
       "evSigned": -1.49
     },
     {
-      "id": 78,
+      "id": 51,
       "symbol": "AGL",
       "date": "18/08/2025",
       "rawDate": "18/08/2025",
@@ -344,7 +344,7 @@
       "evSigned": 0.10000000000000003
     },
     {
-      "id": 77,
+      "id": 52,
       "symbol": "AGL",
       "date": "22/08/2025",
       "rawDate": "22/08/2025",
@@ -433,7 +433,7 @@
       "stockPrice": 19.260000228881836,
       "quantity": 1,
       "sortableTimestamp": "2025-10-09T20:30:01",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 2.55,
       "evSigned": -2.55
@@ -1009,7 +1009,7 @@
       "evSigned": 1.4
     },
     {
-      "id": 76,
+      "id": 53,
       "symbol": "CLSK",
       "date": "03/11/2025",
       "rawDate": "03/11/2025",
@@ -1028,7 +1028,7 @@
       "evSigned": -0.06999999999999851
     },
     {
-      "id": 50,
+      "id": 54,
       "symbol": "SG",
       "date": "03/11/2025",
       "rawDate": "03/11/2025",
@@ -1041,13 +1041,13 @@
       "stockPrice": 6.39,
       "quantity": 1,
       "sortableTimestamp": "2025-11-03T20:30:00:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 3.3899999999999997,
       "ev": 0.11000000000000032,
       "evSigned": -0.11000000000000032
     },
     {
-      "id": 75,
+      "id": 55,
       "symbol": "GERN",
       "date": "04/11/2025",
       "rawDate": "04/11/2025",
@@ -1066,7 +1066,7 @@
       "evSigned": -0.07499997615814208
     },
     {
-      "id": 74,
+      "id": 56,
       "symbol": "NVTS",
       "date": "04/11/2025",
       "rawDate": "04/11/2025",
@@ -1085,7 +1085,7 @@
       "evSigned": -0.5999999999999996
     },
     {
-      "id": 72,
+      "id": 57,
       "symbol": "RXRX",
       "date": "05/11/2025",
       "rawDate": "05/11/2025",
@@ -1104,7 +1104,7 @@
       "evSigned": -4.440892098500626e-16
     },
     {
-      "id": 73,
+      "id": 58,
       "symbol": "RIVN",
       "date": "05/11/2025",
       "rawDate": "05/11/2025",
@@ -1123,7 +1123,7 @@
       "evSigned": -0.3499999999999992
     },
     {
-      "id": 71,
+      "id": 59,
       "symbol": "RXRX",
       "date": "07/11/2025",
       "rawDate": "07/11/2025",
@@ -1142,7 +1142,7 @@
       "evSigned": -0.050000000000000266
     },
     {
-      "id": 49,
+      "id": 60,
       "symbol": "AGL",
       "date": "08/11/2025",
       "rawDate": "08/11/2025",
@@ -1155,13 +1155,13 @@
       "stockPrice": 0.66,
       "quantity": 4,
       "sortableTimestamp": "2025-11-08T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0.16000000000000003,
       "ev": 0.09999999999999998,
       "evSigned": -0.09999999999999998
     },
     {
-      "id": 47,
+      "id": 61,
       "symbol": "FLNC",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1174,13 +1174,13 @@
       "stockPrice": 23.38,
       "quantity": 1,
       "sortableTimestamp": "2025-11-10T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0,
       "ev": 3.14,
       "evSigned": -3.14
     },
     {
-      "id": 48,
+      "id": 62,
       "symbol": "NVTS",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1193,13 +1193,13 @@
       "stockPrice": 9.03,
       "quantity": 1,
       "sortableTimestamp": "2025-11-10T20:30:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 2.9700000000000006,
       "ev": 0.9299999999999993,
       "evSigned": -0.9299999999999993
     },
     {
-      "id": 68,
+      "id": 63,
       "symbol": "FLNC",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1218,7 +1218,7 @@
       "evSigned": 0
     },
     {
-      "id": 69,
+      "id": 64,
       "symbol": "NVTS",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1237,7 +1237,7 @@
       "evSigned": 0.69
     },
     {
-      "id": 70,
+      "id": 65,
       "symbol": "RIVN",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1256,7 +1256,7 @@
       "evSigned": -0.5199999999999996
     },
     {
-      "id": 67,
+      "id": 66,
       "symbol": "FLNC",
       "date": "10/11/2025",
       "rawDate": "10/11/2025",
@@ -1275,7 +1275,7 @@
       "evSigned": -3.2
     },
     {
-      "id": 65,
+      "id": 67,
       "symbol": "NVTS",
       "date": "11/11/2025",
       "rawDate": "11/11/2025",
@@ -1294,7 +1294,7 @@
       "evSigned": -0.5500000000000007
     },
     {
-      "id": 66,
+      "id": 68,
       "symbol": "RIVN",
       "date": "11/11/2025",
       "rawDate": "11/11/2025",
@@ -1313,7 +1313,7 @@
       "evSigned": -0.9200000000000017
     },
     {
-      "id": 64,
+      "id": 69,
       "symbol": "FLNC",
       "date": "14/11/2025",
       "rawDate": "14/11/2025",
@@ -1332,7 +1332,7 @@
       "evSigned": 2.1500000000000012
     },
     {
-      "id": 62,
+      "id": 70,
       "symbol": "CLSK",
       "date": "17/11/2025",
       "rawDate": "17/11/2025",
@@ -1351,7 +1351,7 @@
       "evSigned": 0.5699999999999994
     },
     {
-      "id": 63,
+      "id": 71,
       "symbol": "FLNC",
       "date": "17/11/2025",
       "rawDate": "17/11/2025",
@@ -1370,7 +1370,7 @@
       "evSigned": 2.630000000000001
     },
     {
-      "id": 46,
+      "id": 72,
       "symbol": "FLNC",
       "date": "04/12/2025",
       "rawDate": "04/12/2025",
@@ -1383,13 +1383,13 @@
       "stockPrice": 21.41,
       "quantity": 1,
       "sortableTimestamp": "2025-12-04T22:17:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 1.5899999999999999,
       "ev": 2.21,
       "evSigned": -2.21
     },
     {
-      "id": 61,
+      "id": 73,
       "symbol": "RIVN",
       "date": "12/12/2025",
       "rawDate": "12/12/2025",
@@ -1408,7 +1408,7 @@
       "evSigned": 0.029999999999998472
     },
     {
-      "id": 45,
+      "id": 74,
       "symbol": "NVTS",
       "date": "15/12/2025",
       "rawDate": "15/12/2025",
@@ -1421,13 +1421,13 @@
       "stockPrice": 8.57,
       "quantity": 1,
       "sortableTimestamp": "2025-12-15T20:30:00:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 3.5700000000000003,
       "ev": 0.06999999999999984,
       "evSigned": -0.06999999999999984
     },
     {
-      "id": 57,
+      "id": 75,
       "symbol": "RXRX",
       "date": "19/12/2025",
       "rawDate": "19/12/2025",
@@ -1446,7 +1446,7 @@
       "evSigned": 0
     },
     {
-      "id": 58,
+      "id": 76,
       "symbol": "RXRX",
       "date": "19/12/2025",
       "rawDate": "19/12/2025",
@@ -1465,7 +1465,7 @@
       "evSigned": 0.20000000000000018
     },
     {
-      "id": 59,
+      "id": 77,
       "symbol": "CLSK",
       "date": "19/12/2025",
       "rawDate": "19/12/2025",
@@ -1484,7 +1484,7 @@
       "evSigned": 0
     },
     {
-      "id": 60,
+      "id": 78,
       "symbol": "GERN",
       "date": "19/12/2025",
       "rawDate": "19/12/2025",
@@ -1503,7 +1503,7 @@
       "evSigned": 0
     },
     {
-      "id": 44,
+      "id": 79,
       "symbol": "RXRX",
       "date": "22/12/2025",
       "rawDate": "22/12/2025",
@@ -1522,7 +1522,7 @@
       "evSigned": 0
     },
     {
-      "id": 43,
+      "id": 80,
       "symbol": "GERN",
       "date": "22/12/2025",
       "rawDate": "22/12/2025",
@@ -1541,7 +1541,7 @@
       "evSigned": -0.6449999809265137
     },
     {
-      "id": 42,
+      "id": 81,
       "symbol": "CLSK",
       "date": "22/12/2025",
       "rawDate": "22/12/2025",
@@ -1554,13 +1554,13 @@
       "stockPrice": 12.829999923706055,
       "quantity": 1,
       "sortableTimestamp": "2025-12-22T22:47:03:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 1.3299999237060547,
       "ev": 0.7300000762939454,
       "evSigned": -0.7300000762939454
     },
     {
-      "id": 41,
+      "id": 82,
       "symbol": "RIVN",
       "date": "22/12/2025",
       "rawDate": "22/12/2025",
@@ -1579,7 +1579,7 @@
       "evSigned": -1.6749993133544923
     },
     {
-      "id": 56,
+      "id": 83,
       "symbol": "LUNR",
       "date": "23/12/2025",
       "rawDate": "23/12/2025",
@@ -1598,7 +1598,7 @@
       "evSigned": 0.22999999999999954
     },
     {
-      "id": 40,
+      "id": 84,
       "symbol": "LUNR",
       "date": "23/12/2025",
       "rawDate": "23/12/2025",
@@ -1617,7 +1617,7 @@
       "evSigned": -4.119999885559082
     },
     {
-      "id": 39,
+      "id": 85,
       "symbol": "RIVN",
       "date": "23/12/2025",
       "rawDate": "23/12/2025",
@@ -1636,7 +1636,7 @@
       "evSigned": -0.825000457763672
     },
     {
-      "id": 38,
+      "id": 86,
       "symbol": "LUNR",
       "date": "09/01/2026",
       "rawDate": "09/01/2026",
@@ -1655,7 +1655,7 @@
       "evSigned": -2.5400006866455076
     },
     {
-      "id": 88,
+      "id": 87,
       "symbol": "QXO",
       "date": "12/01/2026",
       "rawDate": "12/01/2026",
@@ -1674,7 +1674,7 @@
       "evSigned": 0
     },
     {
-      "id": 89,
+      "id": 88,
       "symbol": "QXO",
       "date": "12/01/2026",
       "rawDate": "12/01/2026",
@@ -1693,7 +1693,7 @@
       "evSigned": -2.6849993896484374
     },
     {
-      "id": 87,
+      "id": 89,
       "symbol": "LUNR",
       "date": "12/01/2026",
       "rawDate": "12/01/2026",
@@ -1725,8 +1725,179 @@
       "stockPrice": 3.5,
       "quantity": 6,
       "sortableTimestamp": "2026-01-15T20:37:31:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 1,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 91,
+      "symbol": "AGL",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 0.5,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 0.76,
+      "stockPrice": 1.02,
+      "quantity": 4,
+      "sortableTimestamp": "2026-01-16T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 0.52,
+      "ev": 0.24,
+      "evSigned": 0.24
+    },
+    {
+      "id": 92,
+      "symbol": "AGL",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "20:30:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 1,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 0.05,
+      "stockPrice": 0.9911999702453613,
+      "quantity": 5,
+      "sortableTimestamp": "2026-01-16T20:30:00:00",
+      "status": "CLOSED",
+      "iv": 0,
+      "ev": 0.05,
+      "evSigned": 0.05
+    },
+    {
+      "id": 93,
+      "symbol": "CLSK",
+      "date": "23/01/2026",
+      "rawDate": "23/01/2026",
+      "rawTime": "23:52:56:00:00,GMT+07",
+      "type": "CALL",
+      "strike": 11.5,
+      "expiry": "23/01/2026",
+      "action": "SELL",
+      "premium": 1.75,
+      "stockPrice": 13.694999694824219,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-23T23:52:56:00:00",
+      "status": "CLOSED",
+      "iv": 2.1949996948242188,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 94,
+      "symbol": "CLSK",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "23:52:07:00,GMT+07",
+      "type": "PUT",
+      "strike": 16,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 2.74,
+      "stockPrice": 13.69,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-16T23:52:07:00",
+      "status": "CLOSED",
+      "iv": 2.3100000000000005,
+      "ev": 0.4299999999999997,
+      "evSigned": 0.4299999999999997
+    },
+    {
+      "id": 95,
+      "symbol": "FFWM",
+      "date": "16/12/2026",
+      "rawDate": "16/12/2026",
+      "rawTime": "21:44:33:00,GMT+07",
+      "type": "CALL",
+      "strike": 5,
+      "expiry": "16/12/2026",
+      "action": "SELL",
+      "premium": 1.3,
+      "stockPrice": 6.340000152587891,
+      "quantity": 2,
+      "sortableTimestamp": "2026-12-16T21:44:33:00",
+      "status": "CLOSED",
+      "iv": 1.3400001525878906,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 96,
+      "symbol": "FLNC",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "23:19:54:00,GMT+07",
+      "type": "PUT",
+      "strike": 23,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 0.06,
+      "stockPrice": 27.389999389648438,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-16T23:19:54:00",
+      "status": "CLOSED",
+      "iv": 0,
+      "ev": 0.06,
+      "evSigned": 0.06
+    },
+    {
+      "id": 97,
+      "symbol": "NVTS",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "21:46:18:00,GMT+07",
+      "type": "CALL",
+      "strike": 5,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 5.45,
+      "stockPrice": 10.696700096130371,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-16T21:46:18:00",
+      "status": "CLOSED",
+      "iv": 5.696700096130371,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 98,
+      "symbol": "NVTS",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "21:47:31:00,GMT+07",
+      "type": "PUT",
+      "strike": 12,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 1.33,
+      "stockPrice": 10.65999984741211,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-16T21:47:31:00",
+      "status": "CLOSED",
+      "iv": 1.3400001525878906,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 99,
+      "symbol": "SG",
+      "date": "16/01/2026",
+      "rawDate": "16/01/2026",
+      "rawTime": "21:50:34:00,GMT+07",
+      "type": "CALL",
+      "strike": 3,
+      "expiry": "16/01/2026",
+      "action": "SELL",
+      "premium": 4.8,
+      "stockPrice": 7.8867998123168945,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-16T21:50:34:00",
+      "status": "CLOSED",
+      "iv": 4.8867998123168945,
       "ev": 0,
       "evSigned": 0
     }
