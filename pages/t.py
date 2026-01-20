@@ -12,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CSS: ปรับแต่งให้เต็มหน้าจอ และปรับแต่งปุ่มลบเล็กๆ ---
+# --- CSS: ปรับแต่ง UI ---
 st.markdown("""
     <style>
         .block-container {
@@ -22,10 +22,14 @@ st.markdown("""
             padding-right: 2rem;
         }
         h1 { margin-bottom: 0px; }
-        /* ปรับแต่งปุ่มลบให้ดูเหมาะสมในบรรทัด */
+        /* ปรับแต่งปุ่มและ Checkbox ให้ดูเหมาะสมในบรรทัด */
         div[data-testid="stVerticalBlock"] > div > div[data-testid="stHorizontalBlock"] button {
             padding: 0rem 0.5rem;
             line-height: 1.5;
+        }
+        /* ปรับระยะห่าง checkbox */
+        div[data-testid="stMarkdownContainer"] p {
+            margin-bottom: 0px;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -51,14 +55,10 @@ MAP_STYLES = {
     },
     "Esri Satellite (ดาวเทียม)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community"
+        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
     },
     "Esri Street Map (ถนนละเอียด)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
-    },
-    "Esri Topo Map (ภูมิประเทศ)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
         "attr": "Tiles &copy; Esri &mdash; Source: Esri"
     }
 }
@@ -67,8 +67,10 @@ MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'c
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
 # --- เตรียม Session State (Initialize) ---
+# เพิ่ม key 'active' เพื่อรองรับการ Isolation
 if 'markers' not in st.session_state:
-    st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
+    st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON, 'active': True}]
+    
 if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None
 if 'intersection_data' not in st.session_state:
@@ -78,6 +80,7 @@ if 'colors' not in st.session_state:
         'step1': '#2A9D8F', 'step2': '#E9C46A', 
         'step3': '#F4A261', 'step4': '#D62828'
     }
+
 # Initialize widget states if not present
 if 'api_key' not in st.session_state: st.session_state.api_key = DEFAULT_API_KEY
 if 'map_style_name' not in st.session_state: st.session_state.map_style_name = list(MAP_STYLES.keys())[0]
@@ -116,13 +119,16 @@ with st.sidebar:
             try:
                 data = json.load(uploaded_file)
                 st.session_state.markers = data.get("markers", st.session_state.markers)
+                
+                # Migration: Ensure older files obtain 'active' key
+                for m in st.session_state.markers:
+                    if 'active' not in m:
+                        m['active'] = True
+
                 st.session_state.isochrone_data = data.get("isochrone_data", None)
                 st.session_state.intersection_data = data.get("intersection_data", None)
                 st.session_state.colors = data.get("colors", st.session_state.colors)
                 st.session_state.api_key = data.get("api_key", DEFAULT_API_KEY)
-                st.session_state.map_style_name = data.get("map_style_name", list(MAP_STYLES.keys())[0])
-                st.session_state.travel_mode = data.get("travel_mode", "drive")
-                st.session_state.time_intervals = data.get("time_intervals", [5])
                 
                 st.success("✅ โหลดข้อมูลสำเร็จ!")
                 if st.button("🔄 กดเพื่อรีเฟรชหน้าจอ"):
@@ -137,10 +143,9 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # --- ปุ่มควบคุมหลัก (Delete Last / Reset) ---
+    # --- ปุ่มควบคุมหลัก ---
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        # ปุ่มลบตัวล่าสุด (เก็บไว้ตามเดิม)
         if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
             if st.session_state.markers:
                 st.session_state.markers.pop()
@@ -148,35 +153,50 @@ with st.sidebar:
                 st.session_state.intersection_data = None
                 st.rerun()
     with col_btn2:
-        if st.button("🔄 รีเซ็ต", use_container_width=True):
-            st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
+        if st.button("🔄 รีเซ็ตทั้งหมด", use_container_width=True):
+            st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON, 'active': True}]
             st.session_state.isochrone_data = None
             st.session_state.intersection_data = None
             st.rerun()
             
-    st.write(f"📍 จำนวนจุด: **{len(st.session_state.markers)}**")
+    # นับจำนวนจุดที่ Active
+    active_count = sum(1 for m in st.session_state.markers if m.get('active', True))
+    total_count = len(st.session_state.markers)
+    st.write(f"📍 จุดที่เลือกคำนวณ: **{active_count}** / {total_count}")
     
-    # --- รายการจุด (List of Markers) พร้อมปุ่มลบรายตัว ---
+    # --- รายการจุด (List of Markers) พร้อม Checkbox (Isolation) และ ปุ่มลบ ---
     if st.session_state.markers:
         st.markdown("---")
-        # ใช้ enumerate เพื่อให้ได้ index มาใช้ระบุตัวที่จะลบ
+        st.caption("✅ = นำมาคำนวณ (Isolate) | ❌ = ลบทิ้ง")
+        
         for i, m in enumerate(st.session_state.markers):
             color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
             
-            # แบ่งคอลัมน์: Text และ ปุ่ม Delete
-            c_text, c_del = st.columns([0.85, 0.15])
+            # แบ่งคอลัมน์: [Checkbox] [Text] [Delete]
+            c_check, c_text, c_del = st.columns([0.15, 0.70, 0.15])
+            
+            with c_check:
+                # Checkbox สำหรับ Isolation (Active/Inactive)
+                is_active = st.checkbox(
+                    " ", 
+                    value=m.get('active', True), 
+                    key=f"active_{i}",
+                    label_visibility="collapsed"
+                )
+                # Update state ทันที
+                st.session_state.markers[i]['active'] = is_active
             
             with c_text:
+                # ปรับสี Text ตามสถานะ Active
+                text_style = f"color:{color_name}; font-weight:bold;" if is_active else "color:gray; text-decoration:line-through;"
                 st.markdown(
-                    f"<span style='color:{color_name};'>●</span> จุดที่ {i+1} <br>"
+                    f"<span style='{text_style}'>● จุดที่ {i+1}</span><br>"
                     f"<span style='font-size:0.8em; color:gray;'>({m['lat']:.4f}, {m['lng']:.4f})</span>", 
                     unsafe_allow_html=True
                 )
             
             with c_del:
-                # ปุ่มลบเฉพาะจุด (Specific Delete)
-                # ใช้ key=f"del_{i}" เพื่อให้แต่ละปุ่มไม่ซ้ำกัน
-                if st.button("✕", key=f"del_{i}", help=f"ลบจุดที่ {i+1}"):
+                if st.button("✕", key=f"del_{i}", help=f"ลบจุดที่ {i+1} ถาวร"):
                     st.session_state.markers.pop(i)
                     st.session_state.isochrone_data = None
                     st.session_state.intersection_data = None
@@ -184,10 +204,9 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # Map Style
+    # Map Style & Parameters
     selected_style_name = st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
     
-    # Travel Mode
     travel_mode = st.selectbox(
         "รูปแบบการเดินทาง",
         options=["drive", "walk", "bicycle", "transit"], 
@@ -195,7 +214,6 @@ with st.sidebar:
         key="travel_mode"
     )
     
-    # Time Intervals
     time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 20, 30, 45, 60], key="time_intervals")
     
     with st.expander("🎨 ตั้งค่าสีพื้นที่"):
@@ -210,61 +228,99 @@ with st.sidebar:
         st.session_state.colors['step4'] = c4
 
     st.markdown("---")
-    submit_button = st.button("🚀 คำนวณหา CBD", type="primary", use_container_width=True)
+    submit_button = st.button("🚀 คำนวณหา CBD (เฉพาะจุดที่เลือก)", type="primary", use_container_width=True)
 
 # --- 3. Logic คำนวณ Geometry ---
-def calculate_intersection(features, num_markers):
-    if num_markers < 2: return None
+def calculate_intersection(features, num_active_markers):
+    # ต้องมีอย่างน้อย 2 จุดที่ Active จึงจะหา Intersection ได้
+    if num_active_markers < 2: return None
+    
     polys_per_marker = {}
+    
+    # Group geometries by marker_index
     for feat in features:
         m_idx = feat['properties']['marker_index']
         geom = shape(feat['geometry'])
-        if m_idx not in polys_per_marker: polys_per_marker[m_idx] = geom
-        else: polys_per_marker[m_idx] = polys_per_marker[m_idx].union(geom)
-    if not polys_per_marker: return None
-    intersection_poly = polys_per_marker[0]
-    for i in range(1, num_markers):
-        if i in polys_per_marker: intersection_poly = intersection_poly.intersection(polys_per_marker[i])
+        
+        if m_idx not in polys_per_marker: 
+            polys_per_marker[m_idx] = geom
+        else: 
+            polys_per_marker[m_idx] = polys_per_marker[m_idx].union(geom)
+            
+    # ต้องมี Polygon ครบทุกจุดที่ Active
+    if len(polys_per_marker) < num_active_markers:
+        return None
+
+    # เริ่มหา Intersection จากจุดแรกที่มีข้อมูล
+    available_indices = list(polys_per_marker.keys())
+    intersection_poly = polys_per_marker[available_indices[0]]
+    
+    for i in available_indices[1:]:
+        intersection_poly = intersection_poly.intersection(polys_per_marker[i])
+        
     if intersection_poly.is_empty: return None
     return mapping(intersection_poly)
 
 # --- 4. Logic เรียก API ---
 if submit_button:
+    # กรองเฉพาะ Marker ที่ Active
+    active_markers_list = [m for m in st.session_state.markers if m.get('active', True)]
+    
     if not api_key: st.warning("⚠️ กรุณาใส่ API Key")
-    elif not st.session_state.markers: st.warning("⚠️ กรุณาเพิ่มหมุด")
+    elif not active_markers_list: st.warning("⚠️ กรุณาเลือกจุดอย่างน้อย 1 จุด (ติ๊กถูก)")
     elif not time_intervals: st.warning("⚠️ กรุณาเลือกเวลา")
     else:
-        with st.spinner(f'กำลังวิเคราะห์ข้อมูล...'):
+        with st.spinner(f'กำลังวิเคราะห์ข้อมูล {len(active_markers_list)} จุด...'):
             try:
                 base_url = "https://api.geoapify.com/v1/isoline"
                 all_features = []
                 ranges_seconds = ",".join([str(t * 60) for t in sorted(time_intervals)])
+                
+                # Loop เฉพาะ Active Markers
+                # เราต้อง Track index เดิมไว้ เพื่อใช้อ้างอิงสี (original_index)
                 for i, marker in enumerate(st.session_state.markers):
+                    if not marker.get('active', True):
+                        continue # ข้ามจุดที่ไม่ได้เลือก
+                        
                     params = {
                         "lat": marker['lat'], "lon": marker['lng'],
                         "type": "time", "mode": travel_mode,
                         "range": ranges_seconds, "apiKey": api_key
                     }
                     response = requests.get(base_url, params=params)
+                    
                     if response.status_code == 200:
                         data = response.json()
                         for feature in data.get('features', []):
                             seconds = feature['properties'].get('value', 0)
                             feature['properties']['travel_time_minutes'] = seconds / 60
-                            feature['properties']['marker_index'] = i
+                            # เก็บ Index เดิมไว้เพื่อใช้อ้างอิงสีให้ตรงกับจุด
+                            feature['properties']['marker_index'] = i 
                             all_features.append(feature)
+                    else:
+                        st.error(f"API Error at Marker {i+1}: {response.text}")
+
                 if all_features:
                     st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
-                    cbd_geom = calculate_intersection(all_features, len(st.session_state.markers))
+                    
+                    # หา Intersection เฉพาะกลุ่มที่ Active
+                    cbd_geom = calculate_intersection(all_features, len(active_markers_list))
+                    
                     if cbd_geom:
                         st.session_state.intersection_data = {
                             "type": "FeatureCollection",
                             "features": [{"type": "Feature", "geometry": cbd_geom, "properties": {"type": "cbd"}}]
                         }
-                        st.success(f"✅ พบพื้นที่ CBD ร่วมกัน!")
+                        st.success(f"✅ พบพื้นที่ CBD ร่วมกันของ {len(active_markers_list)} จุด!")
                     else:
                         st.session_state.intersection_data = None
-                        st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน" if len(st.session_state.markers) > 1 else "✅ คำนวณสำเร็จ")
+                        if len(active_markers_list) > 1:
+                            st.warning("⚠️ ไม่พบพื้นที่ทับซ้อนสำหรับจุดที่เลือก")
+                        else:
+                            st.success("✅ คำนวณพื้นที่ (จุดเดียว) สำเร็จ")
+                else:
+                    st.error("ไม่ได้รับข้อมูลจาก API")
+                    
             except Exception as e: st.error(f"❌ Error: {e}")
 
 # --- 5. Helper Functions ---
@@ -283,7 +339,12 @@ def display_map():
     # ใช้ Config ที่เลือกจาก Sidebar
     selected_style_config = MAP_STYLES[st.session_state.map_style_name]
 
-    if st.session_state.markers:
+    # หา Center Map: เอาจุด Active ล่าสุด หรือจุดสุดท้ายถ้าไม่มี Active
+    active_ms = [m for m in st.session_state.markers if m.get('active', True)]
+    if active_ms:
+        last_m = active_ms[-1]
+        center = [last_m['lat'], last_m['lng']]
+    elif st.session_state.markers:
         last_m = st.session_state.markers[-1]
         center = [last_m['lat'], last_m['lng']]
     else:
@@ -296,6 +357,7 @@ def display_map():
         attr=selected_style_config["attr"]
     )
 
+    # 1. วาด Isochrone Layers
     if st.session_state.isochrone_data:
         folium.GeoJson(
             st.session_state.isochrone_data,
@@ -308,6 +370,7 @@ def display_map():
             tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['นาที:'])
         ).add_to(m)
 
+    # 2. วาด Intersection (CBD)
     if st.session_state.intersection_data:
         folium.GeoJson(
             st.session_state.intersection_data,
@@ -316,15 +379,29 @@ def display_map():
                 'fillColor': '#FFD700', 'color': '#FF8C00',
                 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'
             },
-            tooltip="🏆 พื้นที่จุดศูนย์กลาง (เข้าถึงได้ทุกคน)"
+            tooltip="🏆 พื้นที่จุดศูนย์กลาง (เข้าถึงได้ตามเงื่อนไขที่เลือก)"
         ).add_to(m)
 
+    # 3. วาด Markers (แยกสี Active / Inactive)
     for i, marker in enumerate(st.session_state.markers):
-        color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
+        is_active = marker.get('active', True)
+        
+        if is_active:
+            color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
+            icon_type = "map-marker"
+            opacity = 1.0
+            popup_msg = f"<b>จุดที่ {i+1}</b> (Active)<br>ใช้คำนวณ"
+        else:
+            color_name = "gray" # ใช้สีเทาสำหรับ Inactive
+            icon_type = "ban"   # ไอคอนเครื่องหมายห้าม หรือ eye-slash
+            opacity = 0.5
+            popup_msg = f"<b>จุดที่ {i+1}</b> (Inactive)<br>ไม่ถูกนำมาคำนวณ"
+
         folium.Marker(
             [marker['lat'], marker['lng']],
-            popup=f"จุดที่ {i+1} ({color_name})",
-            icon=folium.Icon(color=color_name, icon="map-marker", prefix='fa')
+            popup=popup_msg,
+            icon=folium.Icon(color=color_name, icon=icon_type, prefix='fa'),
+            opacity=opacity
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
@@ -336,18 +413,23 @@ def display_map():
         key="geoapify_ck_map"
     )
     
+    # Logic การเพิ่มจุดใหม่จากการคลิก
     if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
+        
         is_new = True
         if st.session_state.markers:
             last_mk = st.session_state.markers[-1]
-            # ป้องกันการคลิกซ้ำตำแหน่งเดิม (Debounce simple)
+            # Debounce: ป้องกันการคลิกซ้ำตำแหน่งเดิม
             if abs(clicked_lat - last_mk['lat']) < 0.00001 and abs(clicked_lng - last_mk['lng']) < 0.00001:
                 is_new = False
+        
         if is_new:
-            st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
-            # เคลียร์ข้อมูลเก่าเมื่อมีจุดใหม่ เพื่อบังคับให้กดคำนวณใหม่
+            # เพิ่มจุดใหม่ โดยให้ active = True เสมอ
+            st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng, 'active': True})
+            
+            # Reset ผลลัพธ์เก่า เพื่อให้ User กดคำนวณใหม่
             st.session_state.isochrone_data = None
             st.session_state.intersection_data = None
             st.rerun()
