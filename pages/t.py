@@ -13,6 +13,23 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- CSS: ปรับแต่งให้เต็มหน้าจอมากขึ้น ---
+st.markdown("""
+    <style>
+        /* ลดขอบขาวด้านบนและล่างของ App */
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 0rem;
+            padding-left: 2rem;
+            padding-right: 2rem;
+        }
+        /* ปรับหัวข้อให้เล็กลงหน่อยเพื่อประหยัดพื้นที่ */
+        h1 {
+            margin-bottom: 0px;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- พิกัดเริ่มต้น (เชียงของ) ---
 DEFAULT_LAT = 20.219443
 DEFAULT_LON = 100.403630
@@ -25,9 +42,8 @@ if 'isochrone_data' not in st.session_state:
     st.session_state.isochrone_data = None
 
 if 'intersection_data' not in st.session_state:
-    st.session_state.intersection_data = None  # เก็บข้อมูลพื้นที่ CBD
+    st.session_state.intersection_data = None
 
-# เตรียมสี (เก็บไว้เหมือนเดิม)
 if 'colors' not in st.session_state:
     st.session_state.colors = {
         'step1': '#2A9D8F', 'step2': '#E9C46A', 
@@ -37,7 +53,9 @@ if 'colors' not in st.session_state:
 MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
-st.caption(f"📍 พิกัดเริ่มต้น: {DEFAULT_LAT}, {DEFAULT_LON} , 🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD) ")
+st.title("🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD)")
+# st.caption เอาออกหรือรวมกับ title เพื่อประหยัดพื้นที่
+st.markdown(f"📍 **พิกัดเริ่มต้น:** {DEFAULT_LAT}, {DEFAULT_LON} | *คลิกบนแผนที่เพื่อเพิ่มจุด*")
 
 # --- 2. Sidebar ---
 with st.sidebar:
@@ -48,17 +66,16 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # ปุ่มจัดการหมุด
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
             if st.session_state.markers:
                 st.session_state.markers.pop()
-                st.session_state.isochrone_data = None # Reset ผลลัพธ์เมื่อข้อมูลเปลี่ยน
+                st.session_state.isochrone_data = None
                 st.session_state.intersection_data = None
                 st.rerun()
     with col_btn2:
-        if st.button("🔄 รีเซ็ต (เชียงของ)", use_container_width=True):
+        if st.button("🔄 รีเซ็ต", use_container_width=True):
             st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
             st.session_state.isochrone_data = None
             st.session_state.intersection_data = None
@@ -66,7 +83,6 @@ with st.sidebar:
             
     st.write(f"📍 จำนวนจุด: **{len(st.session_state.markers)}**")
     
-    # แสดงรายการจุด
     if st.session_state.markers:
         st.markdown("---")
         for i, m in enumerate(st.session_state.markers):
@@ -83,12 +99,10 @@ with st.sidebar:
         format_func=lambda x: {"drive": "🚗 ขับรถ", "walk": "🚶 เดินเท้า", "bicycle": "🚲 ปั่นจักรยาน", "transit": "🚌 ขนส่งสาธารณะ"}[x]
     )
     
-    # ให้เลือกได้แค่ค่าเดียวสำหรับ CBD เพื่อความชัดเจน หรือหลายค่าก็ได้ (ในที่นี้รองรับหลายค่าแต่จะหา CBD ของค่าสูงสุดที่เลือก)
-    # แก้ไขส่วน time_intervals
     time_intervals = st.multiselect(
         "ช่วงเวลา (นาที)", 
-        options=[5, 10, 15, 20, 30, 45, 60], # เพิ่ม 20 ตรงนี้
-        default=[5 , 10]
+        options=[5, 10, 15, 20, 30, 45, 60],
+        default=[5, 10]
     )
     
     with st.expander("🎨 ตั้งค่าสีพื้นที่"):
@@ -100,19 +114,12 @@ with st.sidebar:
     st.markdown("---")
     submit_button = st.button("🚀 คำนวณหา CBD", type="primary", use_container_width=True)
 
-# --- 3. Logic คำนวณ Geometry (Helper) ---
+# --- 3. Logic คำนวณ Geometry ---
 def calculate_intersection(features, num_markers):
-    """
-    ฟังก์ชันหาพื้นที่ทับซ้อน (Intersection) ของทุกจุด
-    """
     if num_markers < 2:
-        return None # จุดเดียวไม่มี Intersection กับใคร
+        return None
     
-    # จัดกลุ่ม Polygon ตามเวลา (value)
-    # เราต้องการหา Intersection ของ Polygon ที่มาจากคนละ Marker แต่เวลาเดียวกัน (หรือเวลาที่กำหนด)
-    # เพื่อความง่ายใน MVP: เราจะหา Intersection ของเวลา 'สูงสุด' ที่เลือก เพื่อดูขอบเขตที่กว้างที่สุดที่ทุกคนมาเจอกันได้
-    
-    polys_per_marker = {} # key: marker_index, value: list of polygons
+    polys_per_marker = {}
     
     for feat in features:
         m_idx = feat['properties']['marker_index']
@@ -121,17 +128,13 @@ def calculate_intersection(features, num_markers):
         if m_idx not in polys_per_marker:
             polys_per_marker[m_idx] = geom
         else:
-            # ถ้า 1 marker มีหลายวง (หลายช่วงเวลา) ให้เอาวงที่ใหญ่ที่สุด (Union ตัวเอง) เพื่อเป็นตัวแทนความสามารถในการเดินทางของจุดนั้น
             polys_per_marker[m_idx] = polys_per_marker[m_idx].union(geom)
     
-    # เริ่มต้นหา Intersection
     if not polys_per_marker:
         return None
 
-    # เริ่มจาก Polygon ของจุดแรก
     intersection_poly = polys_per_marker[0]
     
-    # Loop หาจุดตัดกับจุดอื่นๆ
     for i in range(1, num_markers):
         if i in polys_per_marker:
             intersection_poly = intersection_poly.intersection(polys_per_marker[i])
@@ -156,7 +159,6 @@ if submit_button:
                 all_features = []
                 ranges_seconds = ",".join([str(t * 60) for t in sorted(time_intervals)])
                 
-                # 1. Fetch Data
                 for i, marker in enumerate(st.session_state.markers):
                     params = {
                         "lat": marker['lat'], "lon": marker['lng'],
@@ -174,11 +176,8 @@ if submit_button:
                     else:
                         st.error(f"❌ API Error จุดที่ {i+1}: {response.status_code}")
                 
-                # 2. Process Data & Calculate Intersection
                 if all_features:
                     st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
-                    
-                    # คำนวณ Intersection (CBD Logic)
                     cbd_geom = calculate_intersection(all_features, len(st.session_state.markers))
                     if cbd_geom:
                         st.session_state.intersection_data = {
@@ -213,9 +212,8 @@ def get_border_color(marker_idx):
         return HEX_COLORS[marker_idx % len(HEX_COLORS)]
     return '#3388ff'
 
-# --- 6. Display Map ---
+# --- 6. Display Map (ปรับปรุงให้ใหญ่ขึ้น) ---
 def display_map():
-    # Center logic
     if st.session_state.markers:
         last_m = st.session_state.markers[-1]
         center = [last_m['lat'], last_m['lng']]
@@ -224,7 +222,6 @@ def display_map():
 
     m = folium.Map(location=center, zoom_start=11, tiles=map_style)
 
-    # 1. วาด Isochrones ปกติ (Background)
     if st.session_state.isochrone_data:
         folium.GeoJson(
             st.session_state.isochrone_data,
@@ -233,19 +230,18 @@ def display_map():
                 'fillColor': get_fill_color(feature['properties']['travel_time_minutes']),
                 'color': get_border_color(feature['properties']['marker_index']),
                 'weight': 1, 
-                'fillOpacity': 0.2  # ลดความเข้มลงเพื่อให้เห็น CBD ชัดขึ้น
+                'fillOpacity': 0.2
             },
             tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['นาที:'])
         ).add_to(m)
 
-    # 2. วาด Intersection Area (CBD) - Highlight
     if st.session_state.intersection_data:
         folium.GeoJson(
             st.session_state.intersection_data,
             name='🏆 Common CBD Area',
             style_function=lambda feature: {
-                'fillColor': '#FFD700',  # สีทอง
-                'color': '#FF8C00',      # ขอบส้มเข้ม
+                'fillColor': '#FFD700',
+                'color': '#FF8C00',
                 'weight': 3, 
                 'fillOpacity': 0.6,
                 'dashArray': '5, 5'
@@ -253,7 +249,6 @@ def display_map():
             tooltip="🏆 พื้นที่จุดศูนย์กลาง (เข้าถึงได้ทุกคน)"
         ).add_to(m)
 
-    # 3. วาด Markers
     for i, marker in enumerate(st.session_state.markers):
         color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
         folium.Marker(
@@ -262,12 +257,18 @@ def display_map():
             icon=folium.Icon(color=color_name, icon="map-marker", prefix='fa')
         ).add_to(m)
 
-    # Layer Control เพื่อเปิด-ปิด Layer ได้
     folium.LayerControl().add_to(m)
 
-    map_output = st_folium(m, width=1200, height=600, key="geoapify_ck_map")
+    # --- จุดที่แก้ไข: ปรับขนาดแผนที่ ---
+    # height=800: เพิ่มความสูง (จากเดิม 600)
+    # use_container_width=True: ขยายให้เต็มพื้นที่ความกว้างจอ
+    map_output = st_folium(
+        m, 
+        height=850,             # ปรับความสูงตรงนี้ (pixels)
+        use_container_width=True, # ให้กว้างเต็มจอ
+        key="geoapify_ck_map"
+    )
     
-    # Logic การคลิกเพิ่มจุด
     if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
