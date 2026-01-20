@@ -92,8 +92,6 @@ with st.sidebar:
         default=[5 , 10]
     )
     
-    st.info("💡 พื้นที่สีทอง (Gold) คือพื้นที่ที่ทุกจุดสามารถเดินทางมาถึงได้ภายในเวลาที่กำหนด (Intersection)")
-
     with st.expander("🎨 ตั้งค่าสีพื้นที่"):
         st.session_state.colors['step1'] = st.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
         st.session_state.colors['step2'] = st.color_picker("11 - 20 นาที", st.session_state.colors['step2'])
