@@ -1,0 +1,288 @@
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+import requests
+
+# --- 1. การตั้งค่าหน้าเว็บ ---
+st.set_page_config(
+    page_title="Geoapify: Dormitory Site Analysis",
+    page_icon="🏠",
+    layout="wide"
+)
+
+# --- Constants & Config ---
+DEFAULT_LAT = 20.219443
+DEFAULT_LON = 100.403630
+DEFAULT_API_KEY = "4eefdfb0b0d349e595595b9c03a69e3d"
+
+MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
+HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
+
+# Mapping Categories สำหรับการค้นหาทำเลหอพัก
+POI_CATEGORIES = {
+    "🛒 ร้านสะดวกซื้อ/ซุปเปอร์": "commercial.convenience,commercial.supermarket",
+    "🏥 สถานพยาบาล": "healthcare",
+    "🏫 สถานศึกษา": "education",
+    "🍽️ ร้านอาหาร": "catering.restaurant",
+    "🚌 ขนส่งสาธารณะ": "public_transport",
+    "🏦 ธนาคาร/ATM": "service.financial"
+}
+
+# --- 2. Session State Initialization ---
+if 'markers' not in st.session_state:
+    st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
+
+if 'isochrone_data' not in st.session_state:
+    st.session_state.isochrone_data = None
+
+if 'places_data' not in st.session_state:
+    st.session_state.places_data = []  # เก็บข้อมูล POI
+
+if 'colors' not in st.session_state:
+    st.session_state.colors = {
+        'step1': '#2A9D8F', 'step2': '#E9C46A', 
+        'step3': '#F4A261', 'step4': '#D62828'
+    }
+
+# --- 3. Helper Functions (Logic) ---
+
+def fetch_isochrones(api_key, markers, travel_mode, time_intervals):
+    """ดึงข้อมูลพื้นที่การเดินทาง (Isochrone)"""
+    base_url = "https://api.geoapify.com/v1/isoline"
+    all_features = []
+    ranges_seconds = ",".join([str(t * 60) for t in sorted(time_intervals)])
+    
+    for i, marker in enumerate(markers):
+        params = {
+            "lat": marker['lat'], "lon": marker['lng'],
+            "type": "time", "mode": travel_mode,
+            "range": ranges_seconds, "apiKey": api_key
+        }
+        try:
+            response = requests.get(base_url, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                for feature in data.get('features', []):
+                    seconds = feature['properties'].get('value', 0)
+                    feature['properties']['travel_time_minutes'] = seconds / 60
+                    feature['properties']['marker_index'] = i
+                    all_features.append(feature)
+            else:
+                st.error(f"❌ Isochrone API Error จุดที่ {i+1}: {response.status_code}")
+        except Exception as e:
+            st.error(f"❌ Error fetching isochrone: {e}")
+            
+    return {"type": "FeatureCollection", "features": all_features} if all_features else None
+
+def fetch_nearby_places(api_key, markers, categories_str, radius_meters=1500):
+    """ดึงข้อมูลสถานที่สำคัญรอบๆ (Places API)"""
+    base_url = "https://api.geoapify.com/v2/places"
+    all_places = []
+    
+    if not categories_str:
+        return []
+
+    for i, marker in enumerate(markers):
+        params = {
+            "categories": categories_str,
+            "filter": f"circle:{marker['lng']},{marker['lat']},{radius_meters}",
+            "limit": 50, # จำกัดจำนวนเพื่อไม่ให้รกเกินไป
+            "apiKey": api_key
+        }
+        try:
+            response = requests.get(base_url, params=params)
+            if response.status_code == 200:
+                features = response.json().get('features', [])
+                for f in features:
+                    f['properties']['parent_marker_index'] = i # ผูกกับหมุดหลัก
+                all_places.extend(features)
+            else:
+                st.error(f"❌ Places API Error จุดที่ {i+1}: {response.status_code}")
+        except Exception as e:
+            st.error(f"❌ Error fetching places: {e}")
+            
+    return all_places
+
+def get_fill_color(minutes):
+    c = st.session_state.colors
+    if minutes <= 10: return c['step1']
+    elif minutes <= 20: return c['step2']
+    elif minutes <= 30: return c['step3']
+    else: return c['step4']
+
+def get_border_color(marker_idx):
+    if marker_idx is not None:
+        return HEX_COLORS[marker_idx % len(HEX_COLORS)]
+    return '#3388ff'
+
+# --- 4. Main UI & App Logic ---
+
+st.title("🌍 Geoapify: วิเคราะห์ทำเลหอพัก/บ้านเช่า")
+st.caption(f"📍 วิเคราะห์พื้นที่การเข้าถึงและสิ่งอำนวยความสะดวก เพื่อตัดสินใจลงทุน")
+
+# --- Sidebar ---
+with st.sidebar:
+    st.header("⚙️ การตั้งค่า")
+    
+    api_key = st.text_input("API Key", value=DEFAULT_API_KEY, type="password")
+    st.markdown("---")
+    
+    # 1. จัดการหมุด
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
+            if st.session_state.markers:
+                st.session_state.markers.pop()
+                st.rerun()
+    with col_btn2:
+        if st.button("🔄 รีเซ็ต (เชียงของ)", use_container_width=True):
+            st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
+            st.session_state.isochrone_data = None
+            st.session_state.places_data = []
+            st.rerun()
+            
+    st.write(f"📍 จำนวนจุดวิเคราะห์: **{len(st.session_state.markers)}**")
+    
+    if st.session_state.markers:
+        st.markdown("---")
+        for i, m in enumerate(st.session_state.markers):
+            color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
+            st.markdown(f"<span style='color:{color_name};'>●</span> จุดที่ {i+1} ({m['lat']:.4f}, {m['lng']:.4f})", unsafe_allow_html=True)
+
+    st.markdown("---")
+    
+    # 2. ตั้งค่าการเดินทาง (เดิม)
+    map_style = st.selectbox("สไตล์แผนที่", ["OpenStreetMap", "CartoDB positron", "CartoDB dark_matter"])
+    travel_mode = st.selectbox(
+        "รูปแบบการเดินทาง",
+        options=["drive", "walk", "bicycle", "transit"], 
+        format_func=lambda x: {"drive": "🚗 ขับรถ", "walk": "🚶 เดินเท้า", "bicycle": "🚲 ปั่นจักรยาน", "transit": "🚌 ขนส่งสาธารณะ"}[x]
+    )
+    time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 30, 45, 60], default=[5])
+
+    # 3. ตั้งค่าสิ่งอำนวยความสะดวก (ใหม่ - Goal 1)
+    st.markdown("---")
+    st.subheader("🏙️ สิ่งอำนวยความสะดวก (POI)")
+    selected_poi_labels = st.multiselect(
+        "เลือกสถานที่ใกล้เคียง", 
+        options=list(POI_CATEGORIES.keys()),
+        default=["🛒 ร้านสะดวกซื้อ/ซุปเปอร์"]
+    )
+    
+    with st.expander("🎨 ตั้งค่าสีพื้นที่ (Isochrone)"):
+        st.session_state.colors['step1'] = st.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
+        st.session_state.colors['step2'] = st.color_picker("11 - 20 นาที", st.session_state.colors['step2'])
+        st.session_state.colors['step3'] = st.color_picker("21 - 30 นาที", st.session_state.colors['step3'])
+        st.session_state.colors['step4'] = st.color_picker("> 30 นาที", st.session_state.colors['step4'])
+
+    st.markdown("---")
+    submit_button = st.button("🚀 วิเคราะห์ทำเล (คำนวณ)", type="primary", use_container_width=True)
+
+# --- 5. Logic Execution ---
+if submit_button:
+    if not api_key:
+        st.warning("⚠️ กรุณาใส่ API Key")
+    elif not st.session_state.markers:
+        st.warning("⚠️ กรุณาเพิ่มหมุด")
+    elif not time_intervals:
+        st.warning("⚠️ กรุณาเลือกเวลา")
+    else:
+        with st.spinner('กำลังวิเคราะห์ข้อมูลพื้นที่และสถานที่...'):
+            # 1. Fetch Isochrones
+            st.session_state.isochrone_data = fetch_isochrones(
+                api_key, st.session_state.markers, travel_mode, time_intervals
+            )
+            
+            # 2. Fetch Places (POI) - Goal 1
+            if selected_poi_labels:
+                # รวม categories ที่เลือกเป็น string เดียวคั่นด้วย comma
+                cats_to_search = ",".join([POI_CATEGORIES[label] for label in selected_poi_labels])
+                st.session_state.places_data = fetch_nearby_places(
+                    api_key, st.session_state.markers, cats_to_search
+                )
+            else:
+                st.session_state.places_data = []
+                
+            st.success("✅ การวิเคราะห์เสร็จสมบูรณ์!")
+
+# --- 6. Display Map & Results ---
+
+# แสดงสรุปข้อมูล POI (Goal 1 Extra)
+if st.session_state.places_data:
+    st.info(f"🔎 พบสถานที่น่าสนใจทั้งหมด {len(st.session_state.places_data)} แห่ง ในบริเวณรอบจุดวิเคราะห์")
+
+def display_map():
+    if st.session_state.markers:
+        last_m = st.session_state.markers[-1]
+        center = [last_m['lat'], last_m['lng']]
+    else:
+        center = [DEFAULT_LAT, DEFAULT_LON]
+
+    m = folium.Map(location=center, zoom_start=13, tiles=map_style)
+
+    # Layer 1: Isochrones (พื้นที่เดินทาง)
+    if st.session_state.isochrone_data:
+        folium.GeoJson(
+            st.session_state.isochrone_data,
+            name='Travel Area',
+            style_function=lambda feature: {
+                'fillColor': get_fill_color(feature['properties']['travel_time_minutes']),
+                'color': get_border_color(feature['properties']['marker_index']),
+                'weight': 2, 'fillOpacity': 0.4
+            },
+            tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['เดินทาง(นาที):'])
+        ).add_to(m)
+
+    # Layer 2: POI Markers (สถานที่สำคัญ) - Goal 1
+    if st.session_state.places_data:
+        for place in st.session_state.places_data:
+            props = place.get('properties', {})
+            lat = props.get('lat')
+            lon = props.get('lon')
+            name = props.get('name', 'Unknown Place')
+            category = props.get('categories', ['place'])[0]
+            
+            # สร้าง HTML สำหรับ Popup
+            popup_html = f"<b>{name}</b><br><span style='font-size:0.8em'>{category}</span>"
+            
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=4,
+                color='white',
+                weight=1,
+                fill=True,
+                fill_color='#333333', # สีเทาเข้ม
+                fill_opacity=0.9,
+                popup=folium.Popup(popup_html, max_width=200),
+                tooltip=name
+            ).add_to(m)
+
+    # Layer 3: Main Markers (จุดที่เลือก)
+    for i, marker in enumerate(st.session_state.markers):
+        color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
+        folium.Marker(
+            [marker['lat'], marker['lng']],
+            popup=f"จุดวิเคราะห์ที่ {i+1}",
+            icon=folium.Icon(color=color_name, icon="home", prefix='fa')
+        ).add_to(m)
+
+    # Render Map
+    map_output = st_folium(m, width=1200, height=600, key="geoapify_ck_map")
+    
+    # Handle Map Clicks (Add new marker)
+    if map_output and map_output.get('last_clicked'):
+        clicked_lat = map_output['last_clicked']['lat']
+        clicked_lng = map_output['last_clicked']['lng']
+        
+        is_new = True
+        if st.session_state.markers:
+            last_mk = st.session_state.markers[-1]
+            # ป้องกันการคลิกซ้ำตำแหน่งเดิม
+            if abs(clicked_lat - last_mk['lat']) < 0.00001 and abs(clicked_lng - last_mk['lng']) < 0.00001:
+                is_new = False
+        
+        if is_new:
+            st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
+            st.rerun()
+
+display_map()
