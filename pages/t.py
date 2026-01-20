@@ -37,8 +37,7 @@ if 'colors' not in st.session_state:
 MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
-st.caption("🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD)")
-st.caption(f"📍 พิกัดเริ่มต้น: {DEFAULT_LAT}, {DEFAULT_LON}")
+st.caption(f"📍 พิกัดเริ่มต้น: {DEFAULT_LAT}, {DEFAULT_LON} , 🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD) ")
 
 # --- 2. Sidebar ---
 with st.sidebar:
