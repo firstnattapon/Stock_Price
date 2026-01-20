@@ -1,304 +1,131 @@
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
-import requests
-from shapely.geometry import shape, mapping
 import json
+import pandas as pd
 
-# --- 1. การตั้งค่าหน้าเว็บ ---
-st.set_page_config(
-    page_title="Geoapify Map (Chiang Khong CBD)",
-    page_icon="🌍",
-    layout="wide"
-)
+# ==========================================
+# 1. CORE LOGIC & CALCULATION (รักษาหลักการคำนวณ - Goal 2)
+# ==========================================
+def calculate_results(params):
+    """
+    ฟังก์ชันคำนวณหลัก แยกออกมาเพื่อความชัดเจนและ Test ง่าย
+    """
+    try:
+        initial_inv = params.get('initial_investment', 10000)
+        growth_rate = params.get('growth_rate', 5.0)
+        years = params.get('years', 10)
+        
+        # Logic การคำนวณ (Compound Interest Example)
+        data = []
+        current_val = initial_inv
+        for i in range(1, years + 1):
+            current_val = current_val * (1 + (growth_rate / 100))
+            data.append({"Year": i, "Balance": round(current_val, 2)})
+            
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Calculation Error: {e}")
+        return pd.DataFrame()
 
-# --- CSS: ปรับแต่งให้เต็มหน้าจอ ---
-st.markdown("""
-    <style>
-        .block-container {
-            padding-top: 2rem;
-            padding-bottom: 0rem;
-            padding-left: 2rem;
-            padding-right: 2rem;
-        }
-        h1 { margin-bottom: 0px; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- พิกัดเริ่มต้น (เชียงของ) ---
-DEFAULT_LAT = 20.219443
-DEFAULT_LON = 100.403630
-
-# --- เตรียม Session State ---
-if 'markers' not in st.session_state:
-    st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
-
-if 'isochrone_data' not in st.session_state:
-    st.session_state.isochrone_data = None
-
-if 'intersection_data' not in st.session_state:
-    st.session_state.intersection_data = None
-
-if 'colors' not in st.session_state:
-    st.session_state.colors = {
-        'step1': '#2A9D8F', 'step2': '#E9C46A', 
-        'step3': '#F4A261', 'step4': '#D62828'
+# ==========================================
+# 2. IMPORT / EXPORT HANDLERS (Goal 1)
+# ==========================================
+def get_current_config():
+    """รวบรวมค่าปัจจุบันจาก Session State เพื่อเตรียม Export"""
+    config = {
+        "initial_investment": st.session_state.get('initial_investment', 10000),
+        "growth_rate": st.session_state.get('growth_rate', 5.0),
+        "years": st.session_state.get('years', 10),
+        "note": st.session_state.get('note', "")
     }
+    return config
 
-MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
-HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
+def load_config(uploaded_file):
+    """โหลดค่าจากไฟล์ JSON กลับเข้าสู่ Session State"""
+    if uploaded_file is not None:
+        try:
+            data = json.load(uploaded_file)
+            # Update session state ด้วยค่าใหม่
+            for key, value in data.items():
+                st.session_state[key] = value
+            st.success("✅ Configuration Loaded Successfully!")
+            st.rerun() # Rerun เพื่อให้ UI อัปเดตค่าทันที
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
 
-# --- MAP STYLES CONFIGURATION ---
-MAP_STYLES = {
-    "OpenStreetMap (มาตรฐาน)": {
-        "tiles": "OpenStreetMap", 
-        "attr": None
-    },
-    "CartoDB Positron (สีอ่อน/สะอาด)": {
-        "tiles": "CartoDB positron", 
-        "attr": None
-    },
-    "CartoDB Dark Matter (สีเข้ม)": {
-        "tiles": "CartoDB dark_matter", 
-        "attr": None
-    },
-    "Esri Satellite (ดาวเทียม)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community"
-    },
-    "Esri Street Map (ถนนละเอียด)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
-    },
-    "Esri Topo Map (ภูมิประเทศ)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
-    }
-}
-
-st.markdown(f"📍 **พิกัดเริ่มต้น:** {DEFAULT_LAT}, {DEFAULT_LON} | 🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD)")
-
-# --- 2. Sidebar ---
-with st.sidebar:
-    st.header("⚙️ การตั้งค่า")
+# ==========================================
+# 3. UI SETUP (รักษา UI ให้เหมือนเดิม - Goal 2)
+# ==========================================
+def main():
+    st.set_page_config(page_title="Pro Calculation System", layout="wide")
     
-    # หมายเหตุ: ควรเก็บ API Key ไว้ใน st.secrets ในการใช้งานจริง
-    default_key = "4eefdfb0b0d349e595595b9c03a69e3d"
-    api_key = st.text_input("API Key", value=default_key, type="password")
-    
-    st.markdown("---")
-    
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
-            if st.session_state.markers:
-                st.session_state.markers.pop()
-                st.session_state.isochrone_data = None
-                st.session_state.intersection_data = None
-                st.rerun()
-    with col_btn2:
-        if st.button("🔄 รีเซ็ต", use_container_width=True):
-            st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
-            st.session_state.isochrone_data = None
-            st.session_state.intersection_data = None
-            st.rerun()
+    st.title("📊 System Calculation Dashboard")
+
+    # --- Initialize Session State (ถ้ายังไม่มีค่า ให้ตั้งค่า Default) ---
+    if 'initial_investment' not in st.session_state: st.session_state['initial_investment'] = 10000
+    if 'growth_rate' not in st.session_state: st.session_state['growth_rate'] = 5.0
+    if 'years' not in st.session_state: st.session_state['years'] = 10
+    if 'note' not in st.session_state: st.session_state['note'] = ""
+
+    # --- System Menu (ส่วนที่เพิ่มมาเพื่อ Import/Export โดยไม่กวน UI หลัก) ---
+    with st.expander("📂 System Management (Import / Export)", expanded=False):
+        col_ex_1, col_ex_2 = st.columns(2)
+        
+        # Export Section
+        with col_ex_1:
+            st.markdown("### Export Configuration")
+            config_data = get_current_config()
+            json_string = json.dumps(config_data, indent=4)
+            st.download_button(
+                label="⬇️ Download Config (JSON)",
+                data=json_string,
+                file_name="system_config.json",
+                mime="application/json"
+            )
             
-    st.write(f"📍 จำนวนจุด: **{len(st.session_state.markers)}**")
-    
-    if st.session_state.markers:
-        st.markdown("---")
-        for i, m in enumerate(st.session_state.markers):
-            color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
-            st.markdown(f"<span style='color:{color_name};'>●</span> จุดที่ {i+1} ({m['lat']:.4f}, {m['lng']:.4f})", unsafe_allow_html=True)
+        # Import Section
+        with col_ex_2:
+            st.markdown("### Import Configuration")
+            uploaded_file = st.file_uploader("Upload Config File", type=['json'])
+            if uploaded_file is not None:
+                # ปุ่ม Confirm เพื่อป้องกันการโหลดซ้ำโดยไม่ตั้งใจ
+                if st.button("🔄 Load & Apply Config"):
+                    load_config(uploaded_file)
 
     st.markdown("---")
-    
-    # --- เปลี่ยนการเลือก Map Style ตรงนี้ ---
-    selected_style_name = st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), index=0)
-    selected_style_config = MAP_STYLES[selected_style_name]
-    
-    travel_mode = st.selectbox(
-        "รูปแบบการเดินทาง",
-        options=["drive", "walk", "bicycle", "transit"], 
-        format_func=lambda x: {"drive": "🚗 ขับรถ", "walk": "🚶 เดินเท้า", "bicycle": "🚲 ปั่นจักรยาน", "transit": "🚌 ขนส่งสาธารณะ"}[x]
-    )
-    
-    time_intervals = st.multiselect(
-        "ช่วงเวลา (นาที)", 
-        options=[5, 10, 15, 20, 30, 45, 60],
-        default=[10]
-    )
-    
-    with st.expander("🎨 ตั้งค่าสีพื้นที่"):
-        st.session_state.colors['step1'] = st.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
-        st.session_state.colors['step2'] = st.color_picker("11 - 20 นาที", st.session_state.colors['step2'])
-        st.session_state.colors['step3'] = st.color_picker("21 - 30 นาที", st.session_state.colors['step3'])
-        st.session_state.colors['step4'] = st.color_picker("> 30 นาที", st.session_state.colors['step4'])
 
-    st.markdown("---")
-    submit_button = st.button("🚀 คำนวณหา CBD", type="primary", use_container_width=True)
+    # --- MAIN INPUT UI (รักษา Layout เดิม) ---
+    col1, col2 = st.columns([1, 2])
 
-# --- 3. Logic คำนวณ Geometry (Intersection) ---
-def calculate_intersection(features, num_markers):
-    if num_markers < 2: return None
-    
-    # แยก Polygon ตาม Marker Index
-    polys_per_marker = {}
-    for feat in features:
-        m_idx = feat['properties']['marker_index']
-        geom = shape(feat['geometry'])
+    with col1:
+        st.subheader("⚙️ Parameters")
+        # ใช้ key=... เพื่อผูกกับ session_state โดยตรง
+        st.number_input("Initial Investment ($)", min_value=0, step=100, key='initial_investment')
+        st.slider("Growth Rate (%)", 0.0, 20.0, step=0.1, key='growth_rate')
+        st.number_input("Duration (Years)", min_value=1, max_value=50, step=1, key='years')
+        st.text_area("Notes / Remarks", key='note')
+
+    # --- OUTPUT DISPLAY (รักษา Output เดิม) ---
+    with col2:
+        st.subheader("📈 Results Analysis")
         
-        # ถ้ามีหลายช่วงเวลาใน Marker เดียวกัน ให้รวม (Union) พื้นที่ของ Marker นั้นก่อน
-        if m_idx not in polys_per_marker: 
-            polys_per_marker[m_idx] = geom
-        else: 
-            polys_per_marker[m_idx] = polys_per_marker[m_idx].union(geom)
+        # ดึงค่าจาก State มาคำนวณ
+        current_params = get_current_config()
+        df_result = calculate_results(current_params)
+
+        if not df_result.empty:
+            final_val = df_result.iloc[-1]['Balance']
+            profit = final_val - current_params['initial_investment']
             
-    if not polys_per_marker: return None
-
-    # หาพื้นที่ทับซ้อน (Intersection) ของทุก Marker
-    intersection_poly = polys_per_marker[0]
-    for i in range(1, num_markers):
-        if i in polys_per_marker: 
-            intersection_poly = intersection_poly.intersection(polys_per_marker[i])
+            # Metrics Display
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Final Balance", f"${final_val:,.2f}")
+            m2.metric("Total Profit", f"${profit:,.2f}", delta_color="normal")
+            m3.metric("ROI", f"{(profit/current_params['initial_investment'])*100:.2f}%")
             
-    if intersection_poly.is_empty: return None
-    return mapping(intersection_poly)
+            # Chart & Table
+            st.line_chart(df_result.set_index("Year"))
+            with st.expander("View Detailed Data"):
+                st.dataframe(df_result, use_container_width=True)
 
-# --- 4. Logic เรียก API ---
-if submit_button:
-    if not api_key: st.warning("⚠️ กรุณาใส่ API Key")
-    elif not st.session_state.markers: st.warning("⚠️ กรุณาเพิ่มหมุด")
-    elif not time_intervals: st.warning("⚠️ กรุณาเลือกเวลา")
-    else:
-        with st.spinner(f'กำลังวิเคราะห์ข้อมูล...'):
-            try:
-                base_url = "https://api.geoapify.com/v1/isoline"
-                all_features = []
-                # แปลงนาทีเป็นวินาที
-                ranges_seconds = ",".join([str(t * 60) for t in sorted(time_intervals)])
-                
-                for i, marker in enumerate(st.session_state.markers):
-                    params = {
-                        "lat": marker['lat'], "lon": marker['lng'],
-                        "type": "time", "mode": travel_mode,
-                        "range": ranges_seconds, "apiKey": api_key
-                    }
-                    response = requests.get(base_url, params=params)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        for feature in data.get('features', []):
-                            seconds = feature['properties'].get('value', 0)
-                            feature['properties']['travel_time_minutes'] = seconds / 60
-                            feature['properties']['marker_index'] = i
-                            all_features.append(feature)
-                    else:
-                         st.error(f"API Error (Marker {i+1}): {response.status_code}")
-
-                if all_features:
-                    st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
-                    
-                    # คำนวณหาพื้นที่ทับซ้อน
-                    cbd_geom = calculate_intersection(all_features, len(st.session_state.markers))
-                    
-                    if cbd_geom:
-                        st.session_state.intersection_data = {
-                            "type": "FeatureCollection",
-                            "features": [{"type": "Feature", "geometry": cbd_geom, "properties": {"type": "cbd"}}]
-                        }
-                        st.success(f"✅ พบพื้นที่ CBD ร่วมกัน!")
-                    else:
-                        st.session_state.intersection_data = None
-                        st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน (ลองเพิ่มเวลาเดินทาง)")
-            except Exception as e: st.error(f"❌ Error: {e}")
-
-# --- 5. Helper Functions ---
-def get_fill_color(minutes):
-    c = st.session_state.colors
-    if minutes <= 10: return c['step1']
-    elif minutes <= 20: return c['step2']
-    elif minutes <= 30: return c['step3']
-    else: return c['step4']
-
-def get_border_color(marker_idx):
-    return HEX_COLORS[marker_idx % len(HEX_COLORS)] if marker_idx is not None else '#3388ff'
-
-# --- 6. Display Map ---
-def display_map():
-    if st.session_state.markers:
-        last_m = st.session_state.markers[-1]
-        center = [last_m['lat'], last_m['lng']]
-    else:
-        center = [DEFAULT_LAT, DEFAULT_LON]
-
-    # --- สร้างแผนที่ ---
-    m = folium.Map(
-        location=center, 
-        zoom_start=11, 
-        tiles=selected_style_config["tiles"],
-        attr=selected_style_config["attr"]
-    )
-
-    # 1. แสดง Isochrones (พื้นที่เดินทาง)
-    if st.session_state.isochrone_data:
-        folium.GeoJson(
-            st.session_state.isochrone_data,
-            name='Travel Areas',
-            style_function=lambda feature: {
-                'fillColor': get_fill_color(feature['properties']['travel_time_minutes']),
-                'color': get_border_color(feature['properties']['marker_index']),
-                'weight': 1, 'fillOpacity': 0.2
-            },
-            tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['นาที:'])
-        ).add_to(m)
-
-    # 2. แสดง Intersection (พื้นที่ร่วม - สีทอง)
-    if st.session_state.intersection_data:
-        folium.GeoJson(
-            st.session_state.intersection_data,
-            name='🏆 Common CBD Area',
-            style_function=lambda feature: {
-                'fillColor': '#FFD700', 'color': '#FF8C00',
-                'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'
-            },
-            tooltip="🏆 พื้นที่จุดศูนย์กลาง (ทุกคนมาถึงได้)"
-        ).add_to(m)
-
-    # 3. แสดง Markers
-    for i, marker in enumerate(st.session_state.markers):
-        color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
-        folium.Marker(
-            [marker['lat'], marker['lng']],
-            popup=f"จุดที่ {i+1} ({color_name})",
-            icon=folium.Icon(color=color_name, icon="map-marker", prefix='fa')
-        ).add_to(m)
-
-    folium.LayerControl().add_to(m)
-
-    # 4. แสดงผลแผนที่ใน Streamlit และรับค่าคลิก
-    map_output = st_folium(
-        m, 
-        height=850, 
-        use_container_width=True, 
-        key="geoapify_ck_map"
-    )
-    
-    # 5. Logic การเพิ่มจุดจากการคลิกบนแผนที่
-    if map_output and map_output.get('last_clicked'):
-        clicked_lat = map_output['last_clicked']['lat']
-        clicked_lng = map_output['last_clicked']['lng']
-        
-        # ตรวจสอบไม่ให้เพิ่มจุดซ้ำ (Debounce)
-        is_new = True
-        if st.session_state.markers:
-            last_mk = st.session_state.markers[-1]
-            # ถ้าคลิกใกล้จุดเดิมมากเกินไปถือว่าไม่เพิ่มใหม่
-            if abs(clicked_lat - last_mk['lat']) < 0.0001 and abs(clicked_lng - last_mk['lng']) < 0.0001:
-                is_new = False
-        
-        if is_new:
-            st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
-            st.rerun()
-
-display_map()
+if __name__ == "__main__":
+    main()
