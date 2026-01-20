@@ -125,7 +125,7 @@ with st.sidebar:
     time_intervals = st.multiselect(
         "ช่วงเวลา (นาที)", 
         options=[5, 10, 15, 20, 30, 45, 60],
-        default=[5, 10]
+        default=[5]
     )
     
     with st.expander("🎨 ตั้งค่าสีพื้นที่"):
