@@ -1,4 +1,3 @@
-shapelynumpy
 pandas
 streamlit
 yfinance  
