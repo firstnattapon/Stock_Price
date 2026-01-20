@@ -19,4 +19,4 @@ openrouteservice
 folium
 streamlit-folium
 traveltimepy
-shapely==2.0.2
+shapely
