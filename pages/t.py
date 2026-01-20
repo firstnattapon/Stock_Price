@@ -48,7 +48,7 @@ if 'colors' not in st.session_state:
 MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
-# --- MAP STYLES CONFIGURATION (เพิ่มส่วนนี้) ---
+# --- MAP STYLES CONFIGURATION ---
 MAP_STYLES = {
     "OpenStreetMap (มาตรฐาน)": {
         "tiles": "OpenStreetMap", 
@@ -82,6 +82,7 @@ st.markdown(f"📍 **พิกัดเริ่มต้น:** {DEFAULT_LAT}, {
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
     
+    # หมายเหตุ: ควรเก็บ API Key ไว้ใน st.secrets ในการใช้งานจริง
     default_key = "4eefdfb0b0d349e595595b9c03a69e3d"
     api_key = st.text_input("API Key", value=default_key, type="password")
     
@@ -125,7 +126,7 @@ with st.sidebar:
     time_intervals = st.multiselect(
         "ช่วงเวลา (นาที)", 
         options=[5, 10, 15, 20, 30, 45, 60],
-        default=[5]
+        default=[10]
     )
     
     with st.expander("🎨 ตั้งค่าสีพื้นที่"):
@@ -137,19 +138,30 @@ with st.sidebar:
     st.markdown("---")
     submit_button = st.button("🚀 คำนวณหา CBD", type="primary", use_container_width=True)
 
-# --- 3. Logic คำนวณ Geometry ---
+# --- 3. Logic คำนวณ Geometry (Intersection) ---
 def calculate_intersection(features, num_markers):
     if num_markers < 2: return None
+    
+    # แยก Polygon ตาม Marker Index
     polys_per_marker = {}
     for feat in features:
         m_idx = feat['properties']['marker_index']
         geom = shape(feat['geometry'])
-        if m_idx not in polys_per_marker: polys_per_marker[m_idx] = geom
-        else: polys_per_marker[m_idx] = polys_per_marker[m_idx].union(geom)
+        
+        # ถ้ามีหลายช่วงเวลาใน Marker เดียวกัน ให้รวม (Union) พื้นที่ของ Marker นั้นก่อน
+        if m_idx not in polys_per_marker: 
+            polys_per_marker[m_idx] = geom
+        else: 
+            polys_per_marker[m_idx] = polys_per_marker[m_idx].union(geom)
+            
     if not polys_per_marker: return None
+
+    # หาพื้นที่ทับซ้อน (Intersection) ของทุก Marker
     intersection_poly = polys_per_marker[0]
     for i in range(1, num_markers):
-        if i in polys_per_marker: intersection_poly = intersection_poly.intersection(polys_per_marker[i])
+        if i in polys_per_marker: 
+            intersection_poly = intersection_poly.intersection(polys_per_marker[i])
+            
     if intersection_poly.is_empty: return None
     return mapping(intersection_poly)
 
@@ -163,7 +175,9 @@ if submit_button:
             try:
                 base_url = "https://api.geoapify.com/v1/isoline"
                 all_features = []
+                # แปลงนาทีเป็นวินาที
                 ranges_seconds = ",".join([str(t * 60) for t in sorted(time_intervals)])
+                
                 for i, marker in enumerate(st.session_state.markers):
                     params = {
                         "lat": marker['lat'], "lon": marker['lng'],
@@ -171,6 +185,7 @@ if submit_button:
                         "range": ranges_seconds, "apiKey": api_key
                     }
                     response = requests.get(base_url, params=params)
+                    
                     if response.status_code == 200:
                         data = response.json()
                         for feature in data.get('features', []):
@@ -178,9 +193,15 @@ if submit_button:
                             feature['properties']['travel_time_minutes'] = seconds / 60
                             feature['properties']['marker_index'] = i
                             all_features.append(feature)
+                    else:
+                         st.error(f"API Error (Marker {i+1}): {response.status_code}")
+
                 if all_features:
                     st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
+                    
+                    # คำนวณหาพื้นที่ทับซ้อน
                     cbd_geom = calculate_intersection(all_features, len(st.session_state.markers))
+                    
                     if cbd_geom:
                         st.session_state.intersection_data = {
                             "type": "FeatureCollection",
@@ -189,7 +210,7 @@ if submit_button:
                         st.success(f"✅ พบพื้นที่ CBD ร่วมกัน!")
                     else:
                         st.session_state.intersection_data = None
-                        st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน" if len(st.session_state.markers) > 1 else "✅ คำนวณสำเร็จ")
+                        st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน (ลองเพิ่มเวลาเดินทาง)")
             except Exception as e: st.error(f"❌ Error: {e}")
 
 # --- 5. Helper Functions ---
@@ -211,7 +232,7 @@ def display_map():
     else:
         center = [DEFAULT_LAT, DEFAULT_LON]
 
-    # --- สร้างแผนที่โดยใช้ Config ที่เลือกมา ---
+    # --- สร้างแผนที่ ---
     m = folium.Map(
         location=center, 
         zoom_start=11, 
@@ -219,6 +240,7 @@ def display_map():
         attr=selected_style_config["attr"]
     )
 
+    # 1. แสดง Isochrones (พื้นที่เดินทาง)
     if st.session_state.isochrone_data:
         folium.GeoJson(
             st.session_state.isochrone_data,
@@ -231,6 +253,7 @@ def display_map():
             tooltip=folium.GeoJsonTooltip(fields=['travel_time_minutes'], aliases=['นาที:'])
         ).add_to(m)
 
+    # 2. แสดง Intersection (พื้นที่ร่วม - สีทอง)
     if st.session_state.intersection_data:
         folium.GeoJson(
             st.session_state.intersection_data,
@@ -239,9 +262,10 @@ def display_map():
                 'fillColor': '#FFD700', 'color': '#FF8C00',
                 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'
             },
-            tooltip="🏆 พื้นที่จุดศูนย์กลาง (เข้าถึงได้ทุกคน)"
+            tooltip="🏆 พื้นที่จุดศูนย์กลาง (ทุกคนมาถึงได้)"
         ).add_to(m)
 
+    # 3. แสดง Markers
     for i, marker in enumerate(st.session_state.markers):
         color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
         folium.Marker(
@@ -252,6 +276,7 @@ def display_map():
 
     folium.LayerControl().add_to(m)
 
+    # 4. แสดงผลแผนที่ใน Streamlit และรับค่าคลิก
     map_output = st_folium(
         m, 
         height=850, 
@@ -259,14 +284,19 @@ def display_map():
         key="geoapify_ck_map"
     )
     
+    # 5. Logic การเพิ่มจุดจากการคลิกบนแผนที่
     if map_output and map_output.get('last_clicked'):
         clicked_lat = map_output['last_clicked']['lat']
         clicked_lng = map_output['last_clicked']['lng']
+        
+        # ตรวจสอบไม่ให้เพิ่มจุดซ้ำ (Debounce)
         is_new = True
         if st.session_state.markers:
             last_mk = st.session_state.markers[-1]
-            if abs(clicked_lat - last_mk['lat']) < 0.00001 and abs(clicked_lng - last_mk['lng']) < 0.00001:
+            # ถ้าคลิกใกล้จุดเดิมมากเกินไปถือว่าไม่เพิ่มใหม่
+            if abs(clicked_lat - last_mk['lat']) < 0.0001 and abs(clicked_lng - last_mk['lng']) < 0.0001:
                 is_new = False
+        
         if is_new:
             st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
             st.rerun()
