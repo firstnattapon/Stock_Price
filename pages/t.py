@@ -81,7 +81,7 @@ if 'map_style_name' not in st.session_state: st.session_state.map_style_name = l
 if 'travel_mode' not in st.session_state: st.session_state.travel_mode = "drive"
 if 'time_intervals' not in st.session_state: st.session_state.time_intervals = [5]
 
-st.markdown(f"📍 **พิกัดเริ่มต้น:** {DEFAULT_LAT}, {DEFAULT_LON} | 🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD)")
+# st.markdown(f"📍 **พิกัดเริ่มต้น:** {DEFAULT_LAT}, {DEFAULT_LON} | 🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD)")
 
 # --- 2. Sidebar ---
 with st.sidebar:
