@@ -4,7 +4,6 @@ from streamlit_folium import st_folium
 import requests
 from shapely.geometry import shape, mapping
 import json
-import io
 
 # --- 1. การตั้งค่าหน้าเว็บ ---
 st.set_page_config(
@@ -13,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CSS: ปรับแต่งให้เต็มหน้าจอ ---
+# --- CSS: ปรับแต่งให้เต็มหน้าจอ และปรับแต่งปุ่มลบเล็กๆ ---
 st.markdown("""
     <style>
         .block-container {
@@ -23,6 +22,11 @@ st.markdown("""
             padding-right: 2rem;
         }
         h1 { margin-bottom: 0px; }
+        /* ปรับแต่งปุ่มลบให้ดูเหมาะสมในบรรทัด */
+        div[data-testid="stVerticalBlock"] > div > div[data-testid="stHorizontalBlock"] button {
+            padding: 0rem 0.5rem;
+            line-height: 1.5;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -63,7 +67,6 @@ MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'c
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
 # --- เตรียม Session State (Initialize) ---
-# เรากำหนดค่าเริ่มต้นให้ Session State หากยังไม่มีค่า
 if 'markers' not in st.session_state:
     st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON}]
 if 'isochrone_data' not in st.session_state:
@@ -75,21 +78,19 @@ if 'colors' not in st.session_state:
         'step1': '#2A9D8F', 'step2': '#E9C46A', 
         'step3': '#F4A261', 'step4': '#D62828'
     }
-# Initialize widget states if not present (เพื่อรองรับ Import/Export)
+# Initialize widget states if not present
 if 'api_key' not in st.session_state: st.session_state.api_key = DEFAULT_API_KEY
 if 'map_style_name' not in st.session_state: st.session_state.map_style_name = list(MAP_STYLES.keys())[0]
 if 'travel_mode' not in st.session_state: st.session_state.travel_mode = "drive"
 if 'time_intervals' not in st.session_state: st.session_state.time_intervals = [5]
 
-# st.markdown(f"📍 **พิกัดเริ่มต้น:** {DEFAULT_LAT}, {DEFAULT_LON} | 🌍 Geoapify: ค้นหาจุดศูนย์กลาง (Local CBD)")
-
 # --- 2. Sidebar ---
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
 
-    # --- NEW: ส่วนจัดการไฟล์ Import/Export ---
+    # --- ส่วนจัดการไฟล์ Import/Export ---
     with st.expander("📂 จัดการไฟล์ (Import / Export)", expanded=False):
-        # 1. Export Logic
+        # 1. Export
         export_data = {
             "markers": st.session_state.markers,
             "isochrone_data": st.session_state.isochrone_data,
@@ -109,12 +110,11 @@ with st.sidebar:
             use_container_width=True
         )
 
-        # 2. Import Logic
+        # 2. Import
         uploaded_file = st.file_uploader("📂 เปิดไฟล์เดิม (Import JSON)", type=["json"])
         if uploaded_file is not None:
             try:
                 data = json.load(uploaded_file)
-                # Update Session State with loaded data
                 st.session_state.markers = data.get("markers", st.session_state.markers)
                 st.session_state.isochrone_data = data.get("isochrone_data", None)
                 st.session_state.intersection_data = data.get("intersection_data", None)
@@ -132,13 +132,15 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # Input API Key (ผูก key เพื่อให้ Save ได้)
+    # Input API Key
     api_key = st.text_input("API Key", key="api_key", type="password")
     
     st.markdown("---")
     
+    # --- ปุ่มควบคุมหลัก (Delete Last / Reset) ---
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
+        # ปุ่มลบตัวล่าสุด (เก็บไว้ตามเดิม)
         if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
             if st.session_state.markers:
                 st.session_state.markers.pop()
@@ -154,23 +156,38 @@ with st.sidebar:
             
     st.write(f"📍 จำนวนจุด: **{len(st.session_state.markers)}**")
     
+    # --- รายการจุด (List of Markers) พร้อมปุ่มลบรายตัว ---
     if st.session_state.markers:
         st.markdown("---")
+        # ใช้ enumerate เพื่อให้ได้ index มาใช้ระบุตัวที่จะลบ
         for i, m in enumerate(st.session_state.markers):
             color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
-            st.markdown(f"<span style='color:{color_name};'>●</span> จุดที่ {i+1} ({m['lat']:.4f}, {m['lng']:.4f})", unsafe_allow_html=True)
+            
+            # แบ่งคอลัมน์: Text และ ปุ่ม Delete
+            c_text, c_del = st.columns([0.85, 0.15])
+            
+            with c_text:
+                st.markdown(
+                    f"<span style='color:{color_name};'>●</span> จุดที่ {i+1} <br>"
+                    f"<span style='font-size:0.8em; color:gray;'>({m['lat']:.4f}, {m['lng']:.4f})</span>", 
+                    unsafe_allow_html=True
+                )
+            
+            with c_del:
+                # ปุ่มลบเฉพาะจุด (Specific Delete)
+                # ใช้ key=f"del_{i}" เพื่อให้แต่ละปุ่มไม่ซ้ำกัน
+                if st.button("✕", key=f"del_{i}", help=f"ลบจุดที่ {i+1}"):
+                    st.session_state.markers.pop(i)
+                    st.session_state.isochrone_data = None
+                    st.session_state.intersection_data = None
+                    st.rerun()
 
     st.markdown("---")
     
-    # Map Style (ผูก key)
-    selected_style_name = st.selectbox(
-        "สไตล์แผนที่", 
-        list(MAP_STYLES.keys()), 
-        key="map_style_name"
-    )
-    selected_style_config = MAP_STYLES[selected_style_name]
+    # Map Style
+    selected_style_name = st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
     
-    # Travel Mode (ผูก key)
+    # Travel Mode
     travel_mode = st.selectbox(
         "รูปแบบการเดินทาง",
         options=["drive", "walk", "bicycle", "transit"], 
@@ -178,21 +195,15 @@ with st.sidebar:
         key="travel_mode"
     )
     
-    # Time Intervals (ผูก key)
-    time_intervals = st.multiselect(
-        "ช่วงเวลา (นาที)", 
-        options=[5, 10, 15, 20, 30, 45, 60],
-        key="time_intervals"
-    )
+    # Time Intervals
+    time_intervals = st.multiselect("ช่วงเวลา (นาที)", options=[5, 10, 15, 20, 30, 45, 60], key="time_intervals")
     
     with st.expander("🎨 ตั้งค่าสีพื้นที่"):
-        # ไม่จำเป็นต้องผูก key ตรงนี้เพราะ st.color_picker อัพเดทตัวแปร st.session_state.colors['stepX'] ได้โดยตรงถ้าเราเขียน logic รับค่า แต่เพื่อให้ Import ทำงานง่าย เราใช้ค่าจาก session_state เป็น value
         c1 = st.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
         c2 = st.color_picker("11 - 20 นาที", st.session_state.colors['step2'])
         c3 = st.color_picker("21 - 30 นาที", st.session_state.colors['step3'])
         c4 = st.color_picker("> 30 นาที", st.session_state.colors['step4'])
         
-        # อัปเดตค่าสีกลับเข้า Session State (กรณีมีการเปลี่ยนสีแล้วกด Save)
         st.session_state.colors['step1'] = c1
         st.session_state.colors['step2'] = c2
         st.session_state.colors['step3'] = c3
@@ -331,10 +342,14 @@ def display_map():
         is_new = True
         if st.session_state.markers:
             last_mk = st.session_state.markers[-1]
+            # ป้องกันการคลิกซ้ำตำแหน่งเดิม (Debounce simple)
             if abs(clicked_lat - last_mk['lat']) < 0.00001 and abs(clicked_lng - last_mk['lng']) < 0.00001:
                 is_new = False
         if is_new:
             st.session_state.markers.append({'lat': clicked_lat, 'lng': clicked_lng})
+            # เคลียร์ข้อมูลเก่าเมื่อมีจุดใหม่ เพื่อบังคับให้กดคำนวณใหม่
+            st.session_state.isochrone_data = None
+            st.session_state.intersection_data = None
             st.rerun()
 
 display_map()
