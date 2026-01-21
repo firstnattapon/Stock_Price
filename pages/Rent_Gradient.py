@@ -30,6 +30,10 @@ MAP_STYLES = {
         "tiles": "OpenStreetMap", 
         "attr": None
     },
+    "Google Maps (ผสม/Hybrid)": {
+    "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+    "attr": "Google Maps"
+    },
     "CartoDB Positron (สีอ่อน/สะอาด)": {
         "tiles": "CartoDB positron", 
         "attr": None
@@ -44,10 +48,6 @@ MAP_STYLES = {
     },
     "Google Maps (ดาวเทียม)": {
         "tiles": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-        "attr": "Google Maps"
-    },
-    "Google Maps (ผสม/Hybrid)": {
-        "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
         "attr": "Google Maps"
     },
     "Google Maps (ภูมิประเทศ)": {
