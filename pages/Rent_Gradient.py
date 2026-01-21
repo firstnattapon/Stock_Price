@@ -26,22 +26,34 @@ MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'c
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
 MAP_STYLES = {
+    # =========================================================
+    # 1. กลุ่มมาตรฐาน & สีอ่อน (Standard & Clean)
+    # =========================================================
     "OpenStreetMap (มาตรฐาน)": {
         "tiles": "OpenStreetMap", 
         "attr": None
     },
     "Google Maps (ผสม/Hybrid)": {
-    "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-    "attr": "Google Maps"
+        "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+        "attr": "Google Maps"
     },
     "CartoDB Positron (สีอ่อน/สะอาด)": {
         "tiles": "CartoDB positron", 
         "attr": None
     },
-    "CartoDB Dark Matter (สีเข้ม)": {
-        "tiles": "CartoDB dark_matter", 
+    "CartoDB Voyager (เน้นสถานที่/นำทาง)": {
+        "tiles": "CartoDB voyager",
         "attr": None
     },
+    "Esri Light Gray (สีเทาอ่อน/เน้นข้อมูล)": { 
+        # *แนะนำ: ทำให้สีของพื้นที่ CBD เด่นที่สุด*
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Tiles &copy; Esri"
+    },
+
+    # =========================================================
+    # 2. กลุ่ม Google Maps (คุ้นเคย & ใช้งานง่าย)
+    # =========================================================
     "Google Maps (ถนน)": {
         "tiles": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
         "attr": "Google Maps"
@@ -54,17 +66,58 @@ MAP_STYLES = {
         "tiles": "https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
         "attr": "Google Maps"
     },
+
+    # =========================================================
+    # 3. กลุ่มวิเคราะห์ความเจริญ & เมือง (Urban & Prosperity)
+    # =========================================================
+    "NASA Night Lights (แสงไฟเศรษฐกิจ)": {
+        # *แนะนำ: ดูภาพรวมความเจริญจากแสงไฟ (Zoom out)*
+        "tiles": "https://map1.vis.earthdata.nasa.gov/wmts-webmerc/VIIRS_CityLights_2012/default//GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg",
+        "attr": "Imagery provided by NASA GIBS"
+    },
+    "OpenStreetMap (Hot Style - เน้นสิ่งปลูกสร้าง)": {
+        # *แนะนำ: สีสด เห็นเขตตึกหนาแน่นชัดเจน*
+        "tiles": "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+        "attr": "&copy; OpenStreetMap contributors, Tiles style by Humanitarian OpenStreetMap Team hosted by OpenStreetMap France"
+    },
+    "OpenRailwayMap (โครงข่ายรถไฟฟ้า/ราง)": {
+        # *แนะนำ: ดูว่า CBD เกาะแนวรถไฟฟ้าหรือไม่*
+        "tiles": "https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
+        "attr": "Map data: &copy; OpenStreetMap contributors | Map style: &copy; OpenRailwayMap (CC-BY-SA)"
+    },
+    "Esri Dark Gray (โครงสร้างเมืองสีเข้ม)": {
+        # *แนะนำ: พื้นหลังมืด ทำให้ Overlay สีสว่างๆ เด่นมาก*
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Tiles &copy; Esri"
+    },
+    "CartoDB Dark Matter (เมืองยามค่ำคืน)": {
+        # *แนะนำ: ดู Modern และเห็นเส้นถนนชัดเจน*
+        "tiles": "CartoDB dark_matter", 
+        "attr": None
+    },
+
+    # =========================================================
+    # 4. กลุ่มภูมิประเทศ & ภาพถ่ายทางอากาศ (Satellite & Topo)
+    # =========================================================
     "Esri Satellite (ดาวเทียมชัด)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "attr": "Tiles &copy; Esri &mdash; Source: Esri"
     },
-    "Esri Street Map (ถนนละเอียด)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
+    "Esri World Topo (ภูมิประเทศสวยงาม)": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Tiles &copy; Esri"
     },
     "OpenTopoMap (ภูมิประเทศ/คอนทัวร์)": {
         "tiles": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         "attr": "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)"
+    },
+
+    # =========================================================
+    # 5. กลุ่มการเดินทางเฉพาะทาง (Travel Modes)
+    # =========================================================
+    "OPNVKarte (ขนส่งสาธารณะ)": {
+        "tiles": "https://tileserver.memomaps.de/tilegen/{z}/{x}/{y}.png",
+        "attr": "Map <a href='https://memomaps.de/'>memomaps.de</a>"
     },
     "CyclOSM (สำหรับจักรยาน)": {
         "tiles": "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
