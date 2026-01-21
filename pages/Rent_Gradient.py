@@ -26,16 +26,49 @@ MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'c
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
 MAP_STYLES = {
-    "OpenStreetMap (มาตรฐาน)": {"tiles": "OpenStreetMap", "attr": None},
-    "CartoDB Positron (สีอ่อน/สะอาด)": {"tiles": "CartoDB positron", "attr": None},
-    "CartoDB Dark Matter (สีเข้ม)": {"tiles": "CartoDB dark_matter", "attr": None},
-    "Esri Satellite (ดาวเทียม)": {
+    "OpenStreetMap (มาตรฐาน)": {
+        "tiles": "OpenStreetMap", 
+        "attr": None
+    },
+    "CartoDB Positron (สีอ่อน/สะอาด)": {
+        "tiles": "CartoDB positron", 
+        "attr": None
+    },
+    "CartoDB Dark Matter (สีเข้ม)": {
+        "tiles": "CartoDB dark_matter", 
+        "attr": None
+    },
+    "Google Maps (ถนน)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+        "attr": "Google Maps"
+    },
+    "Google Maps (ดาวเทียม)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+        "attr": "Google Maps"
+    },
+    "Google Maps (ผสม/Hybrid)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+        "attr": "Google Maps"
+    },
+    "Google Maps (ภูมิประเทศ)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
+        "attr": "Google Maps"
+    },
+    "Esri Satellite (ดาวเทียมชัด)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         "attr": "Tiles &copy; Esri &mdash; Source: Esri"
     },
     "Esri Street Map (ถนนละเอียด)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
         "attr": "Tiles &copy; Esri &mdash; Source: Esri"
+    },
+    "OpenTopoMap (ภูมิประเทศ/คอนทัวร์)": {
+        "tiles": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        "attr": "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)"
+    },
+    "CyclOSM (สำหรับจักรยาน)": {
+        "tiles": "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
+        "attr": "CyclOSM | Map data: &copy; OpenStreetMap contributors"
     }
 }
 
