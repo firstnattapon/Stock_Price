@@ -2,15 +2,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from urllib.parse import quote
 
-st.set_page_config(page_title="Longdo + WMSDOL (MV_SPARCEL)", layout="wide")
-st.title("Longdo Map API v3 + WMS แปลงที่ดิน (MV_SPARCEL)")
+st.set_page_config(page_title="Longdo + MapProxy WMS (กรมที่ดิน)", layout="wide")
+st.title("Longdo Map API v3 + Longdo MapProxy WMS (Department of Land WMS)")
 
 st.markdown(
     """
-ใช้ Longdo Map API v3 เพื่อแสดงแผนที่ และซ้อนชั้นข้อมูลจาก WMS (GeoServer)
+ตัวอย่าง Streamlit สำหรับแสดง **Longdo Map API v3** และซ้อนชั้นข้อมูลจาก **WMS (Longdo MapProxy)**
 
-**WMS URL:** `http://110.164.49.68:8081/geoserver/WMSDOL/wms?`  
-**Layer:** `MV_SPARCEL`
+- **WMS Endpoint (MapProxy):** `https://ms.longdo.com/mapproxy/service`
+- หมายเหตุจากภาพ: ควรซูมให้ **Scale ใหญ่กว่า 1:10000** เพื่อให้แสดงรายละเอียดได้ (โดยทั่วไปลองเริ่มที่ **Zoom ≥ 14**)
     """
 )
 
@@ -26,63 +26,90 @@ with st.sidebar:
         "Longdo Map API Key",
         value=st.secrets.get("LONGDO_MAP_KEY", ""),
         type="password",
-        help="แนะนำให้เก็บใน Streamlit secrets"
+        help="แนะนำให้เก็บใน Streamlit secrets เช่น .streamlit/secrets.toml"
     )
 
-    st.subheader("แผนที่")
+    st.subheader("ตำแหน่ง/การซูม")
     lat = st.number_input("Latitude", value=13.7563, format="%.6f")
     lon = st.number_input("Longitude", value=100.5018, format="%.6f")
-    zoom = st.slider("Zoom", 1, 20, 12)
-    height = st.slider("ความสูงแผนที่ (px)", 350, 950, 700)
+    zoom = st.slider("Zoom", 1, 20, 15)
+    height = st.slider("ความสูงแผนที่ (px)", 350, 950, 720)
 
-    st.subheader("WMS")
+    st.subheader("WMS (Longdo MapProxy)")
     wms_url = st.text_input(
         "WMS Endpoint",
-        value="http://110.164.49.68:8081/geoserver/WMSDOL/wms?",
+        value="https://ms.longdo.com/mapproxy/service",
+        help="ค่าจากภาพ: https://ms.longdo.com/mapproxy/service"
     )
-    layer_name = st.text_input("Layer name", value="MV_SPARCEL")
+
+    # บางระบบต้องใช้ชื่อ layer เฉพาะ (ดูจาก GetCapabilities)
+    layer_name = st.text_input(
+        "Layer name (ต้องตรงกับ GetCapabilities)",
+        value="",
+        help="ถ้าไม่ทราบ ให้เปิด GetCapabilities แล้วค้นหา <Name> ของ layer"
+    )
+
+    # บางบริการ MapProxy ต้องระบุ map=... หรือ service=... เพิ่มเติม
+    extra_query_user = st.text_input(
+        "Extra query (ใส่เพิ่มเองถ้าจำเป็น)",
+        value="",
+        help="ตัวอย่าง: map=/path/to/mapfile.map (แล้วแต่บริการรองรับ)"
+    )
+
     opacity = st.slider("Opacity", 0.0, 1.0, 0.7, 0.05)
 
-    # สำคัญ: Longdo base map มักเป็น EPSG:3857
-    # ถ้า WMS ไม่รองรับ 3857 ให้ลอง 24047 แต่มีโอกาสซ้อนตำแหน่งไม่ตรง
-    srs = st.selectbox("SRS/CRS ที่ร้องขอจาก WMS", ["EPSG:3857", "EPSG:24047", "EPSG:4326"], index=0)
+    # Longdo base map มักอยู่บน Web Mercator
+    srs = st.selectbox("SRS/CRS", ["EPSG:3857", "EPSG:4326"], index=0)
 
     img_format = st.selectbox("Image format", ["image/png", "image/jpeg"], index=0)
     transparent = st.checkbox("Transparent (แนะนำเมื่อ PNG)", value=True)
     styles = st.text_input("styles (ปล่อยว่างได้)", value="")
 
     st.divider()
-    st.subheader("ทดสอบ WMS")
-    getcap = f"{wms_url}{'&' if '?' in wms_url else '?'}service=WMS&request=GetCapabilities"
+    st.subheader("ลิงก์ทดสอบ (เปิดในเบราว์เซอร์)")
+    getcap = f"{wms_url}{'&' if '?' in wms_url else '?'}SERVICE=WMS&REQUEST=GetCapabilities"
     st.write("GetCapabilities:")
     st.code(getcap, language="text")
 
-    # WMS version (GeoServer ส่วนมากรองรับทั้ง 1.1.1 และ 1.3.0)
-    wms_version = st.selectbox("WMS Version", ["1.3.0", "1.1.1"], index=0)
+    st.caption("ถ้าเลเยอร์ไม่ขึ้น ให้เปิด GetCapabilities แล้วตรวจชื่อ layer และ CRS ที่รองรับ")
 
 if not longdo_key.strip():
     st.warning("กรุณาใส่ Longdo Map API Key ก่อน")
     st.stop()
 
 # -----------------------
-# Build WMS extra query
+# Zoom hint (อิงจากคำแนะนำ scale > 1:10000)
 # -----------------------
-# ใน Longdo LayerOptions มี extraQuery เพื่อแนบ query string เพิ่มเติม
-# สำหรับ WMS ต้องมี layers=... และมักใช้ transparent=true เมื่อ PNG
-extra_parts = [f"layers={quote(layer_name)}"]
+if zoom < 14:
+    st.info("คำแนะนำ: ลองปรับ Zoom เป็น 14 ขึ้นไป (เพื่อให้เข้าใกล้เงื่อนไข Scale > 1:10000)")
 
-if transparent:
-    extra_parts.append("transparent=true")
+# -----------------------
+# Build WMS extra query for Longdo Layer (KVP)
+# -----------------------
+extra_parts = []
 
+# layers=... (ใส่เมื่อผู้ใช้กรอก)
+if layer_name.strip():
+    extra_parts.append(f"layers={quote(layer_name.strip())}")
+
+# styles=...
 if styles.strip():
     extra_parts.append(f"styles={quote(styles.strip())}")
 
-extra_query = "&".join(extra_parts)
+# transparent=...
+if transparent and img_format == "image/png":
+    extra_parts.append("transparent=true")
+
+# extra query from user (ต่อท้ายแบบดิบ แต่กันช่องว่างหัวท้าย)
+if extra_query_user.strip():
+    # ผู้ใช้อาจใส่รูปแบบ "a=b&c=d"
+    extra_parts.append(extra_query_user.strip().lstrip("&").lstrip("?"))
+
+extra_query = "&".join([p for p in extra_parts if p])
 
 # -----------------------
 # Render HTML (Longdo Map v3 + WMS layer)
 # -----------------------
-# อ้างอิง: LayerOptions รองรับ WMS/WMTS(KVP) options: format, srs, styles, extraQuery ฯลฯ
 html = f"""
 <!doctype html>
 <html>
@@ -97,74 +124,67 @@ html = f"""
         font-family: sans-serif;
         font-size: 12px;
         color: #444;
-        margin: 6px 0 0 0;
+        margin: 8px 0 0 0;
+        line-height: 1.4;
+        word-break: break-word;
+      }}
+      .mono {{
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       }}
     </style>
   </head>
   <body>
     <div id="map"></div>
     <div class="note">
-      WMS: {wms_url} | Layer: {layer_name} | SRS: {srs} | format: {img_format}
+      <div><b>WMS:</b> <span class="mono">{wms_url}</span></div>
+      <div><b>Layer:</b> <span class="mono">{layer_name if layer_name.strip() else "(not set)"}</span></div>
+      <div><b>SRS:</b> <span class="mono">{srs}</span> | <b>Format:</b> <span class="mono">{img_format}</span> | <b>Opacity:</b> {opacity}</div>
+      <div><b>extraQuery:</b> <span class="mono">{extra_query if extra_query else "(none)"}</span></div>
     </div>
 
     <script>
-      // Init map
       var map = new longdo.Map({{
         placeholder: document.getElementById('map'),
         location: {{ lat: {lat}, lon: {lon} }},
         zoom: {zoom}
       }});
 
-      // Optional marker at center
-      map.Overlays.add(new longdo.Marker({{ lat: {lat}, lon: {lon} }}, {{
-        title: 'Center'
-      }}));
+      map.Overlays.add(new longdo.Marker({{ lat: {lat}, lon: {lon} }}, {{ title: 'Center' }}));
 
-      // WMS Layer
       try {{
-        var parcelWms = new longdo.Layer('MV_SPARCEL (WMS)', {{
+        var wmsLayer = new longdo.Layer('Department of Land WMS (MapProxy)', {{
           type: longdo.LayerType.WMS,
           url: '{wms_url}',
           format: '{img_format}',
           srs: '{srs}',
           opacity: {opacity},
-          // weight ต่ำจะแสดง "ทับ" เลเยอร์ที่ weight สูงกว่า (ตามเอกสาร)
           weight: 10,
           extraQuery: '{extra_query}'
         }});
 
-        map.Layers.add(parcelWms);
+        map.Layers.add(wmsLayer);
       }} catch (e) {{
-        console.error(e);
+        console.error("Failed to add WMS layer:", e);
       }}
     </script>
   </body>
 </html>
 """
 
-components.html(html, height=height + 40, scrolling=False)
+components.html(html, height=height + 90, scrolling=False)
 
-st.subheader("หมายเหตุ / ถ้าเลเยอร์ไม่ขึ้น")
+st.subheader("ถ้าเลเยอร์ไม่ขึ้น (เช็คตามลำดับ)")
 st.markdown(
     """
-ตรวจเช็คตามลำดับ:
-
-1. เปิด `GetCapabilities` แล้วดูว่า layer `MV_SPARCEL` มีจริง และรองรับ SRS ที่เลือกหรือไม่  
-2. แนะนำเริ่มจาก `SRS = EPSG:3857` (ถ้า WMS รองรับ จะซ้อนกับแผนที่ฐานได้ตรงสุด)  
-3. ถ้า WMS รองรับแค่ `EPSG:24047` อาจซ้อน “ไม่ตรงตำแหน่ง” เพราะแผนที่ฐานมักเป็น Web Mercator  
-   - วิธีแก้: ทำตัวกลางให้บริการเป็น tiles/WMTS ใน EPSG:3857 แล้วค่อยเอามาซ้อน
-4. บางเครือข่าย/เซิร์ฟเวอร์อาจบล็อก CORS ทำให้เรียก tile ไม่ได้ (ต้องใช้ proxy)
+1) เปิด **GetCapabilities** แล้วดูว่า **ชื่อ layer** ที่จะใช้คืออะไร (ค่าจาก `<Name>...</Name>`)  
+2) ตรวจว่า layer รองรับ **CRS/SRS** ที่เลือก (แนะนำ **EPSG:3857**)  
+3) ลองปรับ **Zoom ≥ 14** (สอดคล้องกับคำแนะนำ Scale > 1:10000)  
+4) ถ้าใน GetCapabilities ต้องใส่พารามิเตอร์เพิ่ม (เช่น `map=...`) ให้ใส่ในช่อง **Extra query**  
+5) ถ้าเครือข่าย/เซิร์ฟเวอร์บล็อก CORS อาจต้องใช้ proxy (อาการ: ใน DevTools มี error CORS/blocked)
     """
 )
-"""
-Usage
------
-pip install streamlit
 
-Run:
-  streamlit run app.py
-
-Streamlit secrets:
-  .streamlit/secrets.toml
-    LONGDO_MAP_KEY="YOUR_KEY"
-"""
+st.subheader("การตั้งค่า secrets (แนะนำ)")
+st.markdown(
+    """
+สร้างไฟล์ `.streamlit/secrets.toml`:
