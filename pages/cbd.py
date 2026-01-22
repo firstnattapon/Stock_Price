@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Tuple
 # ============================================================================
 
 PAGE_CONFIG = {
-    "page_title": "Geoapify Map + DOL Lands",
+    "page_title": "Geoapify CBD x Longdo GIS",
     "page_icon": "🌍",
     "layout": "wide"
 }
@@ -22,7 +22,7 @@ DEFAULT_LAT = 20.219443
 DEFAULT_LON = 100.403630
 DEFAULT_GEOAPIFY_KEY = "4eefdfb0b0d349e595595b9c03a69e3d"
 
-# --- Longdo / Department of Lands Configuration ---
+# --- Longdo GIS Configuration ---
 LONGDO_API_KEY = "0a999afb0da60c5c45d010e9c171ffc8"
 LONGDO_WMS_URL = f"https://ms.longdo.com/mapproxy/service?key={LONGDO_API_KEY}"
 
@@ -30,26 +30,19 @@ MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'c
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
 MAP_STYLES = {
-    # ... (Group 1: Standard)
-    "OpenStreetMap (มาตรฐาน)": {"tiles": "OpenStreetMap", "attr": None},
-    "Google Maps (ผสม/Hybrid)": {"tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", "attr": "Google Maps"},
-    
-    # ... (Group 2: Clean/Light for Data)
-    "Esri Light Gray (แนะนำสำหรับดูที่ดิน)": {
+    "Esri Light Gray (แนะนำสำหรับดูผังเมือง)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
         "attr": "Tiles &copy; Esri"
     },
-    
-    # ... (Group 3: Satellite)
+    "Google Maps (ผสม/Hybrid)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", 
+        "attr": "Google Maps"
+    },
+    "OpenStreetMap (มาตรฐาน)": {"tiles": "OpenStreetMap", "attr": None},
     "Esri Satellite (ดาวเทียมชัด)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
-    },
-
-    # ... (Others kept for compatibility)
-    "Google Maps (ถนน)": {"tiles": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", "attr": "Google Maps"},
-    "CartoDB Positron": {"tiles": "CartoDB positron", "attr": None},
-    "CartoDB Dark Matter": {"tiles": "CartoDB dark_matter", "attr": None},
+        "attr": "Tiles &copy; Esri"
+    }
 }
 
 TRAVEL_MODE_NAMES = {
@@ -120,13 +113,15 @@ def initialize_session_state():
         'intersection_data': None,
         'colors': {'step1': '#2A9D8F', 'step2': '#E9C46A', 'step3': '#F4A261', 'step4': '#D62828'},
         'api_key': DEFAULT_GEOAPIFY_KEY,
-        'map_style_name': "Esri Light Gray (แนะนำสำหรับดูที่ดิน)", # Default to a clean map
+        'map_style_name': "Esri Light Gray (แนะนำสำหรับดูผังเมือง)",
         'travel_mode': "drive",
         'time_intervals': [5],
-        'show_dol_layer': False # Checkbox state for DOL layer
+        # --- NEW: State for 3 Layers ---
+        'show_dol': False,          # กรมที่ดิน
+        'show_cityplan': False,     # ผังเมือง
+        'show_population': False    # ประชากร
     }
     
-    # Load from default JSON if markers empty
     if 'markers' not in st.session_state:
         try:
             response = requests.get(DEFAULT_JSON_URL, timeout=3)
@@ -138,7 +133,6 @@ def initialize_session_state():
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
     
-    # Ensure active key existence
     for m in st.session_state.markers:
         if 'active' not in m: m['active'] = True
 
@@ -146,7 +140,7 @@ def get_active_markers() -> List[Tuple[int, Dict]]:
     return [(i, m) for i, m in enumerate(st.session_state.markers) if m.get('active', True)]
 
 # ============================================================================
-# 4. MAIN APP
+# 4. MAIN APP UI
 # ============================================================================
 
 st.set_page_config(**PAGE_CONFIG)
@@ -193,16 +187,17 @@ with st.sidebar:
         for i, m in enumerate(st.session_state.markers):
             is_active = st.checkbox(f"จุดที่ {i+1}", value=m.get('active', True), key=f"act_{i}")
             st.session_state.markers[i]['active'] = is_active
-            if not is_active: st.caption(f"Skipped: ({m['lat']:.4f}, {m['lng']:.4f})")
 
     # 4. Settings
     st.markdown("---")
-    with st.expander("⚙️ ตั้งค่าแผนที่ & สี", expanded=True):
+    with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=True):
         st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
         
-        # --- NEW: DOL Control in Sidebar ---
-        st.markdown("##### 📜 ข้อมูลกรมที่ดิน")
-        st.checkbox("แสดงเส้นแบ่งโฉนดที่ดิน (DOL)", value=False, key="show_dol_layer", help="ข้อมูลจาก Longdo Map / กรมที่ดิน")
+        # --- NEW: GIS Layers Checkboxes ---
+        st.markdown("##### 🗺️ ข้อมูลพิเศษ (Longdo)")
+        st.checkbox("👥 ความหนาแน่นประชากร", key="show_population")
+        st.checkbox("🏙️ ผังเมืองรวม (City Plan)", key="show_cityplan")
+        st.checkbox("📜 รูปแปลงที่ดิน (กรมที่ดิน)", key="show_dol")
         
         st.markdown("##### 🚗 การเดินทาง")
         st.selectbox("โหมด", list(TRAVEL_MODE_NAMES.keys()), format_func=lambda x: TRAVEL_MODE_NAMES[x], key="travel_mode")
@@ -234,7 +229,7 @@ if do_calculate:
                 else: st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน")
 
 # ============================================================================
-# MAP RENDERING
+# 5. MAP RENDERING
 # ============================================================================
 
 style = MAP_STYLES[st.session_state.map_style_name]
@@ -242,7 +237,7 @@ center = [st.session_state.markers[-1]['lat'], st.session_state.markers[-1]['lng
 
 m = folium.Map(location=center, zoom_start=14, tiles=style["tiles"], attr=style["attr"])
 
-# 1. Add Isochrones (Base Analysis)
+# 1. Isochrones (Base Analysis)
 if st.session_state.isochrone_data:
     folium.GeoJson(
         st.session_state.isochrone_data, name='Travel Areas',
@@ -250,52 +245,72 @@ if st.session_state.isochrone_data:
             'fillColor': get_fill_color(x['properties']['travel_time_minutes'], st.session_state.colors),
             'color': get_border_color(x['properties']['original_index']),
             'weight': 1, 'fillOpacity': 0.2
-        },
-        tooltip=folium.GeoJsonTooltip(['travel_time_minutes'], aliases=['นาที:'])
+        }
     ).add_to(m)
 
-# 2. Add CBD Intersection (Highlight)
+# 2. CBD Intersection
 if st.session_state.intersection_data:
     folium.GeoJson(
         st.session_state.intersection_data, name='CBD Zone',
-        style_function=lambda x: {'fillColor': '#FFD700', 'color': '#FF8C00', 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'},
-        tooltip="🏆 Potential CBD"
+        style_function=lambda x: {'fillColor': '#FFD700', 'color': '#FF8C00', 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'}
     ).add_to(m)
 
-# 3. Add DOL Layer (Overlay on top of analysis but below markers)
-#    Note: Added 'show' parameter controlled by session state or LayerControl
-dol_layer = folium.WmsTileLayer(
+# ===================== NEW LAYERS INJECTION =====================
+
+# 3. Layer: Population (ความหนาแน่นประชากร) - อยู่ล่างสุดของกลุ่ม GIS
+folium.WmsTileLayer(
     url=LONGDO_WMS_URL,
-    layers='dol',
-    name='Department of Lands (รูปแปลงที่ดิน)',
-    fmt='image/png',       # format
-    transparent=True,      # Important: Allows seeing map below
+    layers='thailand_population', # <--- เพิ่ม Layer ประชากร
+    name='ความหนาแน่นประชากร',
+    fmt='image/png',
+    transparent=True,
+    version='1.1.1',
+    attr='Thailand Population / Longdo Map',
+    show=st.session_state.show_population
+).add_to(m)
+
+# 4. Layer: City Plan (ผังเมืองรวม) - อยู่ตรงกลาง
+folium.WmsTileLayer(
+    url=LONGDO_WMS_URL,
+    layers='cityplan_dpt',        # <--- เพิ่ม Layer ผังเมือง
+    name='ผังเมืองรวม (DPT)',
+    fmt='image/png',
+    transparent=True,
+    version='1.1.1',
+    attr='Department of Public Works and Town & Country Planning / Longdo Map',
+    show=st.session_state.show_cityplan
+).add_to(m)
+
+# 5. Layer: DOL (กรมที่ดิน) - อยู่บนสุดเพื่อให้เห็นเส้นชัดเจน
+folium.WmsTileLayer(
+    url=LONGDO_WMS_URL,
+    layers='dol',                 # <--- Layer เดิม (ที่ดิน)
+    name='รูปแปลงที่ดิน (DOL)',
+    fmt='image/png',
+    transparent=True,
     version='1.1.1',
     attr='Department of Lands / Longdo Map',
-    show=st.session_state.show_dol_layer  # Controlled by sidebar checkbox
-)
-dol_layer.add_to(m)
+    show=st.session_state.show_dol
+).add_to(m)
 
-# 4. Add Markers
+# ===============================================================
+
+# 6. Markers
 for i, marker in enumerate(st.session_state.markers):
     is_active = marker.get('active', True)
     folium.Marker(
         [marker['lat'], marker['lng']],
         popup=f"จุดที่ {i+1}",
-        icon=folium.Icon(color=MARKER_COLORS[i%8] if is_active else "gray", icon="map-marker" if is_active else "ban", prefix='fa'),
-        opacity=1.0 if is_active else 0.5
+        icon=folium.Icon(color=MARKER_COLORS[i%8] if is_active else "gray", icon="map-marker" if is_active else "ban", prefix='fa')
     ).add_to(m)
 
-# 5. Controls
+# 7. Finalize
 folium.LayerControl().add_to(m)
-
-# 6. Render
 map_out = st_folium(m, height=750, use_container_width=True, key="main_map")
 
-# 7. Click Handler
+# 8. Click Logic
 if map_out and map_out.get('last_clicked'):
     clat, clng = map_out['last_clicked']['lat'], map_out['last_clicked']['lng']
-    # Check duplicate click (simple debounce)
     if not st.session_state.markers or (abs(clat - st.session_state.markers[-1]['lat']) > 1e-5):
         st.session_state.markers.append({'lat': clat, 'lng': clng, 'active': True})
         st.session_state.isochrone_data = None; st.session_state.intersection_data = None
