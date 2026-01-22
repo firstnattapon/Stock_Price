@@ -1,5 +1,5 @@
 import streamlit as st
-import streamlit.components.v1 as components
+import streamlit.components.v1 as components 
 
 # ตั้งค่าหน้าเว็บ
 st.set_page_config(page_title="Longdo Map Streamlit", layout="wide")
