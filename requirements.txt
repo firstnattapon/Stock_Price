@@ -1,6 +1,7 @@
 pandas
 streamlit
-yfinance  
+altair<5
+yfinance
 thingspeak
 plotly
 stocksymbol
