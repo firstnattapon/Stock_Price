@@ -1,82 +1,68 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-# ตั้งค่าหน้าเว็บ
-st.set_page_config(page_title="Longdo Map - กรมที่ดิน", layout="wide")
+st.set_page_config(page_title="Longdo Map - Check DOL", layout="wide")
 
-st.title("🗺️ Longdo Map: ชั้นข้อมูลกรมที่ดิน")
-st.caption("ตัวอย่างการแสดงเส้นแบ่งโฉนดที่ดิน (Cadastral Map)")
+st.title("🗺️ ตรวจสอบชั้นข้อมูลกรมที่ดิน")
 
-# --- 1. การตั้งค่าและ Input (Sidebar) ---
+# --- Sidebar ---
 with st.sidebar:
-    st.header("📍 ตั้งค่าแผนที่")
+    st.header("⚙️ ตั้งค่า")
+    # ใช้ Key เดิม (หรือ Key ของคุณเอง)
+    api_key = st.text_input("API Key", value="0a999afb0da60c5c45d010e9c171ffc8")
     
-    # API Key
-    api_key = st.text_input("Longdo API Key", value="0a999afb0da60c5c45d010e9c171ffc8")
+    # พิกัด (ตัวอย่าง: พื้นที่ที่มีโฉนดชัดเจน แถวลาดยาว)
+    lat = st.number_input("Lat", value=13.8479, format="%.6f")
+    lon = st.number_input("Lon", value=100.5630, format="%.6f")
     
-    st.subheader("พิกัดและการซูม")
-    # พิกัดตัวอย่าง (สยามพารากอน)
-    lat = st.number_input("Latitude", value=13.7469, format="%.6f")
-    lon = st.number_input("Longitude", value=100.5349, format="%.6f")
+    # *** สำคัญ: ตั้งค่า Zoom เริ่มต้นให้สูงเข้าไว้ ***
+    zoom = st.slider("Zoom Level (ต้อง 15+ ถึงจะเห็น)", 1, 20, 17)
     
-    # *สำคัญ* กรมที่ดินต้องซูมลึกๆ ถึงจะเห็นเส้น
-    zoom = st.slider("Zoom Level (แนะนำ 16+ เพื่อดูโฉนด)", 1, 20, 17) 
-
     st.markdown("---")
-    st.subheader("🛠️ ตัวเลือก Layer")
-    
-    # Checkbox สำหรับเปิด/ปิด Layer กรมที่ดิน
-    show_dol_layer = st.checkbox("แสดงชั้นข้อมูลกรมที่ดิน (DOL)", value=True)
-    show_traffic = st.checkbox("แสดงจราจร (Traffic)", value=False)
+    show_dol = st.checkbox("✅ แสดงเส้นกรมที่ดิน (DOL)", value=True)
+    gray_base = st.checkbox("🌑 ใช้พื้นหลังสีเทา (ช่วยให้เห็นเส้นชัด)", value=True)
 
-# --- 2. Logic การสร้าง JavaScript ---
+# --- Logic JS ---
+# แปลงค่า Python -> JS
+val_dol = "true" if show_dol else "false"
+val_gray = "longdo.Layers.GRAY" if gray_base else "longdo.Layers.NORMAL"
 
-# แปลงค่า Python boolean เป็น JavaScript boolean string ('true'/'false')
-js_dol_layer = "true" if show_dol_layer else "false"
-js_traffic = "true" if show_traffic else "false"
-
-# HTML/JS Code
-longdo_map_html = f"""
+html_code = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <style>
-        body {{ margin: 0; padding: 0; }}
+        body {{ margin: 0; }}
         #map {{ height: 600px; width: 100%; }}
     </style>
     <script src="https://api.longdo.com/map/?key={api_key}"></script>
     <script>
         var map;
         function init() {{
-            // 1. สร้างแผนที่
             map = new longdo.Map({{
-                placeholder: document.getElementById('map')
+                placeholder: document.getElementById('map'),
+                layer: {val_gray} // ตั้งค่าพื้นหลังตั้งแต่เริ่ม
             }});
             
-            // 2. กำหนดพิกัดและซูม
+            // ไปยังพิกัดและซูม
             map.location({{ lon: {lon}, lat: {lat} }}, true);
             map.zoom({zoom});
 
-            // 3. จัดการ Layer กรมที่ดิน (DOL)
-            if ({js_dol_layer}) {{
-                // เพิ่ม Layer กรมที่ดิน
-                map.Layers.add(longdo.Layers.DOL);
-                
-                // (Optional) เปลี่ยนพื้นหลังเป็นสีเทาเพื่อให้เห็นเส้นชัดขึ้น
-                // map.Layers.setBase(longdo.Layers.GRAY); 
+            // เพิ่ม Layer กรมที่ดิน
+            if ({val_dol}) {{
+                try {{
+                    // วิธีเรียก Layer กรมที่ดินแบบมาตรฐาน
+                    var dolLayer = longdo.Layers.DOL;
+                    map.Layers.add(dolLayer);
+                    
+                    console.log("Added DOL Layer");
+                }} catch (e) {{
+                    console.error("Error adding DOL:", e);
+                }}
             }}
-
-            // 4. จัดการ Layer จราจร
-            if ({js_traffic}) {{
-                map.Layers.add(longdo.Layers.TRAFFIC);
-            }}
-
-            // 5. เพิ่มหมุด (Marker)
-            var marker = new longdo.Marker({{ lon: {lon}, lat: {lat} }}, {{
-                title: 'จุดที่เลือก',
-                detail: 'Lat: {lat} <br> Lon: {lon}'
-            }});
-            map.Overlays.add(marker);
+            
+            // เพิ่มหมุดเพื่อบอกตำแหน่ง
+            map.Overlays.add(new longdo.Marker({{ lon: {lon}, lat: {lat} }}));
         }}
     </script>
 </head>
@@ -86,16 +72,18 @@ longdo_map_html = f"""
 </html>
 """
 
-# --- 3. แสดงผล ---
-components.html(longdo_map_html, height=600)
+components.html(html_code, height=600)
 
-# ส่วนแสดงข้อมูลสรุป
-col1, col2 = st.columns(2)
-with col1:
-    st.info(f"📍 **พิกัด:** `{lat}, {lon}`")
-with col2:
-    status_text = "✅ เปิดใช้งาน" if show_dol_layer else "❌ ปิดใช้งาน"
-    st.info(f"📜 **สถานะ Layer กรมที่ดิน:** {status_text}")
+# --- คำแนะนำการแก้ปัญหา ---
+st.info(f"Current Zoom: {zoom}")
+if show_dol and zoom < 15:
+    st.error("⚠️ **คำเตือน:** Zoom Level ต่ำกว่า 15 เส้นโฉนดจะไม่แสดงผล กรุณาเลื่อน Zoom ไปทางขวา")
+else:
+    st.success("✅ ระดับ Zoom เหมาะสมสำหรับการดูโฉนด")
 
-if show_dol_layer and zoom < 15:
-    st.warning("⚠️ **คำแนะนำ:** หากมองไม่เห็นเส้นแบ่งโฉนด กรุณาเพิ่มค่า **Zoom Level** ให้มากกว่า 15")
+st.markdown("""
+### 📌 ถ้ายังไม่ขึ้น ให้เช็คตามนี้:
+1. **พื้นที่นั้นไม่มีข้อมูล:** ลองเลื่อนแผนที่ไปในเขตเมือง (เช่น กรุงเทพฯ)
+2. **Server กรมที่ดินล่ม:** ลองเข้าเว็บ [LandsMaps](https://landsmaps.dol.go.th/) โดยตรง ถ้าเว็บนั้นหมุนติ้วๆ หรือไม่โหลด แสดงว่าระบบกรมที่ดินล่ม (Longdo ดึงข้อมูลสดจากที่นั่น)
+3. **Browser Block:** บางครั้ง Browser บล็อกเนื้อหา (Mixed Content) แต่กรณีนี้พบน้อยกับ Longdo รุ่นใหม่
+""")
