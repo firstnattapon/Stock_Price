@@ -21,8 +21,9 @@ DEFAULT_JSON_URL = "https://raw.githubusercontent.com/firstnattapon/Stock_Price/
 DEFAULT_LAT = 20.219443
 DEFAULT_LON = 100.403630
 DEFAULT_GEOAPIFY_KEY = "4eefdfb0b0d349e595595b9c03a69e3d"
-# คุณสามารถใส่ Default Longdo Key ที่นี่ได้ถ้ามี
-DEFAULT_LONGDO_KEY = "" 
+
+# --- ✅ ใส่คีย์ของคุณที่นี่ ---
+DEFAULT_LONGDO_KEY = "d319a3926ede7cab2d778899e3d9661a" 
 
 MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
@@ -32,16 +33,9 @@ MAP_STYLES = {
     "Google Maps (ผสม/Hybrid)": {"tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", "attr": "Google Maps"},
     "CartoDB Positron (สีอ่อน/สะอาด)": {"tiles": "CartoDB positron", "attr": None},
     "Esri Satellite (ดาวเทียมชัด)": {"tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", "attr": "Tiles &copy; Esri"},
-    "Esri World Topo (ภูมิประเทศ)": {"tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}", "attr": "Tiles &copy; Esri"},
 }
 
-TRAVEL_MODE_NAMES = {
-    "drive": "🚗 ขับรถ",
-    "walk": "🚶 เดินเท้า",
-    "bicycle": "🚲 ปั่นจักรยาน",
-    "transit": "🚌 ขนส่งสาธารณะ"
-}
-
+TRAVEL_MODE_NAMES = {"drive": "🚗 ขับรถ", "walk": "🚶 เดินเท้า", "bicycle": "🚲 ปั่นจักรยาน", "transit": "🚌 ขนส่งสาธารณะ"}
 TIME_OPTIONS = [5, 10, 15, 20, 30, 45, 60]
 
 # ============================================================================
@@ -78,7 +72,6 @@ def calculate_intersection(features: List[Dict], num_active_markers: int) -> Opt
             if intersection_poly.is_empty: return None
         return mapping(intersection_poly) if not intersection_poly.is_empty else None
     except Exception as e:
-        st.error(f"Intersection error: {e}")
         return None
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -102,7 +95,7 @@ def initialize_session_state():
         'intersection_data': None,
         'colors': {'step1': '#2A9D8F', 'step2': '#E9C46A', 'step3': '#F4A261', 'step4': '#D62828'},
         'geoapify_key': DEFAULT_GEOAPIFY_KEY,
-        'longdo_key': DEFAULT_LONGDO_KEY,  # เพิ่ม State สำหรับ Longdo Key
+        'longdo_key': DEFAULT_LONGDO_KEY, # ใช้คีย์ของคุณเป็นค่าเริ่มต้น
         'map_style_name': list(MAP_STYLES.keys())[0],
         'travel_mode': "drive",
         'time_intervals': [5]
@@ -113,7 +106,6 @@ def initialize_session_state():
             response = requests.get(DEFAULT_JSON_URL, timeout=3)
             if response.status_code == 200:
                 data = response.json()
-                # Load existing keys but prefer defaults if missing
                 defaults.update({k: data.get(k, v) for k, v in defaults.items()})
         except Exception: pass
 
@@ -158,23 +150,23 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # 2. API Keys Section
+    # 2. API Keys
     with st.expander("🔑 API Keys", expanded=True):
         st.session_state.geoapify_key = st.text_input("Geoapify Key", value=st.session_state.geoapify_key, type="password")
         
-        # --- NEW: Longdo API Key Input ---
         st.session_state.longdo_key = st.text_input(
             "Longdo Map Key", 
             value=st.session_state.longdo_key, 
-            type="password",
-            help="ใส่ Key เพื่อแสดงชั้นข้อมูลแปลงที่ดิน (สมัครฟรีที่ map.longdo.com)"
+            type="password"
         )
-        if not st.session_state.longdo_key:
-            st.caption("⚠️ ต้องมี Longdo Key เพื่อดูแปลงที่ดิน")
+        if st.session_state.longdo_key:
+            st.info("💡 **คำแนะนำ:** ชั้นข้อมูลแปลงที่ดินจะแสดงเมื่อ **ซูมเข้าใกล้ๆ (Zoom Level 15+)** เท่านั้น")
+        else:
+            st.warning("ใส่ Longdo Key เพื่อดูแปลงที่ดิน")
     
     st.markdown("---")
     
-    # 3. Control Buttons
+    # 3. Controls & 4. List (Compact)
     c1, c2 = st.columns(2)
     if c1.button("❌ ลบจุดล่าสุด", use_container_width=True):
         if st.session_state.markers:
@@ -188,7 +180,6 @@ with st.sidebar:
         st.session_state.intersection_data = None
         st.rerun()
 
-    # 4. Marker List
     if st.session_state.markers:
         st.markdown("---")
         for i, m in enumerate(st.session_state.markers):
@@ -201,18 +192,17 @@ with st.sidebar:
                 st.session_state.markers.pop(i)
                 st.rerun()
 
-    # 5. Settings
+    # 5. Settings & Calculate
     with st.expander("🎨 ตั้งค่าแผนที่", expanded=False):
         st.selectbox("สไตล์", list(MAP_STYLES.keys()), key="map_style_name")
         st.selectbox("โหมดเดินทาง", list(TRAVEL_MODE_NAMES.keys()), format_func=lambda x: TRAVEL_MODE_NAMES[x], key="travel_mode")
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals")
 
-    # 6. Calculate
     st.markdown("---")
     do_calc = st.button("🚀 คำนวณพื้นที่ (CBD)", type="primary", use_container_width=True)
 
 # ============================================================================
-# CALCULATION LOGIC
+# CALCULATION & MAP
 # ============================================================================
 
 if do_calc:
@@ -238,16 +228,14 @@ if do_calc:
                 if cbd: st.success("✅ พบพื้นที่ร่วม!")
                 else: st.warning("ไม่พบพื้นที่ทับซ้อน")
 
-# ============================================================================
-# MAP RENDERING
-# ============================================================================
-
+# Map Setup
 style_cfg = MAP_STYLES[st.session_state.map_style_name]
+# ใช้ตำแหน่งจุดสุดท้ายเป็นจุดศูนย์กลาง แต่กำหนด Zoom Start ให้ลึกขึ้นเล็กน้อย
 center = [st.session_state.markers[-1]['lat'], st.session_state.markers[-1]['lng']] if st.session_state.markers else [DEFAULT_LAT, DEFAULT_LON]
 
-m = folium.Map(location=center, zoom_start=11, tiles=style_cfg["tiles"], attr=style_cfg["attr"])
+m = folium.Map(location=center, zoom_start=14, tiles=style_cfg["tiles"], attr=style_cfg["attr"])
 
-# --- 1. แสดง Isochrone Areas ---
+# Layers
 if st.session_state.isochrone_data:
     folium.GeoJson(
         st.session_state.isochrone_data, name='Travel Areas',
@@ -259,31 +247,29 @@ if st.session_state.isochrone_data:
         tooltip=folium.GeoJsonTooltip(['travel_time_minutes'], aliases=['นาที:'])
     ).add_to(m)
 
-# --- 2. แสดง CBD Intersection ---
 if st.session_state.intersection_data:
     folium.GeoJson(
-        st.session_state.intersection_data, name='CBD Area (Overlap)',
-        style_function=lambda x: {'fillColor': '#FFD700', 'color': '#FF8C00', 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'},
-        tooltip="🏆 พื้นที่ศักยภาพ (CBD)"
+        st.session_state.intersection_data, name='CBD Area',
+        style_function=lambda x: {'fillColor': '#FFD700', 'color': '#FF8C00', 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'}
     ).add_to(m)
 
-# --- 3. เพิ่มชั้นข้อมูลแปลงที่ดินกรมที่ดิน (Longdo Map / DOL Layer) ---
+# --- Longdo Layer (Updated) ---
 if st.session_state.longdo_key:
-    # URL สำหรับชั้นข้อมูลแปลงที่ดิน (dol_parcels) แบบ WMTS/XYZ
-    # ใช้ Mode: GoogleMapsCompatible เพื่อให้ตรงกับ Projection ของ Folium
+    # URL นี้เป็น WMTS มาตรฐานสำหรับ GoogleMapsCompatible Projection
     dol_url = f"https://ms.longdo.com/mapproxy/service/render/wmts/dol_parcels/GoogleMapsCompatible/{{z}}/{{x}}/{{y}}.png?apikey={st.session_state.longdo_key}"
     
     folium.TileLayer(
         tiles=dol_url,
         attr="Longdo Map / กรมที่ดิน",
-        name="📜 แปลงที่ดิน (กรมที่ดิน)",
-        overlay=True,  # ให้ซ้อนทับแผนที่ฐาน
-        control=True,  # แสดงในปุ่มเลือก Layer
-        opacity=0.7,   # ปรับความโปร่งใสให้เห็นถนนด้านล่าง
-        show=False     # ค่าเริ่มต้นปิดไว้ (ผู้ใช้ต้องติ๊กเปิดเอง)
+        name="📜 แปลงที่ดิน (ซูมเข้าเพื่อดู)",
+        overlay=True,
+        control=True,
+        opacity=0.8,
+        show=True,  # บังคับให้เปิดเป็นค่าเริ่มต้น (เพื่อให้สังเกตได้ง่ายขึ้น)
+        min_zoom=15, # ตั้งค่า Min Zoom เพื่อบอกโปรแกรม (แต่ Folium v บางตัวอาจไม่บังคับ UI)
+        max_zoom=20
     ).add_to(m)
 
-# --- 4. แสดง Markers ---
 for i, marker in enumerate(st.session_state.markers):
     is_active = marker.get('active', True)
     folium.Marker(
@@ -297,7 +283,6 @@ folium.LayerControl(collapsed=False).add_to(m)
 
 map_out = st_folium(m, height=700, use_container_width=True, key="main_map")
 
-# Handle Click to Add
 if map_out and map_out.get('last_clicked'):
     clat, clng = map_out['last_clicked']['lat'], map_out['last_clicked']['lng']
     last = st.session_state.markers[-1] if st.session_state.markers else None
