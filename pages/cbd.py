@@ -116,10 +116,9 @@ def initialize_session_state():
         'map_style_name': "Esri Light Gray (แนะนำสำหรับดูผังเมือง)",
         'travel_mode': "drive",
         'time_intervals': [5],
-        # --- NEW: State for 3 Layers ---
-        'show_dol': False,          # กรมที่ดิน
-        'show_cityplan': False,     # ผังเมือง
-        'show_population': False    # ประชากร
+        'show_dol': False,
+        'show_cityplan': False,
+        'show_population': False
     }
     
     if 'markers' not in st.session_state:
@@ -193,15 +192,24 @@ with st.sidebar:
     with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=True):
         st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
         
-        # --- NEW: GIS Layers Checkboxes ---
+        # --- GIS Layers ---
         st.markdown("##### 🗺️ ข้อมูลพิเศษ (Longdo)")
         st.checkbox("👥 ความหนาแน่นประชากร", key="show_population")
         st.checkbox("🏙️ ผังเมืองรวม (City Plan)", key="show_cityplan")
         st.checkbox("📜 รูปแปลงที่ดิน (กรมที่ดิน)", key="show_dol")
         
+        # --- Travel Settings ---
         st.markdown("##### 🚗 การเดินทาง")
         st.selectbox("โหมด", list(TRAVEL_MODE_NAMES.keys()), format_func=lambda x: TRAVEL_MODE_NAMES[x], key="travel_mode")
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals")
+        
+        # --- Color Settings (RESTORED HERE) ---
+        st.caption("🎨 สีพื้นที่ตามเวลาเดินทาง:")
+        c1, c2 = st.columns(2)
+        st.session_state.colors['step1'] = c1.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
+        st.session_state.colors['step2'] = c2.color_picker("11-20 นาที", st.session_state.colors['step2'])
+        st.session_state.colors['step3'] = c1.color_picker("21-30 นาที", st.session_state.colors['step3'])
+        st.session_state.colors['step4'] = c2.color_picker("> 30 นาที", st.session_state.colors['step4'])
         
     do_calculate = st.button("🚀 คำนวณหา CBD", type="primary", use_container_width=True)
 
@@ -255,12 +263,10 @@ if st.session_state.intersection_data:
         style_function=lambda x: {'fillColor': '#FFD700', 'color': '#FF8C00', 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'}
     ).add_to(m)
 
-# ===================== NEW LAYERS INJECTION =====================
-
-# 3. Layer: Population (ความหนาแน่นประชากร) - อยู่ล่างสุดของกลุ่ม GIS
+# 3. Layer: Population
 folium.WmsTileLayer(
     url=LONGDO_WMS_URL,
-    layers='thailand_population', # <--- เพิ่ม Layer ประชากร
+    layers='thailand_population',
     name='ความหนาแน่นประชากร',
     fmt='image/png',
     transparent=True,
@@ -269,10 +275,10 @@ folium.WmsTileLayer(
     show=st.session_state.show_population
 ).add_to(m)
 
-# 4. Layer: City Plan (ผังเมืองรวม) - อยู่ตรงกลาง
+# 4. Layer: City Plan
 folium.WmsTileLayer(
     url=LONGDO_WMS_URL,
-    layers='cityplan_dpt',        # <--- เพิ่ม Layer ผังเมือง
+    layers='cityplan_dpt',
     name='ผังเมืองรวม (DPT)',
     fmt='image/png',
     transparent=True,
@@ -281,10 +287,10 @@ folium.WmsTileLayer(
     show=st.session_state.show_cityplan
 ).add_to(m)
 
-# 5. Layer: DOL (กรมที่ดิน) - อยู่บนสุดเพื่อให้เห็นเส้นชัดเจน
+# 5. Layer: DOL
 folium.WmsTileLayer(
     url=LONGDO_WMS_URL,
-    layers='dol',                 # <--- Layer เดิม (ที่ดิน)
+    layers='dol',
     name='รูปแปลงที่ดิน (DOL)',
     fmt='image/png',
     transparent=True,
@@ -292,8 +298,6 @@ folium.WmsTileLayer(
     attr='Department of Lands / Longdo Map',
     show=st.session_state.show_dol
 ).add_to(m)
-
-# ===============================================================
 
 # 6. Markers
 for i, marker in enumerate(st.session_state.markers):
@@ -304,11 +308,9 @@ for i, marker in enumerate(st.session_state.markers):
         icon=folium.Icon(color=MARKER_COLORS[i%8] if is_active else "gray", icon="map-marker" if is_active else "ban", prefix='fa')
     ).add_to(m)
 
-# 7. Finalize
 folium.LayerControl().add_to(m)
 map_out = st_folium(m, height=750, use_container_width=True, key="main_map")
 
-# 8. Click Logic
 if map_out and map_out.get('last_clicked'):
     clat, clng = map_out['last_clicked']['lat'], map_out['last_clicked']['lng']
     if not st.session_state.markers or (abs(clat - st.session_state.markers[-1]['lat']) > 1e-5):
