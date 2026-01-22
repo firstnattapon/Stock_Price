@@ -154,15 +154,20 @@ with st.sidebar:
     # 1. Manual Add
     with st.container():
         c1, c2 = st.columns([0.7, 0.3])
+        # คำแนะนำ: รองรับการวางพิกัดยาวๆ ได้
         coords = c1.text_input("Coords", placeholder="20.21, 100.40", label_visibility="collapsed", key="manual")
         if c2.button("เพิ่ม", use_container_width=True):
             try:
-                parts = coords.replace(" ", "").split(',')
-                lat, lng = float(parts[0]), float(parts[1])
-                st.session_state.markers.append({'lat': lat, 'lng': lng, 'active': True})
-                st.session_state.isochrone_data = None; st.session_state.intersection_data = None
-                st.rerun()
-            except: st.error("พิกัดผิด")
+                # แก้ไข: รองรับการตัดช่องว่างหัวท้าย และระหว่างคอมม่าได้ดีขึ้น
+                parts = coords.strip().replace(" ", "").split(',')
+                if len(parts) >= 2:
+                    lat, lng = float(parts[0]), float(parts[1])
+                    st.session_state.markers.append({'lat': lat, 'lng': lng, 'active': True})
+                    st.session_state.isochrone_data = None; st.session_state.intersection_data = None
+                    st.rerun()
+                else:
+                    st.error("รูปแบบผิด (ต้องมี , คั่น)")
+            except: st.error("พิกัดผิดพลาด")
             
     st.markdown("---")
     st.text_input("Geoapify API Key", key="api_key", type="password")
@@ -184,8 +189,23 @@ with st.sidebar:
     if st.session_state.markers:
         st.markdown("---")
         for i, m in enumerate(st.session_state.markers):
-            is_active = st.checkbox(f"จุดที่ {i+1}", value=m.get('active', True), key=f"act_{i}")
-            st.session_state.markers[i]['active'] = is_active
+            color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
+            col_chk, col_txt, col_del = st.columns([0.15, 0.70, 0.15])
+            
+            with col_chk:
+                is_active = st.checkbox(" ", value=m.get('active', True), key=f"active_chk_{i}", label_visibility="collapsed")
+                st.session_state.markers[i]['active'] = is_active
+            
+            with col_txt:
+                style = f"color:{color_name}; font-weight:bold;" if is_active else "color:gray; text-decoration:line-through;"
+                # --- แก้ไขตรงนี้: แสดงทศนิยม 6 ตำแหน่ง เพื่อให้เห็นเลขพิกัดละเอียดขึ้น ---
+                st.markdown(f"<span style='{style}'>● จุดที่ {i+1}</span><br><span style='font-size:0.8em; color:gray;'>({m['lat']:.6f}, {m['lng']:.6f})</span>", unsafe_allow_html=True)
+            
+            with col_del:
+                if st.button("✕", key=f"del_btn_{i}"):
+                    st.session_state.markers.pop(i)
+                    st.session_state.isochrone_data = None; st.session_state.intersection_data = None
+                    st.rerun()
 
     # 4. Settings
     st.markdown("---")
@@ -203,7 +223,7 @@ with st.sidebar:
         st.selectbox("โหมด", list(TRAVEL_MODE_NAMES.keys()), format_func=lambda x: TRAVEL_MODE_NAMES[x], key="travel_mode")
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals")
         
-        # --- Color Settings (RESTORED HERE) ---
+        # --- Color Settings ---
         st.caption("🎨 สีพื้นที่ตามเวลาเดินทาง:")
         c1, c2 = st.columns(2)
         st.session_state.colors['step1'] = c1.color_picker("≤ 10 นาที", st.session_state.colors['step1'])
