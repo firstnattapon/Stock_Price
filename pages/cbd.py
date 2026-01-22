@@ -4,7 +4,8 @@ from streamlit_folium import st_folium
 import requests
 from shapely.geometry import shape, mapping
 import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
+import io
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
@@ -53,6 +54,12 @@ TRAVEL_MODE_NAMES = {
 }
 
 TIME_OPTIONS = [5, 10, 15, 20, 30, 45, 60]
+
+#Keys to save in Export
+SESSION_KEYS_TO_SAVE = [
+    'api_key', 'map_style_name', 'travel_mode', 'time_intervals', 
+    'show_dol', 'show_cityplan', 'show_population', 'colors'
+]
 
 # ============================================================================
 # 2. LOGIC & CALCULATION HELPERS
@@ -122,7 +129,7 @@ def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool):
     ).add_to(m)
 
 # ============================================================================
-# 3. STATE MANAGEMENT
+# 3. STATE MANAGEMENT & IO HANDLERS
 # ============================================================================
 
 def initialize_session_state():
@@ -141,7 +148,7 @@ def initialize_session_state():
         'show_population': False
     }
     
-    # Load default data if markers missing
+    # Load default data from remote JSON only if markers are missing and not previously loaded
     if 'markers' not in st.session_state:
         try:
             response = requests.get(DEFAULT_JSON_URL, timeout=3)
@@ -153,20 +160,52 @@ def initialize_session_state():
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
     
-    # Ensure active flag exists
+    # Ensure active flag exists for all markers
     for m in st.session_state.markers:
         if 'active' not in m: m['active'] = True
 
 def reset_state():
     """Reset markers and results."""
     st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON, 'active': True}]
-    st.session_state.isochrone_data = None
-    st.session_state.intersection_data = None
+    clear_results()
 
 def clear_results():
     """Clear calculation results (used when markers change)."""
     st.session_state.isochrone_data = None
     st.session_state.intersection_data = None
+
+def generate_export_json() -> str:
+    """Serialize current state to JSON string."""
+    export_data = {
+        "markers": st.session_state.markers,
+        "settings": {k: st.session_state[k] for k in SESSION_KEYS_TO_SAVE if k in st.session_state}
+    }
+    return json.dumps(export_data, indent=2, ensure_ascii=False)
+
+def apply_imported_config(uploaded_file):
+    """Parse JSON file and update session state."""
+    if uploaded_file is not None:
+        try:
+            data = json.load(uploaded_file)
+            
+            # 1. Update Markers
+            if "markers" in data and isinstance(data["markers"], list):
+                st.session_state.markers = data["markers"]
+            
+            # 2. Update Settings
+            if "settings" in data and isinstance(data["settings"], dict):
+                for k, v in data["settings"].items():
+                    if k in SESSION_KEYS_TO_SAVE:
+                        st.session_state[k] = v
+            
+            # 3. Cleanup & UI Feedback
+            clear_results()
+            st.toast("✅ โหลดการตั้งค่าสำเร็จ!", icon="💾")
+            
+        except json.JSONDecodeError:
+            st.error("ไฟล์ JSON ไม่ถูกต้อง")
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาด: {e}")
 
 # ============================================================================
 # 4. UI COMPONENTS
@@ -175,6 +214,31 @@ def clear_results():
 def render_sidebar():
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
+        
+        # --- 0. Config Manager (Import/Export) ---
+        with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
+            # Export
+            st.caption("📤 **Save Data**")
+            json_str = generate_export_json()
+            st.download_button(
+                label="Download Config (.json)",
+                data=json_str,
+                file_name="geo_cbd_config.json",
+                mime="application/json",
+                use_container_width=True
+            )
+            
+            # Import
+            st.markdown("---")
+            st.caption("📥 **Load Data**")
+            uploaded_file = st.file_uploader("Upload .json file", type=["json"], label_visibility="collapsed")
+            if uploaded_file is not None:
+                # Check if this file is different from the last processed one or if user wants to force load
+                if st.button("ยืนยันการโหลดไฟล์", use_container_width=True):
+                    apply_imported_config(uploaded_file)
+                    st.rerun()
+
+        st.markdown("---")
         
         # --- 1. Manual Add ---
         with st.container():
@@ -190,7 +254,6 @@ def render_sidebar():
                     else: st.error("รูปแบบผิด (ต้องมี , คั่น)")
                 except: st.error("พิกัดผิดพลาด")
             
-        st.markdown("---")
         st.text_input("Geoapify API Key", key="api_key", type="password")
         
         # --- 2. Controls ---
