@@ -1,47 +1,72 @@
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 
-# =========================================================
-# 🔑 KEY ของคุณ (จากภาพแคปหน้าจอ)
-# =========================================================
-# Key: c344fe69c29a9ff359ce658802837c81
-API_KEY = "490db764853b3693bfc798046c5e0a62"
+# ตั้งค่าหน้าเว็บ
+st.set_page_config(page_title="Longdo Map Streamlit", layout="wide")
 
-st.set_page_config(layout="wide")
-st.title("✅ ทดสอบแปลงที่ดิน (โหมด WMS มาตรฐาน)")
+st.title("🗺️ Longdo Map with Streamlit")
+st.caption("ตัวอย่างการเชื่อมต่อ Longdo Map API เข้ากับ Streamlit")
 
-if not API_KEY:
-    st.error("ไม่พบ API Key")
-else:
-    # ตั้งพิกัดเชียงของ และ Zoom 17 (ซูมลึกๆ เพื่อให้เห็นแน่นอน)
-    m = folium.Map(location=[20.2604, 100.4100], zoom_start=17)
-
-    # 1. Base Map (แผนที่ถนนพื้นหลัง)
-    folium.TileLayer("CartoDB positron", name="แผนที่พื้นหลัง").add_to(m)
-
-    # 2. แปลงที่ดิน (DOL Parcels) - ใช้ระบบ WMS
-    # URL นี้จะส่งคำสั่ง ?request=GetMap&service=WMS... ไปหา Server โดยอัตโนมัติ
-    # ซึ่งจะแก้ปัญหา 'unknown WMS request type' ที่คุณเจอได้แน่นอน
-    wms_base_url = f"https://ms.longdo.com/mapproxy/service/wms?apikey={API_KEY}"
+# 1. การตั้งค่าและ Input จากผู้ใช้ (Sidebar)
+with st.sidebar:
+    st.header("📍 ตั้งค่าพิกัด")
     
-    folium.raster_layers.WmsTileLayer(
-        url=wms_base_url,
-        layers="dol_parcels",       # ชื่อ Layer กรมที่ดิน
-        fmt="image/png",            # ขอไฟล์รูปภาพ PNG
-        transparent=True,           # พื้นหลังโปร่งใส
-        version="1.1.1",            # เวอร์ชั่น WMS
-        attr="Longdo Map / กรมที่ดิน",
-        name="📜 แปลงที่ดิน (กรมที่ดิน)",
-        overlay=True,
-        control=True,
-        show=True
-    ).add_to(m)
+    # API Key (ใช้ Key ที่คุณให้มาเป็นค่า Default)
+    api_key = st.text_input("Longdo API Key", value="0a999afb0da60c5c45d010e9c171ffc8")
+    
+    # กำหนดพิกัดเริ่มต้น (ตัวอย่างคือ สยามพารากอน)
+    lat = st.number_input("Latitude (ละติจูด)", value=13.7469, format="%.6f")
+    lon = st.number_input("Longitude (ลองจิจูด)", value=100.5349, format="%.6f")
+    zoom = st.slider("Zoom Level", 1, 20, 15)
 
-    # ปุ่มเลือก Layer
-    folium.LayerControl(collapsed=False).add_to(m)
-    
-    st.success(f"🔑 เชื่อมต่อด้วย Key: ...{API_KEY[-6:]}")
-    st.info("💡 **สังเกต:** ถ้าเห็นเส้นขอบสีแดง/ส้ม บนแผนที่ แสดงว่าสำเร็จแล้วครับ (Layer นี้จะแสดงเฉพาะตอนซูมใกล้ๆ)")
-    
-    st_folium(m, height=600, use_container_width=True)
+    st.info("ลองเปลี่ยนค่าพิกัด แผนที่จะขยับตามอัตโนมัติ")
+
+# 2. ส่วนแสดงผลแผนที่ (HTML & JavaScript)
+# เราต้องสร้าง HTML string ที่ฝัง JavaScript ของ Longdo ลงไป
+longdo_map_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ margin: 0; padding: 0; }}
+        #map {{ height: 600px; width: 100%; }}
+    </style>
+    <script src="https://api.longdo.com/map/?key={api_key}"></script>
+    <script>
+        var map;
+        function init() {{
+            // สร้างแผนที่
+            map = new longdo.Map({{
+                placeholder: document.getElementById('map')
+            }});
+            
+            // กำหนดจุดกึ่งกลางและการซูมตามค่าที่รับมาจาก Python
+            map.location({{ lon: {lon}, lat: {lat} }}, true);
+            map.zoom({zoom});
+
+            // เพิ่มหมุด (Marker) ตรงจุดกึ่งกลาง
+            var marker = new longdo.Marker({{ lon: {lon}, lat: {lat} }}, {{
+                title: 'ตำแหน่งที่เลือก',
+                detail: 'Lat: {lat}, Lon: {lon}'
+            }});
+            map.Overlays.add(marker);
+            
+            // เพิ่มเลเยอร์จราจร (Optional)
+            map.Layers.add(longdo.Layers.TRAFFIC);
+        }}
+    </script>
+</head>
+<body onload="init();">
+    <div id="map"></div>
+</body>
+</html>
+"""
+
+# 3. แสดงผลด้วย components.html
+# height ต้องสัมพันธ์กับ css height ด้านบน
+components.html(longdo_map_html, height=600)
+
+# แสดงข้อมูลใต้แผนที่
+st.markdown(f"**พิกัดปัจจุบัน:** `{lat}, {lon}`")
+st.markdown("---")
+st.success("โหลดแผนที่เรียบร้อยจาก Longdo API")
