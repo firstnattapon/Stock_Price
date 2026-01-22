@@ -185,6 +185,3 @@ st.markdown(
 )
 
 st.subheader("การตั้งค่า secrets (แนะนำ)")
-st.markdown(
-    """
-สร้างไฟล์ `.streamlit/secrets.toml`:
