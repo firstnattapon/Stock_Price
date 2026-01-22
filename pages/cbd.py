@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
-# ============================================================================  
+# ============================================================================
 
 PAGE_CONFIG = {
     "page_title": "Geoapify Map (Chiang Khong CBD)",
@@ -22,17 +22,11 @@ DEFAULT_LAT = 20.219443
 DEFAULT_LON = 100.403630
 DEFAULT_API_KEY = "4eefdfb0b0d349e595595b9c03a69e3d"
 
-# DOL (กรมที่ดิน) WMS Configuration
-DOL_WMS_URL = "https://landsmaps.dol.go.th/geoserver/DOL/wms"
-DOL_LAYERS = "DOL:v_parcel_all"  # Layer แนวเขตที่ดิน
-
 MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
 MAP_STYLES = {
-    # =========================================================
-    # 1. กลุ่มมาตรฐาน & สีอ่อน (Standard & Clean)
-    # =========================================================
+    # --- Standard ---
     "OpenStreetMap (มาตรฐาน)": {
         "tiles": "OpenStreetMap", 
         "attr": None
@@ -41,92 +35,22 @@ MAP_STYLES = {
         "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
         "attr": "Google Maps"
     },
-    "CartoDB Positron (สีอ่อน/สะอาด)": {
-        "tiles": "CartoDB positron", 
-        "attr": None
-    },
-    "CartoDB Voyager (เน้นสถานที่/นำทาง)": {
-        "tiles": "CartoDB voyager",
-        "attr": None
+    "Esri Satellite (ดาวเทียมชัด)": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Tiles &copy; Esri"
     },
     "Esri Light Gray (สีเทาอ่อน/เน้นข้อมูล)": { 
-        # *แนะนำ: ทำให้สีของพื้นที่ CBD เด่นที่สุด*
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
         "attr": "Tiles &copy; Esri"
     },
-
-    # =========================================================
-    # 2. กลุ่ม Google Maps (คุ้นเคย & ใช้งานง่าย)
-    # =========================================================
     "Google Maps (ถนน)": {
         "tiles": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
         "attr": "Google Maps"
     },
-    "Google Maps (ดาวเทียม)": {
-        "tiles": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-        "attr": "Google Maps"
-    },
-    "Google Maps (ภูมิประเทศ)": {
-        "tiles": "https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
-        "attr": "Google Maps"
-    },
-
-    # =========================================================
-    # 3. กลุ่มวิเคราะห์ความเจริญ & เมือง (Urban & Prosperity)
-    # =========================================================
-    "NASA Night Lights (แสงไฟเศรษฐกิจ)": {
-        # *แนะนำ: ดูภาพรวมความเจริญจากแสงไฟ (Zoom out)*
-        "tiles": "https://map1.vis.earthdata.nasa.gov/wmts-webmerc/VIIRS_CityLights_2012/default//GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg",
-        "attr": "Imagery provided by NASA GIBS"
-    },
-    "OpenStreetMap (Hot Style - เน้นสิ่งปลูกสร้าง)": {
-        # *แนะนำ: สีสด เห็นเขตตึกหนาแน่นชัดเจน*
-        "tiles": "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
-        "attr": "&copy; OpenStreetMap contributors, Tiles style by Humanitarian OpenStreetMap Team hosted by OpenStreetMap France"
-    },
-    "OpenRailwayMap (โครงข่ายรถไฟฟ้า/ราง)": {
-        # *แนะนำ: ดูว่า CBD เกาะแนวรถไฟฟ้าหรือไม่*
-        "tiles": "https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
-        "attr": "Map data: &copy; OpenStreetMap contributors | Map style: &copy; OpenRailwayMap (CC-BY-SA)"
-    },
-    "Esri Dark Gray (โครงสร้างเมืองสีเข้ม)": {
-        # *แนะนำ: พื้นหลังมืด ทำให้ Overlay สีสว่างๆ เด่นมาก*
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri"
-    },
     "CartoDB Dark Matter (เมืองยามค่ำคืน)": {
-        # *แนะนำ: ดู Modern และเห็นเส้นถนนชัดเจน*
         "tiles": "CartoDB dark_matter", 
         "attr": None
     },
-
-    # =========================================================
-    # 4. กลุ่มภูมิประเทศ & ภาพถ่ายทางอากาศ (Satellite & Topo)
-    # =========================================================
-    "Esri Satellite (ดาวเทียมชัด)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri &mdash; Source: Esri"
-    },
-    "Esri World Topo (ภูมิประเทศสวยงาม)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
-        "attr": "Tiles &copy; Esri"
-    },
-    "OpenTopoMap (ภูมิประเทศ/คอนทัวร์)": {
-        "tiles": "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        "attr": "Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap (CC-BY-SA)"
-    },
-
-    # =========================================================
-    # 5. กลุ่มการเดินทางเฉพาะทาง (Travel Modes)
-    # =========================================================
-    "OPNVKarte (ขนส่งสาธารณะ)": {
-        "tiles": "https://tileserver.memomaps.de/tilegen/{z}/{x}/{y}.png",
-        "attr": "Map <a href='https://memomaps.de/'>memomaps.de</a>"
-    },
-    "CyclOSM (สำหรับจักรยาน)": {
-        "tiles": "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
-        "attr": "CyclOSM | Map data: &copy; OpenStreetMap contributors"
-    }
 }
 
 TRAVEL_MODE_NAMES = {
@@ -139,7 +63,7 @@ TRAVEL_MODE_NAMES = {
 TIME_OPTIONS = [5, 10, 15, 20, 30, 45, 60]
 
 # ============================================================================
-# 2. PURE HELPER FUNCTIONS (Logic & Calculation)
+# 2. HELPER FUNCTIONS
 # ============================================================================
 
 def get_fill_color(minutes: float, colors_config: Dict[str, str]) -> str:
@@ -164,7 +88,6 @@ def calculate_intersection(features: List[Dict], num_active_markers: int) -> Opt
     if num_active_markers < 2:
         return None
     
-    # Group polygons by active_index
     polys_per_active_idx = {}
     
     for feat in features:
@@ -229,9 +152,7 @@ def initialize_session_state():
         'api_key': DEFAULT_API_KEY,
         'map_style_name': list(MAP_STYLES.keys())[0],
         'travel_mode': "drive",
-        'time_intervals': [5],
-        'show_dol_layer': False,  # เพิ่ม: แสดง Layer กรมที่ดิน
-        'dol_opacity': 0.6        # เพิ่ม: ความโปร่งใสของ Layer
+        'time_intervals': [5]
     }
 
     if 'markers' not in st.session_state:
@@ -247,7 +168,6 @@ def initialize_session_state():
         if key not in st.session_state:
             st.session_state[key] = default_val
     
-    # Ensure 'active' key exists
     for m in st.session_state.markers:
         if 'active' not in m:
             m['active'] = True
@@ -261,7 +181,6 @@ def get_active_markers() -> List[Tuple[int, Dict]]:
 
 st.set_page_config(**PAGE_CONFIG)
 
-# CSS Adjustment
 st.markdown("""
     <style>
         .block-container { padding-top: 2rem; padding-bottom: 0rem; }
@@ -279,61 +198,37 @@ initialize_session_state()
 with st.sidebar:
     st.header("⚙️ การตั้งค่า")
     
-    # --- 1. Manual Add Marker (Goal 1) ---
+    # --- 1. Manual Add Marker ---
     with st.container():
         st.caption("➕ เพิ่มจุดพิกัดเอง (Lat, Lon)")
         col_inp, col_add_btn = st.columns([0.7, 0.3])
         
         with col_inp:
-            manual_coords = st.text_input(
-                "Coords", 
-                placeholder="20.21, 100.40", 
-                label_visibility="collapsed",
-                key="manual_coords_input"
-            )
+            manual_coords = st.text_input("Coords", placeholder="20.21, 100.40", label_visibility="collapsed", key="manual_coords_input")
         
         with col_add_btn:
             if st.button("เพิ่ม", use_container_width=True):
                 if manual_coords:
                     try:
-                        # Parsing logic
                         parts = manual_coords.replace(" ", "").split(',')
                         if len(parts) == 2:
-                            new_lat = float(parts[0])
-                            new_lng = float(parts[1])
-                            
-                            # Validation range
+                            new_lat, new_lng = float(parts[0]), float(parts[1])
                             if -90 <= new_lat <= 90 and -180 <= new_lng <= 180:
                                 st.session_state.markers.append({'lat': new_lat, 'lng': new_lng, 'active': True})
                                 st.session_state.isochrone_data = None
                                 st.session_state.intersection_data = None
                                 st.rerun()
                             else:
-                                st.error("พิกัดไม่อยู่ในขอบเขต")
+                                st.error("พิกัดผิด")
                         else:
                             st.error("รูปแบบผิด")
                     except ValueError:
-                        st.error("ตัวเลขไม่ถูกต้อง")
-                else:
-                    st.warning("ใส่พิกัดก่อน")
+                        st.error("ตัวเลขผิด")
 
     st.markdown("---")
-    
-    # --- 2. API Key ---
     st.text_input("API Key", key="api_key", type="password")
-    
     st.markdown("---")
     
-    # --- 3. DOL Land Boundary Overlay (ใหม่!) ---
-    st.caption("🗺️ แนวเขตที่ดิน (กรมที่ดิน)")
-    st.checkbox("แสดงแนวเขตโฉนดที่ดิน", key="show_dol_layer")
-    
-    if st.session_state.show_dol_layer:
-        st.slider("ความโปร่งใส Layer", 0.0, 1.0, key="dol_opacity", step=0.1)
-    
-    st.markdown("---")
-    
-    # --- 4. Control Buttons ---
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("❌ ลบจุดล่าสุด", use_container_width=True):
@@ -343,20 +238,16 @@ with st.sidebar:
                 st.session_state.intersection_data = None
                 st.rerun()
     with col_btn2:
-        if st.button("🔄 รีเซ็ตทั้งหมด", use_container_width=True):
+        if st.button("🔄 รีเซ็ต", use_container_width=True):
             st.session_state.markers = [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON, 'active': True}]
             st.session_state.isochrone_data = None
             st.session_state.intersection_data = None
             st.rerun()
     
-    # Stats
-    active_list = get_active_markers()
-    st.write(f"📍 จุดที่เลือกคำนวณ: **{len(active_list)}** / {len(st.session_state.markers)}")
-    
-    # --- 5. Marker List ---
+    # --- Marker List ---
     if st.session_state.markers:
         st.markdown("---")
-        st.caption("✅ = นำมาคำนวณ | ❌ = ลบทิ้ง")
+        st.caption(f"📍 จุดที่เลือกคำนวณ: **{len(get_active_markers())}** จุด")
         for i, m in enumerate(st.session_state.markers):
             color_name = MARKER_COLORS[i % len(MARKER_COLORS)]
             col_chk, col_txt, col_del = st.columns([0.15, 0.70, 0.15])
@@ -372,11 +263,9 @@ with st.sidebar:
             with col_del:
                 if st.button("✕", key=f"del_btn_{i}"):
                     st.session_state.markers.pop(i)
-                    st.session_state.isochrone_data = None
-                    st.session_state.intersection_data = None
                     st.rerun()
 
-    # --- 6. Settings & File Operations ---
+    # --- Settings ---
     with st.expander("⚙️ ตั้งค่าแผนที่ & สี", expanded=False):
         st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
         st.selectbox("รูปแบบการเดินทาง", list(TRAVEL_MODE_NAMES.keys()), format_func=lambda x: TRAVEL_MODE_NAMES[x], key="travel_mode")
@@ -388,6 +277,40 @@ with st.sidebar:
         st.session_state.colors['step3'] = c1.color_picker("21-30", st.session_state.colors['step3'])
         st.session_state.colors['step4'] = c2.color_picker("> 30", st.session_state.colors['step4'])
 
+    # --- WMS OVERLAY (New Feature) ---
+    with st.expander("🗺️ เลเยอร์พิเศษ (WMS Overlay)", expanded=True):
+        st.info("💡 หากเลือกกรมที่ดินแล้วไม่ขึ้น ให้ลองเลือก 'Global Test' เพื่อเช็คว่าระบบทำงานปกติไหม (บางครั้ง Server กรมที่ดินอาจบล็อกการเข้าถึง)")
+        
+        show_wms = st.checkbox("แสดงเลเยอร์ WMS", value=False)
+        
+        wms_source = st.selectbox(
+            "เลือกแหล่งข้อมูล:",
+            [
+                "Custom (กำหนด URL เอง)",
+                "Global Test (Topography) - ชัวร์สุด",
+                "กรมที่ดิน (Cadastral) - อาจไม่ขึ้น",
+                "กรมพัฒนาที่ดิน (Land Use)"
+            ]
+        )
+
+        if "Global Test" in wms_source:
+            default_url = "http://ows.mundialis.de/services/service?"
+            default_layer = "TOPO-WMS"
+        elif "กรมที่ดิน" in wms_source:
+            default_url = "https://ms.dol.go.th/ArcGIS/services/DOL/Cadastral/MapServer/WMSServer"
+            default_layer = "0"
+        elif "กรมพัฒนาที่ดิน" in wms_source:
+            default_url = "https://ldd-service.ldd.go.th/dwn/wms"
+            default_layer = "landuse"
+        else:
+            default_url = ""
+            default_layer = ""
+
+        wms_url = st.text_input("WMS URL", value=default_url)
+        wms_layer = st.text_input("Layer Name", value=default_layer)
+        wms_opacity = st.slider("ความโปร่งใส", 0.0, 1.0, 0.5, key="wms_op")
+
+    # --- Export/Import ---
     with st.expander("📂 Import / Export", expanded=False):
         export_data = {
             "markers": st.session_state.markers,
@@ -397,9 +320,7 @@ with st.sidebar:
             "api_key": st.session_state.api_key,
             "map_style_name": st.session_state.map_style_name,
             "travel_mode": st.session_state.travel_mode,
-            "time_intervals": st.session_state.time_intervals,
-            "show_dol_layer": st.session_state.show_dol_layer,
-            "dol_opacity": st.session_state.dol_opacity
+            "time_intervals": st.session_state.time_intervals
         }
         st.download_button("💾 Export JSON", json.dumps(export_data, indent=2), "geoapify_project.json", "application/json", use_container_width=True)
         
@@ -408,10 +329,8 @@ with st.sidebar:
             try:
                 d = json.load(uploaded)
                 st.session_state.markers = d.get("markers", st.session_state.markers)
-                # Ensure active key
                 for m in st.session_state.markers:
                     if 'active' not in m: m['active'] = True
-                
                 st.session_state.isochrone_data = d.get("isochrone_data")
                 st.session_state.intersection_data = d.get("intersection_data")
                 st.session_state.colors = d.get("colors", st.session_state.colors)
@@ -419,16 +338,12 @@ with st.sidebar:
                 st.session_state.map_style_name = d.get("map_style_name", st.session_state.map_style_name)
                 st.session_state.travel_mode = d.get("travel_mode", st.session_state.travel_mode)
                 st.session_state.time_intervals = d.get("time_intervals", st.session_state.time_intervals)
-                st.session_state.show_dol_layer = d.get("show_dol_layer", False)
-                st.session_state.dol_opacity = d.get("dol_opacity", 0.6)
                 st.success("Loaded!")
                 if st.button("Refresh"): st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
 
     st.markdown("---")
-    
-    # Calculate Button
     do_calculate = st.button("🚀 คำนวณหา CBD", type="primary", use_container_width=True)
 
 # ============================================================================
@@ -460,8 +375,6 @@ if do_calculate:
                             feat['properties']['original_index'] = orig_idx
                             feat['properties']['active_index'] = active_idx
                             all_features.append(feat)
-                    else:
-                        st.error(f"❌ API Error จุดที่ {orig_idx + 1}")
                 
                 if all_features:
                     st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
@@ -484,7 +397,7 @@ if do_calculate:
 # MAP RENDERING
 # ============================================================================
 
-style_config = MAP_STYLES[st.session_state.map_style_name]
+style_config = MAP_STYLES.get(st.session_state.map_style_name, MAP_STYLES["OpenStreetMap (มาตรฐาน)"])
 center_point = [DEFAULT_LAT, DEFAULT_LON]
 if st.session_state.markers:
     last_marker = st.session_state.markers[-1]
@@ -492,21 +405,7 @@ if st.session_state.markers:
 
 m = folium.Map(location=center_point, zoom_start=11, tiles=style_config["tiles"], attr=style_config["attr"])
 
-# ========== เพิ่ม DOL Land Boundary Layer ==========
-if st.session_state.show_dol_layer:
-    folium.raster_layers.WmsTileLayer(
-        url=DOL_WMS_URL,
-        layers=DOL_LAYERS,
-        transparent=True,
-        format="image/png",
-        opacity=st.session_state.dol_opacity,
-        name="แนวเขตที่ดิน (กรมที่ดิน)",
-        overlay=True,
-        control=True,
-        attr="กรมที่ดิน"
-    ).add_to(m)
-# ===================================================
-
+# 1. Isochrone Areas
 if st.session_state.isochrone_data:
     folium.GeoJson(
         st.session_state.isochrone_data, name='Areas',
@@ -518,6 +417,7 @@ if st.session_state.isochrone_data:
         tooltip=folium.GeoJsonTooltip(['travel_time_minutes'], aliases=['นาที:'])
     ).add_to(m)
 
+# 2. CBD Intersection
 if st.session_state.intersection_data:
     folium.GeoJson(
         st.session_state.intersection_data, name='CBD',
@@ -525,6 +425,7 @@ if st.session_state.intersection_data:
         tooltip="🏆 CBD Area"
     ).add_to(m)
 
+# 3. Markers
 for i, marker in enumerate(st.session_state.markers):
     is_active = marker.get('active', True)
     color = MARKER_COLORS[i % len(MARKER_COLORS)] if is_active else "gray"
@@ -537,10 +438,30 @@ for i, marker in enumerate(st.session_state.markers):
         opacity=opacity
     ).add_to(m)
 
+# 4. WMS Layer (Special Overlay)
+if show_wms and wms_url:
+    try:
+        folium.raster_layers.WmsTileLayer(
+            url=wms_url,
+            layers=wms_layer,
+            name="WMS Overlay (ข้อมูลพิเศษ)",
+            fmt="image/png",
+            transparent=True,
+            opacity=wms_opacity,
+            overlay=True,
+            control=True,
+            version="1.1.1" # Version มาตรฐานที่รองรับเยอะสุด
+        ).add_to(m)
+        st.toast(f"กำลังพยายามโหลด: {wms_layer}", icon="⏳")
+    except Exception as e:
+        st.error(f"Cannot load WMS: {e}")
+
+# Layer Control must be added AFTER all layers
 folium.LayerControl().add_to(m)
 
 map_output = st_folium(m, height=850, use_container_width=True, key="geoapify_main_map")
 
+# Click Logic
 if map_output and map_output.get('last_clicked'):
     clicked_lat = map_output['last_clicked']['lat']
     clicked_lng = map_output['last_clicked']['lng']
