@@ -2,17 +2,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 from urllib.parse import quote
 
-st.set_page_config(page_title="Longdo + MapProxy WMS (Red WMS)", layout="wide")
-st.title("Longdo Map API v3 + Longdo MapProxy WMS (ทำสีแดงเฉพาะ WMS)")
+st.set_page_config(page_title="Longdo + MapProxy WMS (กรมที่ดิน)", layout="wide")
+st.title("Longdo Map API v3 + Longdo MapProxy WMS (Department of Land WMS)")
 
 st.markdown(
     """
-แอปนี้แสดง **Longdo Map API v3** และซ้อน **WMS (Longdo MapProxy)** โดยพยายามทำให้ *เฉพาะเลเยอร์ WMS* เป็นสีแดงได้ 2 วิธี:
-
-1) ใช้ `styles=` (ถ้า WMS มี style สีแดงให้เลือกใน GetCapabilities)  
-2) ใช้ `SLD_BODY=` (ถ้า WMS/MapProxy อนุญาตให้ส่ง SLD ผ่าน)
+ตัวอย่าง Streamlit สำหรับแสดง **Longdo Map API v3** และซ้อนชั้นข้อมูลจาก **WMS (Longdo MapProxy)**
 
 - **WMS Endpoint (MapProxy):** `https://ms.longdo.com/mapproxy/service`
+- หมายเหตุจากภาพ: ควรซูมให้ **Scale ใหญ่กว่า 1:10000** เพื่อให้แสดงรายละเอียดได้ (โดยทั่วไปลองเริ่มที่ **Zoom ≥ 14**)
     """
 )
 
@@ -22,11 +20,13 @@ st.markdown(
 with st.sidebar:
     st.header("ตั้งค่า")
 
+    # แนะนำให้ใส่ key ผ่าน .streamlit/secrets.toml:
+    # LONGDO_MAP_KEY = "xxx"
     longdo_key = st.text_input(
         "Longdo Map API Key",
         value=st.secrets.get("LONGDO_MAP_KEY", ""),
         type="password",
-        help="แนะนำให้เก็บใน .streamlit/secrets.toml"
+        help="แนะนำให้เก็บใน Streamlit secrets เช่น .streamlit/secrets.toml"
     )
 
     st.subheader("ตำแหน่ง/การซูม")
@@ -39,120 +39,71 @@ with st.sidebar:
     wms_url = st.text_input(
         "WMS Endpoint",
         value="https://ms.longdo.com/mapproxy/service",
+        help="ค่าจากภาพ: https://ms.longdo.com/mapproxy/service"
     )
 
-    # สำคัญ: ต้องเป็นชื่อ <Name> จาก GetCapabilities เท่านั้น
+    # บางระบบต้องใช้ชื่อ layer เฉพาะ (ดูจาก GetCapabilities)
     layer_name = st.text_input(
-        "Layer name (<Name> จาก GetCapabilities)",
+        "Layer name (ต้องตรงกับ GetCapabilities)",
         value="",
-        help="เปิด GetCapabilities แล้วหา <Layer><Name>...</Name>"
+        help="ถ้าไม่ทราบ ให้เปิด GetCapabilities แล้วค้นหา <Name> ของ layer"
     )
 
-    opacity = st.slider("Opacity", 0.0, 1.0, 0.75, 0.05)
+    # บางบริการ MapProxy ต้องระบุ map=... หรือ service=... เพิ่มเติม
+    extra_query_user = st.text_input(
+        "Extra query (ใส่เพิ่มเองถ้าจำเป็น)",
+        value="",
+        help="ตัวอย่าง: map=/path/to/mapfile.map (แล้วแต่บริการรองรับ)"
+    )
+
+    opacity = st.slider("Opacity", 0.0, 1.0, 0.7, 0.05)
+
+    # Longdo base map มักอยู่บน Web Mercator
     srs = st.selectbox("SRS/CRS", ["EPSG:3857", "EPSG:4326"], index=0)
+
     img_format = st.selectbox("Image format", ["image/png", "image/jpeg"], index=0)
     transparent = st.checkbox("Transparent (แนะนำเมื่อ PNG)", value=True)
+    styles = st.text_input("styles (ปล่อยว่างได้)", value="")
 
     st.divider()
-    st.subheader("ตั้งค่าสีแดงเฉพาะ WMS")
-
-    red_mode = st.radio(
-        "โหมดทำสีแดง",
-        ["ใช้ styles= (ต้องมีอยู่แล้ว)", "ใช้ SLD_BODY= (ถ้าเซิร์ฟเวอร์รองรับ)"],
-        index=0
-    )
-
-    # โหมด 1: styles=
-    styles = ""
-    if red_mode.startswith("ใช้ styles"):
-        styles = st.text_input(
-            "WMS styles",
-            value="",
-            help="ใส่ชื่อ style ที่มีอยู่แล้ว เช่น red / parcel_red (ดูจาก GetCapabilities)"
-        )
-        st.caption("ถ้าไม่รู้ชื่อ style: เปิด GetCapabilities แล้วดูใน <Style><Name>...</Name></Style> ของ layer")
-
-    # โหมด 2: SLD_BODY=
-    sld_body = ""
-    if red_mode.startswith("ใช้ SLD_BODY"):
-        st.caption("ถ้า WMS/MapProxy ไม่ยอมรับ SLD_BODY เลเยอร์จะไม่เปลี่ยนสี (บางระบบบล็อก)")
-        default_sld = """<?xml version="1.0" encoding="UTF-8"?>
-<sld:StyledLayerDescriptor version="1.0.0"
-  xmlns:sld="http://www.opengis.net/sld"
-  xmlns:ogc="http://www.opengis.net/ogc"
-  xmlns="http://www.opengis.net/sld">
-  <sld:NamedLayer>
-    <sld:Name>YOUR_LAYER_NAME</sld:Name>
-    <sld:UserStyle>
-      <sld:Title>Red parcels</sld:Title>
-      <sld:FeatureTypeStyle>
-        <sld:Rule>
-          <sld:PolygonSymbolizer>
-            <sld:Fill>
-              <sld:CssParameter name="fill">#FF0000</sld:CssParameter>
-              <sld:CssParameter name="fill-opacity">0.0</sld:CssParameter>
-            </sld:Fill>
-            <sld:Stroke>
-              <sld:CssParameter name="stroke">#FF0000</sld:CssParameter>
-              <sld:CssParameter name="stroke-width">2</sld:CssParameter>
-              <sld:CssParameter name="stroke-opacity">0.9</sld:CssParameter>
-            </sld:Stroke>
-          </sld:PolygonSymbolizer>
-        </sld:Rule>
-      </sld:FeatureTypeStyle>
-    </sld:UserStyle>
-  </sld:NamedLayer>
-</sld:StyledLayerDescriptor>
-"""
-        sld_body = st.text_area(
-            "SLD XML (จะถูก URL-encode ให้อัตโนมัติ)",
-            value=default_sld,
-            height=260,
-            help="แก้ YOUR_LAYER_NAME ให้ตรงกับ layer ที่ใช้จริง"
-        )
-
-    st.divider()
-    st.subheader("ทดสอบ WMS")
+    st.subheader("ลิงก์ทดสอบ (เปิดในเบราว์เซอร์)")
     getcap = f"{wms_url}{'&' if '?' in wms_url else '?'}SERVICE=WMS&REQUEST=GetCapabilities"
     st.write("GetCapabilities:")
     st.code(getcap, language="text")
 
-    st.caption("Tip: ถ้าไม่ขึ้น ให้ลองเปิด DevTools Console ดู error และตรวจชื่อ layer/CRS/การบล็อก CORS")
+    st.caption("ถ้าเลเยอร์ไม่ขึ้น ให้เปิด GetCapabilities แล้วตรวจชื่อ layer และ CRS ที่รองรับ")
 
 if not longdo_key.strip():
     st.warning("กรุณาใส่ Longdo Map API Key ก่อน")
     st.stop()
 
-if not layer_name.strip():
-    st.warning("กรุณาใส่ Layer name (<Name> จาก GetCapabilities) ก่อน")
-    st.stop()
+# -----------------------
+# Zoom hint (อิงจากคำแนะนำ scale > 1:10000)
+# -----------------------
+if zoom < 14:
+    st.info("คำแนะนำ: ลองปรับ Zoom เป็น 14 ขึ้นไป (เพื่อให้เข้าใกล้เงื่อนไข Scale > 1:10000)")
 
 # -----------------------
-# Build WMS extraQuery (KVP)
+# Build WMS extra query for Longdo Layer (KVP)
 # -----------------------
 extra_parts = []
 
-# layers=...
-extra_parts.append(f"layers={quote(layer_name.strip())}")
+# layers=... (ใส่เมื่อผู้ใช้กรอก)
+if layer_name.strip():
+    extra_parts.append(f"layers={quote(layer_name.strip())}")
 
-# styles=... (โหมด styles)
-if red_mode.startswith("ใช้ styles"):
-    if styles.strip():
-        extra_parts.append(f"styles={quote(styles.strip())}")
-    else:
-        # ปล่อยว่างได้ แต่จะไม่เปลี่ยนสีให้แดง
-        extra_parts.append("styles=")
+# styles=...
+if styles.strip():
+    extra_parts.append(f"styles={quote(styles.strip())}")
 
 # transparent=...
 if transparent and img_format == "image/png":
     extra_parts.append("transparent=true")
 
-# SLD_BODY=... (โหมด SLD)
-if red_mode.startswith("ใช้ SLD_BODY"):
-    # แนะนำให้แทน YOUR_LAYER_NAME อัตโนมัติ
-    if sld_body:
-        sld_fixed = sld_body.replace("YOUR_LAYER_NAME", layer_name.strip())
-        extra_parts.append("SLD_BODY=" + quote(sld_fixed))
+# extra query from user (ต่อท้ายแบบดิบ แต่กันช่องว่างหัวท้าย)
+if extra_query_user.strip():
+    # ผู้ใช้อาจใส่รูปแบบ "a=b&c=d"
+    extra_parts.append(extra_query_user.strip().lstrip("&").lstrip("?"))
 
 extra_query = "&".join([p for p in extra_parts if p])
 
@@ -186,10 +137,9 @@ html = f"""
     <div id="map"></div>
     <div class="note">
       <div><b>WMS:</b> <span class="mono">{wms_url}</span></div>
-      <div><b>Layer:</b> <span class="mono">{layer_name}</span></div>
+      <div><b>Layer:</b> <span class="mono">{layer_name if layer_name.strip() else "(not set)"}</span></div>
       <div><b>SRS:</b> <span class="mono">{srs}</span> | <b>Format:</b> <span class="mono">{img_format}</span> | <b>Opacity:</b> {opacity}</div>
-      <div><b>Mode:</b> {red_mode}</div>
-      <div><b>extraQuery:</b> <span class="mono">{extra_query}</span></div>
+      <div><b>extraQuery:</b> <span class="mono">{extra_query if extra_query else "(none)"}</span></div>
     </div>
 
     <script>
@@ -202,7 +152,7 @@ html = f"""
       map.Overlays.add(new longdo.Marker({{ lat: {lat}, lon: {lon} }}, {{ title: 'Center' }}));
 
       try {{
-        var wmsLayer = new longdo.Layer('WMS (Red)', {{
+        var wmsLayer = new longdo.Layer('Department of Land WMS (MapProxy)', {{
           type: longdo.LayerType.WMS,
           url: '{wms_url}',
           format: '{img_format}',
@@ -211,6 +161,7 @@ html = f"""
           weight: 10,
           extraQuery: '{extra_query}'
         }});
+
         map.Layers.add(wmsLayer);
       }} catch (e) {{
         console.error("Failed to add WMS layer:", e);
@@ -220,20 +171,16 @@ html = f"""
 </html>
 """
 
-components.html(html, height=height + 110, scrolling=False)
+components.html(html, height=height + 90, scrolling=False)
 
-st.subheader("เช็คว่า ‘ทำแดง’ ได้จริงไหม")
+st.subheader("ถ้าเลเยอร์ไม่ขึ้น (เช็คตามลำดับ)")
 st.markdown(
     """
-### ถ้าเลือก `styles=` แล้วไม่แดง
-- แปลว่า WMS **ไม่มี style สีแดง** หรือชื่อ style ไม่ตรง  
-- ให้เปิด GetCapabilities แล้วคัดลอกชื่อ style จาก `<Style><Name>...</Name></Style>`
-
-### ถ้าเลือก `SLD_BODY=` แล้วไม่แดง
-- มีโอกาสสูงว่า **MapProxy/เซิร์ฟเวอร์ไม่อนุญาต SLD** หรือไม่ส่งต่อพารามิเตอร์ไปยัง upstream  
-- หรือ layer ไม่ใช่ polygon/ชื่อ layer ไม่ตรง
-
-ถ้าคุณส่ง “ชื่อ layer” และส่วน `<Style>...</Style>` จาก GetCapabilities มา ผมจะบอกให้ได้ว่าควรใส่ `styles=` อะไรถึงจะเป็นสีแดงครับ
+1) เปิด **GetCapabilities** แล้วดูว่า **ชื่อ layer** ที่จะใช้คืออะไร (ค่าจาก `<Name>...</Name>`)  
+2) ตรวจว่า layer รองรับ **CRS/SRS** ที่เลือก (แนะนำ **EPSG:3857**)  
+3) ลองปรับ **Zoom ≥ 14** (สอดคล้องกับคำแนะนำ Scale > 1:10000)  
+4) ถ้าใน GetCapabilities ต้องใส่พารามิเตอร์เพิ่ม (เช่น `map=...`) ให้ใส่ในช่อง **Extra query**  
+5) ถ้าเครือข่าย/เซิร์ฟเวอร์บล็อก CORS อาจต้องใช้ proxy (อาการ: ใน DevTools มี error CORS/blocked)
     """
 )
 
