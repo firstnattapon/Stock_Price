@@ -303,7 +303,7 @@ def render_sidebar():
             # --- Modified City Plan UI with Opacity Slider ---
             col_cp_chk, col_cp_sld = st.columns([0.65, 0.35])
             with col_cp_chk:
-                st.checkbox("🏙️ ผังเมืองรวม (City Plan)", key="show_cityplan")
+                st.checkbox("🏙️ ผังเมืองรวม", key="show_cityplan")
             with col_cp_sld:
                 if st.session_state.show_cityplan:
                     st.slider("ความโปร่ง", 0.0, 1.0, key="cityplan_opacity", label_visibility="collapsed")
