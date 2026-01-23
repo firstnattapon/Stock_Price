@@ -55,10 +55,10 @@ TRAVEL_MODE_NAMES = {
 
 TIME_OPTIONS = [5, 10, 15, 20, 30, 45, 60]
 
-#Keys to save in Export
+# Keys to save in Export (Added 'cityplan_opacity')
 SESSION_KEYS_TO_SAVE = [
     'api_key', 'map_style_name', 'travel_mode', 'time_intervals', 
-    'show_dol', 'show_cityplan', 'show_population', 'colors'
+    'show_dol', 'show_cityplan', 'cityplan_opacity', 'show_population', 'colors'
 ]
 
 # ============================================================================
@@ -115,8 +115,8 @@ def fetch_api_data_cached(api_key: str, travel_mode: str, ranges_str: str, marke
     except Exception:
         return None
 
-def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool):
-    """Helper to add Longdo WMS layers to the map."""
+def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool, opacity: float = 1.0):
+    """Helper to add Longdo WMS layers to the map with opacity control."""
     folium.WmsTileLayer(
         url=LONGDO_WMS_URL,
         layers=layers,
@@ -125,7 +125,8 @@ def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool):
         transparent=True,
         version='1.1.1',
         attr=f'{name} / Longdo Map',
-        show=show
+        show=show,
+        opacity=opacity  # Inject opacity here
     ).add_to(m)
 
 # ============================================================================
@@ -145,6 +146,7 @@ def initialize_session_state():
         'time_intervals': [5],
         'show_dol': False,
         'show_cityplan': False,
+        'cityplan_opacity': 0.7,  # Default opacity
         'show_population': False
     }
     
@@ -297,7 +299,16 @@ def render_sidebar():
             
             st.markdown("##### 🗺️ ข้อมูลพิเศษ (Longdo)")
             st.checkbox("👥 ความหนาแน่นประชากร", key="show_population")
-            st.checkbox("🏙️ ผังเมืองรวม (City Plan)", key="show_cityplan")
+            
+            # --- Modified City Plan UI with Opacity Slider ---
+            col_cp_chk, col_cp_sld = st.columns([0.65, 0.35])
+            with col_cp_chk:
+                st.checkbox("🏙️ ผังเมืองรวม", key="show_cityplan")
+            with col_cp_sld:
+                if st.session_state.show_cityplan:
+                    st.slider("ความโปร่ง", 0.0, 1.0, key="cityplan_opacity", label_visibility="collapsed")
+            # -----------------------------------------------
+
             st.checkbox("📜 รูปแปลงที่ดิน (กรมที่ดิน)", key="show_dol")
             
             st.markdown("##### 🚗 การเดินทาง")
@@ -370,9 +381,12 @@ def render_map():
             style_function=lambda x: {'fillColor': '#FFD700', 'color': '#FF8C00', 'weight': 3, 'fillOpacity': 0.6, 'dashArray': '5, 5'}
         ).add_to(m)
 
-    # 3. WMS Layers (Using Helper)
+    # 3. WMS Layers (Using Helper with Opacity)
     add_wms_layer(m, 'thailand_population', 'ความหนาแน่นประชากร', st.session_state.show_population)
-    add_wms_layer(m, 'cityplan_dpt', 'ผังเมืองรวม (DPT)', st.session_state.show_cityplan)
+    
+    # *** Apply opacity specifically to City Plan ***
+    add_wms_layer(m, 'cityplan_dpt', 'ผังเมืองรวม (DPT)', st.session_state.show_cityplan, opacity=st.session_state.cityplan_opacity)
+    
     add_wms_layer(m, 'dol', 'รูปแปลงที่ดิน (DOL)', st.session_state.show_dol)
 
     # 4. Markers Layer
