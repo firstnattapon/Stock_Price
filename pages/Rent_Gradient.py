@@ -306,7 +306,7 @@ def render_sidebar():
                 st.checkbox("🏙️ ผังเมืองรวม", key="show_cityplan")
             with col_cp_sld:
                 if st.session_state.show_cityplan:
-                    st.slider("ความโปร่ง", 0.0, 1.0, key="cityplan_opacity", label_visibility="collapsed")
+                    st.slider("ความโปร่ง", 0.2, 1.0, key="cityplan_opacity", label_visibility="collapsed")
             # -----------------------------------------------
 
             st.checkbox("📜 รูปแปลงที่ดิน (กรมที่ดิน)", key="show_dol")
