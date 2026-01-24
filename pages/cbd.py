@@ -382,7 +382,7 @@ def render_sidebar():
         # --- [NEW] Network Analysis Section ---
         with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=False):
             st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
-            st.slider("รัศมีวิเคราะห์ (เมตร)", 500, 3000, key="net_radius", step=100, help="ยิ่งเยอะยิ่งช้า")
+            st.slider("รัศมีวิเคราะห์ (เมตร)", 500, 5000, key="net_radius", step=100, help="ยิ่งเยอะยิ่งช้า")
             
             analyze_net_btn = st.button("🚀 Run Network Analysis", use_container_width=True)
             
