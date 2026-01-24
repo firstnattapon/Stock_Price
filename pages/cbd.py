@@ -382,7 +382,7 @@ def render_sidebar():
         # --- [NEW] Network Analysis Section ---
         with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=False):
             st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
-            st.slider("รัศมีวิเคราะห์ (เมตร)", 500, 5000, key="net_radius", step=100, help="ยิ่งเยอะยิ่งช้า")
+            st.slider("รัศมีวิเคราะห์ (เมตร)", 500, 3000, key="net_radius", step=100, help="ยิ่งเยอะยิ่งช้า")
             
             analyze_net_btn = st.button("🚀 Run Network Analysis", use_container_width=True)
             
@@ -469,7 +469,7 @@ def perform_network_analysis(active_list):
             # Show Top Node Info
             top_node = result.get('top_node')
             if top_node:
-                st.success(f"🏆 จุดศูนย์กลางการเชื่อมต่อสูงสุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
+                st.success(f"🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
             
             st.toast(f"วิเคราะห์เสร็จสิ้น! กรุณากดเปิด Layer 'Show Roads' หรือ 'Show Nodes' เพื่อดูผลลัพธ์", icon="✅")
 
@@ -531,7 +531,7 @@ def render_map():
                     [top_node['lat'], top_node['lon']],
                     popup=f"🏆 The Center (Integration Score: {top_node['score']:.4f})",
                     icon=folium.Icon(color='orange', icon='star', prefix='fa'),
-                    tooltip="จุดศูนย์กลางการเชื่อมต่อสูงสุด"
+                    tooltip="จุดที่อยู่ตรงกลางที่สุด"
                 ).add_to(m)
 
     # 3. Isochrones
