@@ -195,10 +195,23 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
         max_close = max(closeness_cent.values()) if closeness_cent else 1
         cmap_close = cm.get_cmap('viridis')
         
+        # [NEW] Track the top node
+        top_node_data = None
+        max_closeness_val = -1
+
         for node, data in G.nodes(data=True):
             score = closeness_cent[node]
             norm_score = score / max_close if max_close > 0 else 0
             
+            # Check for max
+            if score > max_closeness_val:
+                max_closeness_val = score
+                top_node_data = {
+                    "lat": data['y'],
+                    "lon": data['x'],
+                    "score": score
+                }
+
             color_rgba = cmap_close(norm_score)
             color_hex = colors.to_hex(color_rgba)
             
@@ -221,6 +234,7 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
         return {
             "edges": {"type": "FeatureCollection", "features": edges_geojson},
             "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
+            "top_node": top_node_data,
             "stats": {
                 "nodes_count": len(G.nodes),
                 "edges_count": len(G.edges)
@@ -452,6 +466,11 @@ def perform_network_analysis(active_list):
             # st.session_state.show_betweenness = True
             # st.session_state.show_closeness = True
             
+            # Show Top Node Info
+            top_node = result.get('top_node')
+            if top_node:
+                st.success(f"🏆 จุดศูนย์กลางการเชื่อมต่อสูงสุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
+            
             st.toast(f"วิเคราะห์เสร็จสิ้น! กรุณากดเปิด Layer 'Show Roads' หรือ 'Show Nodes' เพื่อดูผลลัพธ์", icon="✅")
 
 def render_map():
@@ -504,6 +523,16 @@ def render_map():
                 },
                 tooltip=folium.GeoJsonTooltip(fields=['closeness'], aliases=['Integration Score:'], localize=True)
             ).add_to(m)
+            
+            # 2.3 [NEW] Top Node Marker
+            top_node = st.session_state.network_data.get("top_node")
+            if top_node:
+                folium.Marker(
+                    [top_node['lat'], top_node['lon']],
+                    popup=f"🏆 The Center (Integration Score: {top_node['score']:.4f})",
+                    icon=folium.Icon(color='orange', icon='star', prefix='fa'),
+                    tooltip="จุดศูนย์กลางการเชื่อมต่อสูงสุด"
+                ).add_to(m)
 
     # 3. Isochrones
     if st.session_state.isochrone_data:
