@@ -143,49 +143,40 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
         # 1. Download Graph
         G = ox.graph_from_point((center_lat, center_lon), dist=radius, network_type=network_type)
         # 2. Project to UTM for accurate metric calculation (optional but recommended for lengths)
+        # Note: G_proj used for internal metrics, G used for plotting if needed, 
+        # but osmnx handles unprojected centrality too (though projected is more accurate for distance weights)
         G_proj = ox.project_graph(G)
         
         # 3. Calculate Closeness Centrality (Node-based: Integration)
-        # "เข้าถึงง่ายจากทุกจุด" -> Closeness
-        closeness_cent = nx.closeness_centrality(G) # Using unprojected G for lat/lon compatibility or projected? Usually G is fine for topology.
-        # Normalize and store in node attributes
-        nx.set_node_attributes(G, closeness_cent, 'closeness')
-
+        closeness_cent = nx.closeness_centrality(G) 
+        
         # 4. Calculate Edge Betweenness Centrality (Edge-based: Throughput)
-        # "ทางผ่านหลักเชื่อมโซน" -> Edge Betweenness
-        # Note: This is computationally expensive O(NM). 
         # Convert to undirected to speed up and represents physical road usage better
         G_undir = G.to_undirected() 
         betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
         
-        # Map edge betweenness back to original MultiDiGraph edges
-        # We assign the undirected edge score to both directed edges
-        edge_colors = {}
-        max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
-        
-        for u, v, k, data in G.edges(keys=True, data=True):
-            # Try both directions from undirected calculation
-            score = betweenness_cent.get(tuple(sorted((u, v))), 0)
-            data['betweenness'] = score
-            data['normalized_betweenness'] = score / max_bet if max_bet > 0 else 0
-
         # 5. Prepare Data for Folium (GeoJSON extraction)
         # Extract Edges for Betweenness Visualization
         edges_geojson = []
         cmap_bet = cm.get_cmap('plasma') # Blue to Yellow/Red
         
-        for u, v, data in G.edges(data=True):
+        max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
+        
+        # Iterate over original directed graph edges to preserve geometry
+        for u, v, k, data in G.edges(keys=True, data=True):
+            # Use undirected score
+            score = betweenness_cent.get(tuple(sorted((u, v))), 0)
+            norm_score = score / max_bet if max_bet > 0 else 0
+            
             if 'geometry' in data:
                 geom = mapping(data['geometry'])
             else:
-                # Create straight line if no geometry
                 geom = {
                     "type": "LineString",
                     "coordinates": [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
                 }
             
-            score = data.get('normalized_betweenness', 0)
-            color_rgba = cmap_bet(score)
+            color_rgba = cmap_bet(norm_score)
             color_hex = colors.to_hex(color_rgba)
             
             edges_geojson.append({
@@ -193,9 +184,9 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
                 "geometry": geom,
                 "properties": {
                     "type": "road",
-                    "betweenness": score,
+                    "betweenness": norm_score,
                     "color": color_hex,
-                    "stroke_weight": 2 + (score * 4) # Thicker if more central
+                    "stroke_weight": 2 + (norm_score * 4) # Thicker if more central
                 }
             })
 
@@ -211,8 +202,8 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
             color_rgba = cmap_close(norm_score)
             color_hex = colors.to_hex(color_rgba)
             
-            # Only keep top 20% nodes to avoid clutter, or all? Let's keep top 30% for visual clarity
-            if norm_score > 0.4: 
+            # Keep top 40% nodes to avoid clutter
+            if norm_score > 0.0: 
                 nodes_geojson.append({
                     "type": "Feature",
                     "geometry": {
@@ -382,6 +373,7 @@ def render_sidebar():
             analyze_net_btn = st.button("🚀 Run Network Analysis", use_container_width=True)
             
             st.markdown("##### Layer Controls")
+            # ถ้ามีข้อมูล Network Data อยู่แล้ว ให้แสดงข้อความแนะนำ หรือ Checkbox
             st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
             st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
             st.checkbox("Show Nodes (Integration)", key="show_closeness")
@@ -456,10 +448,11 @@ def perform_network_analysis(active_list):
             st.error(f"เกิดข้อผิดพลาดในการวิเคราะห์ Network: {result['error']}")
         else:
             st.session_state.network_data = result
-            st.toast(f"วิเคราะห์เสร็จสิ้น! (Nodes: {result['stats']['nodes_count']}, Edges: {result['stats']['edges_count']})", icon="🕸️")
-            # Auto-enable layers so user sees result immediately
-            st.session_state.show_betweenness = True
-            st.session_state.show_closeness = True
+            # FIX: Removed lines that caused StreamlitAPIException
+            # st.session_state.show_betweenness = True
+            # st.session_state.show_closeness = True
+            
+            st.toast(f"วิเคราะห์เสร็จสิ้น! กรุณากดเปิด Layer 'Show Roads' หรือ 'Show Nodes' เพื่อดูผลลัพธ์", icon="✅")
 
 def render_map():
     style = MAP_STYLES[st.session_state.map_style_name]
