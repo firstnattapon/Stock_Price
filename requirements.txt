@@ -19,3 +19,4 @@ folium
 streamlit-folium
 traveltimepy
 shapely
+networkx
