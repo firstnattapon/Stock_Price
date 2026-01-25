@@ -3,6 +3,7 @@ import folium
 from streamlit_folium import st_folium
 import requests
 from shapely.geometry import shape, mapping
+from shapely.ops import unary_union # [NEW] สำหรับรวมพื้นที่
 import json
 from typing import List, Dict, Any, Optional, Tuple
 import networkx as nx
@@ -62,7 +63,7 @@ SESSION_KEYS_TO_SAVE = [
     'api_key', 'map_style_name', 'travel_mode', 'time_intervals', 
     'show_dol', 'show_cityplan', 'cityplan_opacity', 'show_population', 
     'show_traffic', 'colors',
-    'net_radius', 'show_betweenness', 'show_closeness' # Added Network keys
+    'show_betweenness', 'show_closeness' # Removed 'net_radius' as it is no longer used
 ]
 
 # ============================================================================
@@ -134,37 +135,36 @@ def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool, opacity: fl
 # --- Network Centrality Helpers (OSMnx) ---
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def process_network_analysis(center_lat: float, center_lon: float, radius: int, network_type: str = 'drive'):
+def process_network_analysis(polygon_geom, network_type: str = 'drive'):
     """
-    Downloads OSM road network and calculates Centrality measures.
-    Returns GeoJSON-compatible data for Edges (Betweenness) and Nodes (Closeness).
+    Downloads OSM road network Within the given Polygon and calculates Centrality measures.
+    Args:
+        polygon_geom: Shapely Polygon or MultiPolygon object
     """
     try:
-        # 1. Download Graph
-        G = ox.graph_from_point((center_lat, center_lon), dist=radius, network_type=network_type)
-        # 2. Project to UTM for accurate metric calculation (optional but recommended for lengths)
-        # Note: G_proj used for internal metrics, G used for plotting if needed, 
-        # but osmnx handles unprojected centrality too (though projected is more accurate for distance weights)
-        G_proj = ox.project_graph(G)
+        # 1. Download Graph using POLYGON (Strictly inside the Travel Area)
+        # truncate_by_edge=True cleans up edges at the boundary
+        G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
+        
+        if len(G.nodes) < 2:
+            return {"error": "Not enough nodes found in the area."}
+
+        # 2. Project to UTM
+        # G_proj = ox.project_graph(G) # Optional, strictly for metric accuracy
         
         # 3. Calculate Closeness Centrality (Node-based: Integration)
         closeness_cent = nx.closeness_centrality(G) 
         
         # 4. Calculate Edge Betweenness Centrality (Edge-based: Throughput)
-        # Convert to undirected to speed up and represents physical road usage better
         G_undir = G.to_undirected() 
         betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
         
-        # 5. Prepare Data for Folium (GeoJSON extraction)
-        # Extract Edges for Betweenness Visualization
+        # 5. Prepare Data for Folium
         edges_geojson = []
-        cmap_bet = cm.get_cmap('plasma') # Blue to Yellow/Red
-        
+        cmap_bet = cm.get_cmap('plasma') 
         max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
         
-        # Iterate over original directed graph edges to preserve geometry
         for u, v, k, data in G.edges(keys=True, data=True):
-            # Use undirected score
             score = betweenness_cent.get(tuple(sorted((u, v))), 0)
             norm_score = score / max_bet if max_bet > 0 else 0
             
@@ -186,16 +186,14 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
                     "type": "road",
                     "betweenness": norm_score,
                     "color": color_hex,
-                    "stroke_weight": 2 + (norm_score * 4) # Thicker if more central
+                    "stroke_weight": 2 + (norm_score * 4)
                 }
             })
 
-        # Extract Nodes for Closeness Visualization
         nodes_geojson = []
         max_close = max(closeness_cent.values()) if closeness_cent else 1
         cmap_close = cm.get_cmap('viridis')
         
-        # [NEW] Track the top node
         top_node_data = None
         max_closeness_val = -1
 
@@ -203,7 +201,6 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
             score = closeness_cent[node]
             norm_score = score / max_close if max_close > 0 else 0
             
-            # Check for max
             if score > max_closeness_val:
                 max_closeness_val = score
                 top_node_data = {
@@ -215,7 +212,6 @@ def process_network_analysis(center_lat: float, center_lon: float, radius: int, 
             color_rgba = cmap_close(norm_score)
             color_hex = colors.to_hex(color_rgba)
             
-            # Keep top 40% nodes to avoid clutter
             if norm_score > 0.0: 
                 nodes_geojson.append({
                     "type": "Feature",
@@ -254,7 +250,7 @@ def initialize_session_state():
         'markers': [{'lat': DEFAULT_LAT, 'lng': DEFAULT_LON, 'active': True}],
         'isochrone_data': None,
         'intersection_data': None,
-        'network_data': None, # [NEW] Store Network analysis result
+        'network_data': None, 
         'colors': {'step1': '#2A9D8F', 'step2': '#E9C46A', 'step3': '#F4A261', 'step4': '#D62828'},
         'api_key': DEFAULT_GEOAPIFY_KEY,
         'map_style_name': "Esri Light Gray (แนะนำสำหรับดูผังเมือง)",
@@ -265,8 +261,7 @@ def initialize_session_state():
         'cityplan_opacity': 0.7,
         'show_population': False,
         'show_traffic': False,
-        # [NEW] Network Configs
-        'net_radius': 1000,
+        # Network Configs
         'show_betweenness': False,
         'show_closeness': False
     }
@@ -379,15 +374,21 @@ def render_sidebar():
 
         st.markdown("---")
         
-        # --- [NEW] Network Analysis Section ---
+        # --- [MODIFIED] Network Analysis Section ---
         with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=False):
             st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
-            st.slider("รัศมีวิเคราะห์ (เมตร)", 500, 3000, key="net_radius", step=100, help="ยิ่งเยอะยิ่งช้า")
             
-            analyze_net_btn = st.button("🚀 Run Network Analysis", use_container_width=True)
+            # [GOAL 1] Changed from Radius Slider to Travel Area Indicator
+            if st.session_state.isochrone_data:
+                st.info("✅ **Scope:** พื้นที่ Travel Areas ทั้งหมด (Based on Isochrone)", icon="🗺️")
+                can_analyze_net = True
+            else:
+                st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone (Travel Areas) ก่อน", icon="🛑")
+                can_analyze_net = False
+            
+            analyze_net_btn = st.button("🚀 Run Network Analysis", use_container_width=True, disabled=not can_analyze_net)
             
             st.markdown("##### Layer Controls")
-            # ถ้ามีข้อมูล Network Data อยู่แล้ว ให้แสดงข้อความแนะนำ หรือ Checkbox
             st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
             st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
             st.checkbox("Show Nodes (Integration)", key="show_closeness")
@@ -443,35 +444,42 @@ def perform_calculation(active_list):
                 if cbd: st.success("✅ พบพื้นที่ CBD!")
                 else: st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน")
 
-def perform_network_analysis(active_list):
-    """Execute OSMnx Logic."""
-    if not active_list:
-        st.warning("กรุณาปักหมุดอย่างน้อย 1 จุดเพื่อเป็นศูนย์กลางการวิเคราะห์")
+def perform_network_analysis():
+    """Execute OSMnx Logic based on Isochrone Geometry."""
+    # [GOAL 1 & 3] Check dependency
+    if not st.session_state.isochrone_data:
+        st.error("กรุณาคำนวณ Isochrone ก่อนเริ่มวิเคราะห์ Network")
         return
 
-    # Use the centroid of all active markers as the analysis center
-    lats = [m['lat'] for _, m in active_list]
-    lngs = [m['lng'] for _, m in active_list]
-    center_lat = sum(lats) / len(lats)
-    center_lon = sum(lngs) / len(lngs)
-    
-    with st.spinner(f'กำลังโหลดแผนที่และคำนวณ Centrality (Radius: {st.session_state.net_radius}m)... อาจใช้เวลาสักครู่'):
-        result = process_network_analysis(center_lat, center_lon, st.session_state.net_radius)
+    with st.spinner('กำลังรวมพื้นที่ Travel Areas และดาวน์โหลดโครงข่ายถนน (OSMnx)... อาจใช้เวลาพอสมควรขึ้นอยู่กับขนาดพื้นที่'):
+        try:
+            # 1. Extract and Union Geometries from Isochrone Data
+            features = st.session_state.isochrone_data.get('features', [])
+            polygons = [shape(f['geometry']) for f in features]
+            
+            if not polygons:
+                st.error("ไม่พบข้อมูล Polygon ใน Isochrone")
+                return
+
+            # Combine all travel areas into one big geometry (or multipolygon)
+            combined_polygon = unary_union(polygons)
+
+            # 2. Pass this combined polygon to the analysis function
+            result = process_network_analysis(combined_polygon)
+            
+            if "error" in result:
+                st.error(f"เกิดข้อผิดพลาดในการวิเคราะห์ Network: {result['error']}")
+            else:
+                st.session_state.network_data = result
+                
+                top_node = result.get('top_node')
+                if top_node:
+                    st.success(f"🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
+                
+                st.toast(f"วิเคราะห์เสร็จสิ้น! แสดงผลตามขอบเขต Travel Areas", icon="✅")
         
-        if "error" in result:
-            st.error(f"เกิดข้อผิดพลาดในการวิเคราะห์ Network: {result['error']}")
-        else:
-            st.session_state.network_data = result
-            # FIX: Removed lines that caused StreamlitAPIException
-            # st.session_state.show_betweenness = True
-            # st.session_state.show_closeness = True
-            
-            # Show Top Node Info
-            top_node = result.get('top_node')
-            if top_node:
-                st.success(f"🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
-            
-            st.toast(f"วิเคราะห์เสร็จสิ้น! กรุณากดเปิด Layer 'Show Roads' หรือ 'Show Nodes' เพื่อดูผลลัพธ์", icon="✅")
+        except Exception as e:
+            st.error(f"Error processing geometry: {e}")
 
 def render_map():
     style = MAP_STYLES[st.session_state.map_style_name]
@@ -493,7 +501,7 @@ def render_map():
             control=True
         ).add_to(m)
 
-    # 2. [NEW] Network Analysis Layers
+    # 2. Network Analysis Layers
     if st.session_state.network_data:
         # 2.1 Betweenness (Edges)
         if st.session_state.show_betweenness and st.session_state.network_data.get("edges"):
@@ -524,7 +532,7 @@ def render_map():
                 tooltip=folium.GeoJsonTooltip(fields=['closeness'], aliases=['Integration Score:'], localize=True)
             ).add_to(m)
             
-            # 2.3 [NEW] Top Node Marker
+            # 2.3 Top Node Marker
             top_node = st.session_state.network_data.get("top_node")
             if top_node:
                 folium.Marker(
@@ -585,7 +593,8 @@ def main():
         perform_calculation(active_list)
         
     if do_network:
-        perform_network_analysis(active_list)
+        # No need to pass active_list anymore as it uses isochrone_data directly
+        perform_network_analysis()
         
     map_out = render_map()
     
