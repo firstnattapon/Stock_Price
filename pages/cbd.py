@@ -193,7 +193,9 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
 
         nodes_geojson = []
         max_close = max(closeness_cent.values()) if closeness_cent else 1
-        cmap_close = cm.get_cmap('viridis')
+        
+        # [MODIFIED] เปลี่ยน Colormap เป็น 'Greys' เพื่อให้เป็นโทนสีดำ-ขาว-เทา
+        cmap_close = cm.get_cmap('Greys')
         
         top_node_data = None
         max_closeness_val = -1
@@ -375,11 +377,10 @@ def render_sidebar():
 
         st.markdown("---")
         
-        # --- [MODIFIED] Network Analysis Section ---
+        # --- Network Analysis Section ---
         with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=False):
             st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
             
-            # [GOAL 1] Changed from Radius Slider to Travel Area Indicator
             if st.session_state.isochrone_data:
                 st.info("✅ **Scope:** พื้นที่ Travel Areas ทั้งหมด (Based on Isochrone)", icon="🗺️")
                 can_analyze_net = True
@@ -393,7 +394,8 @@ def render_sidebar():
             st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
             st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
             st.checkbox("Show Nodes (Integration)", key="show_closeness")
-            st.caption("🟡: จุดเข้าถึงง่าย (Central Hub)")
+            # [MODIFIED] เปลี่ยน Caption เป็น ⚫ สีดำตามที่แก้ไข
+            st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
 
         st.markdown("---")
         
@@ -447,7 +449,6 @@ def perform_calculation(active_list):
 
 def perform_network_analysis():
     """Execute OSMnx Logic based on Isochrone Geometry."""
-    # [GOAL 1 & 3] Check dependency
     if not st.session_state.isochrone_data:
         st.error("กรุณาคำนวณ Isochrone ก่อนเริ่มวิเคราะห์ Network")
         return
@@ -466,7 +467,6 @@ def perform_network_analysis():
             combined_polygon = unary_union(polygons)
 
             # 2. Pass this combined polygon (as WKT String) to the analysis function
-            # Note: We pass WKT string to avoid Streamlit Hashing Error with Shapely Objects
             result = process_network_analysis(combined_polygon.wkt)
             
             if "error" in result:
@@ -595,7 +595,6 @@ def main():
         perform_calculation(active_list)
         
     if do_network:
-        # No need to pass active_list anymore as it uses isochrone_data directly
         perform_network_analysis()
         
     map_out = render_map()
