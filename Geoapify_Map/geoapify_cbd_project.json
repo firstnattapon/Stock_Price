@@ -1,28 +1,8 @@
 {
   "markers": [
     {
-      "lat": 20.219443,
-      "lng": 100.40363,
-      "active": true
-    },
-    {
-      "lat": 20.216442852783405,
-      "lng": 100.43245196342468,
-      "active": true
-    },
-    {
-      "lat": 20.216838016344035,
-      "lng": 100.37991285324098,
-      "active": true
-    },
-    {
-      "lat": 20.196932606761234,
-      "lng": 100.4056888818741,
-      "active": true
-    },
-    {
-      "lat": 20.263047606835965,
-      "lng": 100.40657401084901,
+      "lat": 20.2151657,
+      "lng": 100.4042877,
       "active": true
     }
   ],
@@ -33,14 +13,18 @@
     "time_intervals": [
       5
     ],
-    "show_dol": true,
+    "show_dol": false,
     "show_cityplan": false,
+    "cityplan_opacity": 0.7,
     "show_population": false,
+    "show_traffic": false,
     "colors": {
-      "step1": "#0034ff",
+      "step1": "#2A9D8F",
       "step2": "#E9C46A",
       "step3": "#F4A261",
       "step4": "#D62828"
-    }
+    },
+    "show_betweenness": true,
+    "show_closeness": true
   }
 }
