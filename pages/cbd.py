@@ -147,7 +147,6 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
         polygon_geom = shapely.wkt.loads(polygon_wkt)
 
         # 2. Download Graph using POLYGON (Strictly inside the Travel Area)
-        # truncate_by_edge=True cleans up edges at the boundary
         G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
         
         if len(G.nodes) < 2:
@@ -194,25 +193,21 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
         nodes_geojson = []
         max_close = max(closeness_cent.values()) if closeness_cent else 1
         
-        # [MODIFIED GOAL 1]: ไม่ใช้ Colormap แล้ว กำหนดให้เป็นสีดำ (#000000) ทั้งหมด
-        # เพื่อแก้ปัญหาที่สีขาว/เทาอ่อนมองไม่เห็นบนแผนที่
-        
-        top_node_data = None
-        max_closeness_val = -1
+        # --- [MODIFIED GOAL 1] Calculate Geometric Centroid ---
+        # หาจุดกึ่งกลางของ Polygon จริงๆ (Geometric Center)
+        centroid = polygon_geom.centroid
+        top_node_data = {
+            "lat": centroid.y,
+            "lon": centroid.x,
+            "type": "centroid"
+        }
+        # ------------------------------------------------------
 
         for node, data in G.nodes(data=True):
             score = closeness_cent[node]
             norm_score = score / max_close if max_close > 0 else 0
             
-            if score > max_closeness_val:
-                max_closeness_val = score
-                top_node_data = {
-                    "lat": data['y'],
-                    "lon": data['x'],
-                    "score": score
-                }
-
-            # Force Black Color
+            # Force Black Color (#000000)
             color_hex = "#000000"
             
             if norm_score > 0.0: 
@@ -473,9 +468,10 @@ def perform_network_analysis():
             else:
                 st.session_state.network_data = result
                 
+                # [MODIFIED GOAL 1] Update Success Message
                 top_node = result.get('top_node')
                 if top_node:
-                    st.success(f"🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
+                    st.success(f"🏆 Geometric Center (Travel Areas): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f}")
                 
                 st.toast(f"วิเคราะห์เสร็จสิ้น! แสดงผลตามขอบเขต Travel Areas", icon="✅")
         
@@ -523,10 +519,9 @@ def render_map():
                 st.session_state.network_data["nodes"],
                 name="Node Integration",
                 marker=folium.CircleMarker(),
-                # [MODIFIED GOAL 1]: เปลี่ยนขอบเป็นสีดำ และใช้สี fill จาก properties ซึ่งเป็นสีดำแล้ว
                 style_function=lambda x: {
-                    'fillColor': x['properties']['color'], # Black
-                    'color': '#000000',                    # Black Border (Was White)
+                    'fillColor': x['properties']['color'], 
+                    'color': '#000000',                    
                     'weight': 1,
                     'radius': x['properties']['radius'],
                     'fillOpacity': 0.9
@@ -534,14 +529,15 @@ def render_map():
                 tooltip=folium.GeoJsonTooltip(fields=['closeness'], aliases=['Integration Score:'], localize=True)
             ).add_to(m)
             
-            # 2.3 Top Node Marker
+            # 2.3 [MODIFIED GOAL 1] Top Node Marker -> Geometric Center
             top_node = st.session_state.network_data.get("top_node")
             if top_node:
                 folium.Marker(
                     [top_node['lat'], top_node['lon']],
-                    popup=f"🏆 The Center (Integration Score: {top_node['score']:.4f})",
+                    # Changed Popup Text
+                    popup="🏆 Geometric Center (Travel Area Centroid)",
                     icon=folium.Icon(color='orange', icon='star', prefix='fa'),
-                    tooltip="จุดที่อยู่ตรงกลางที่สุด"
+                    tooltip="จุดกึ่งกลางพื้นที่ (Centroid)"
                 ).add_to(m)
 
     # 3. Isochrones
