@@ -3,7 +3,8 @@ import folium
 from streamlit_folium import st_folium
 import requests
 from shapely.geometry import shape, mapping
-from shapely.ops import unary_union # [NEW] สำหรับรวมพื้นที่
+from shapely.ops import unary_union
+import shapely.wkt 
 import json
 from typing import List, Dict, Any, Optional, Tuple
 import networkx as nx
@@ -63,7 +64,7 @@ SESSION_KEYS_TO_SAVE = [
     'api_key', 'map_style_name', 'travel_mode', 'time_intervals', 
     'show_dol', 'show_cityplan', 'cityplan_opacity', 'show_population', 
     'show_traffic', 'colors',
-    'show_betweenness', 'show_closeness' # Removed 'net_radius' as it is no longer used
+    'show_betweenness', 'show_closeness'
 ]
 
 # ============================================================================
@@ -135,23 +136,23 @@ def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool, opacity: fl
 # --- Network Centrality Helpers (OSMnx) ---
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def process_network_analysis(polygon_geom, network_type: str = 'drive'):
+def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
     """
-    Downloads OSM road network Within the given Polygon and calculates Centrality measures.
+    Downloads OSM road network Within the given Polygon (WKT String) and calculates Centrality.
     Args:
-        polygon_geom: Shapely Polygon or MultiPolygon object
+        polygon_wkt: Well-Known Text string representation of the geometry.
     """
     try:
-        # 1. Download Graph using POLYGON (Strictly inside the Travel Area)
+        # 1. Convert WKT string back to Shapely Geometry
+        polygon_geom = shapely.wkt.loads(polygon_wkt)
+
+        # 2. Download Graph using POLYGON (Strictly inside the Travel Area)
         # truncate_by_edge=True cleans up edges at the boundary
         G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
         
         if len(G.nodes) < 2:
             return {"error": "Not enough nodes found in the area."}
 
-        # 2. Project to UTM
-        # G_proj = ox.project_graph(G) # Optional, strictly for metric accuracy
-        
         # 3. Calculate Closeness Centrality (Node-based: Integration)
         closeness_cent = nx.closeness_centrality(G) 
         
@@ -464,8 +465,9 @@ def perform_network_analysis():
             # Combine all travel areas into one big geometry (or multipolygon)
             combined_polygon = unary_union(polygons)
 
-            # 2. Pass this combined polygon to the analysis function
-            result = process_network_analysis(combined_polygon)
+            # 2. Pass this combined polygon (as WKT String) to the analysis function
+            # Note: We pass WKT string to avoid Streamlit Hashing Error with Shapely Objects
+            result = process_network_analysis(combined_polygon.wkt)
             
             if "error" in result:
                 st.error(f"เกิดข้อผิดพลาดในการวิเคราะห์ Network: {result['error']}")
