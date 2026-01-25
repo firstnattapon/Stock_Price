@@ -194,8 +194,8 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
         nodes_geojson = []
         max_close = max(closeness_cent.values()) if closeness_cent else 1
         
-        # [MODIFIED] เปลี่ยน Colormap เป็น 'Greys' เพื่อให้เป็นโทนสีดำ-ขาว-เทา
-        cmap_close = cm.get_cmap('Greys')
+        # [MODIFIED GOAL 1]: ไม่ใช้ Colormap แล้ว กำหนดให้เป็นสีดำ (#000000) ทั้งหมด
+        # เพื่อแก้ปัญหาที่สีขาว/เทาอ่อนมองไม่เห็นบนแผนที่
         
         top_node_data = None
         max_closeness_val = -1
@@ -212,8 +212,8 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
                     "score": score
                 }
 
-            color_rgba = cmap_close(norm_score)
-            color_hex = colors.to_hex(color_rgba)
+            # Force Black Color
+            color_hex = "#000000"
             
             if norm_score > 0.0: 
                 nodes_geojson.append({
@@ -394,7 +394,6 @@ def render_sidebar():
             st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
             st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
             st.checkbox("Show Nodes (Integration)", key="show_closeness")
-            # [MODIFIED] เปลี่ยน Caption เป็น ⚫ สีดำตามที่แก้ไข
             st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
 
         st.markdown("---")
@@ -524,9 +523,10 @@ def render_map():
                 st.session_state.network_data["nodes"],
                 name="Node Integration",
                 marker=folium.CircleMarker(),
+                # [MODIFIED GOAL 1]: เปลี่ยนขอบเป็นสีดำ และใช้สี fill จาก properties ซึ่งเป็นสีดำแล้ว
                 style_function=lambda x: {
-                    'fillColor': x['properties']['color'],
-                    'color': '#ffffff',
+                    'fillColor': x['properties']['color'], # Black
+                    'color': '#000000',                    # Black Border (Was White)
                     'weight': 1,
                     'radius': x['properties']['radius'],
                     'fillOpacity': 0.9
