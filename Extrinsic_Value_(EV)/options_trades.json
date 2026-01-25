@@ -1573,7 +1573,7 @@
       "stockPrice": 22.344999313354492,
       "quantity": 1,
       "sortableTimestamp": "2025-12-22T23:29:00:00:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 0.1550006866455078,
       "ev": 1.6749993133544923,
       "evSigned": -1.6749993133544923
@@ -1630,7 +1630,7 @@
       "stockPrice": 21.145000457763672,
       "quantity": 1,
       "sortableTimestamp": "2025-12-23T23:29:00:00:00:00",
-      "status": "OPEN",
+      "status": "CLOSED",
       "iv": 1.8549995422363281,
       "ev": 0.825000457763672,
       "evSigned": -0.825000457763672
@@ -1826,7 +1826,7 @@
       "evSigned": 0
     },
     {
-      "id": 100,
+      "id": 96,
       "symbol": "SG",
       "date": "16/01/2026",
       "rawDate": "16/01/2026",
@@ -1845,7 +1845,7 @@
       "evSigned": -0.37499990463256827
     },
     {
-      "id": 96,
+      "id": 97,
       "symbol": "FLNC",
       "date": "16/01/2026",
       "rawDate": "16/01/2026",
@@ -1864,7 +1864,7 @@
       "evSigned": 0.06
     },
     {
-      "id": 97,
+      "id": 98,
       "symbol": "CLSK",
       "date": "16/01/2026",
       "rawDate": "16/01/2026",
@@ -1883,7 +1883,7 @@
       "evSigned": 0.4299999999999997
     },
     {
-      "id": 103,
+      "id": 99,
       "symbol": "DJT",
       "date": "20/01/2026",
       "rawDate": "20/01/2026",
@@ -1902,7 +1902,7 @@
       "evSigned": -0.4358003616333006
     },
     {
-      "id": 102,
+      "id": 100,
       "symbol": "FFWM",
       "date": "20/01/2026",
       "rawDate": "20/01/2026",
@@ -1940,7 +1940,7 @@
       "evSigned": -0.10000004768371584
     },
     {
-      "id": 104,
+      "id": 102,
       "symbol": "LUNR",
       "date": "20/01/2026",
       "rawDate": "20/01/2026",
@@ -1959,7 +1959,7 @@
       "evSigned": -2.86
     },
     {
-      "id": 105,
+      "id": 103,
       "symbol": "RIVN",
       "date": "20/01/2026",
       "rawDate": "20/01/2026",
@@ -1978,7 +1978,7 @@
       "evSigned": -0.33500061035156214
     },
     {
-      "id": 98,
+      "id": 104,
       "symbol": "CLSK",
       "date": "23/01/2026",
       "rawDate": "23/01/2026",
@@ -1993,44 +1993,6 @@
       "sortableTimestamp": "2026-01-23T23:52:56:00:00",
       "status": "CLOSED",
       "iv": 2.1949996948242188,
-      "ev": 0,
-      "evSigned": 0
-    },
-    {
-      "id": 106,
-      "symbol": "NVTS",
-      "date": "20/02/2026",
-      "rawDate": "20/02/2026",
-      "rawTime": "23:05:23:00,GMT+07",
-      "type": "CALL",
-      "strike": 8.5,
-      "expiry": "16/01/2026",
-      "action": "BUY",
-      "premium": 2.27,
-      "stockPrice": 10.25,
-      "quantity": 1,
-      "sortableTimestamp": "2026-02-20T23:05:23:00",
-      "status": "OPEN",
-      "iv": 1.75,
-      "ev": 0.52,
-      "evSigned": -0.52
-    },
-    {
-      "id": 99,
-      "symbol": "FFWM",
-      "date": "16/12/2026",
-      "rawDate": "16/12/2026",
-      "rawTime": "21:44:33:00,GMT+07",
-      "type": "CALL",
-      "strike": 5,
-      "expiry": "16/12/2026",
-      "action": "SELL",
-      "premium": 1.3,
-      "stockPrice": 6.340000152587891,
-      "quantity": 2,
-      "sortableTimestamp": "2026-12-16T21:44:33:00",
-      "status": "CLOSED",
-      "iv": 1.3400001525878906,
       "ev": 0,
       "evSigned": 0
     },
@@ -2052,6 +2014,101 @@
       "iv": 0,
       "ev": 1.6,
       "evSigned": -1.6
+    },
+    {
+      "id": 105,
+      "symbol": "NVTS",
+      "date": "20/02/2026",
+      "rawDate": "20/02/2026",
+      "rawTime": "23:05:23:00,GMT+07",
+      "type": "CALL",
+      "strike": 8.5,
+      "expiry": "16/01/2026",
+      "action": "BUY",
+      "premium": 2.27,
+      "stockPrice": 10.25,
+      "quantity": 1,
+      "sortableTimestamp": "2026-02-20T23:05:23:00",
+      "status": "OPEN",
+      "iv": 1.75,
+      "ev": 0.52,
+      "evSigned": -0.52
+    },
+    {
+      "id": 106,
+      "symbol": "FFWM",
+      "date": "16/12/2026",
+      "rawDate": "16/12/2026",
+      "rawTime": "21:44:33:00,GMT+07",
+      "type": "CALL",
+      "strike": 5,
+      "expiry": "16/12/2026",
+      "action": "SELL",
+      "premium": 1.3,
+      "stockPrice": 6.340000152587891,
+      "quantity": 2,
+      "sortableTimestamp": "2026-12-16T21:44:33:00",
+      "status": "CLOSED",
+      "iv": 1.3400001525878906,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 108,
+      "symbol": "RIVN",
+      "date": "23/01/2026",
+      "rawDate": "23/01/2026",
+      "rawTime": "21:33:19:00,GMT+07",
+      "type": "PUT",
+      "strike": 22.5,
+      "expiry": "23/01/2026",
+      "action": "SELL",
+      "premium": 6.15,
+      "stockPrice": 16.299800872802734,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-23T21:33:19:00",
+      "status": "CLOSED",
+      "iv": 6.200199127197266,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 109,
+      "symbol": "RIVN",
+      "date": "23/01/2026",
+      "rawDate": "23/01/2026",
+      "rawTime": "21:33:19:00:00,GMT+07",
+      "type": "PUT",
+      "strike": 23,
+      "expiry": "23/01/2026",
+      "action": "SELL",
+      "premium": 6.7,
+      "stockPrice": 16.299800872802734,
+      "quantity": 1,
+      "sortableTimestamp": "2026-01-23T21:33:19:00:00",
+      "status": "CLOSED",
+      "iv": 6.700199127197266,
+      "ev": 0,
+      "evSigned": 0
+    },
+    {
+      "id": 110,
+      "symbol": "RIVN",
+      "date": "20/02/2026",
+      "rawDate": "20/02/2026",
+      "rawTime": "21:44:10:00,GMT+07",
+      "type": "PUT",
+      "strike": 17.5,
+      "expiry": "20/02/2026",
+      "action": "BUY",
+      "premium": 2.04,
+      "stockPrice": 16.280099868774414,
+      "quantity": 2,
+      "sortableTimestamp": "2026-02-20T21:44:10:00",
+      "status": "OPEN",
+      "iv": 1.219900131225586,
+      "ev": 0.8200998687744141,
+      "evSigned": -0.8200998687744141
     }
   ]
 }
