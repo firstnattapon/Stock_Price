@@ -139,24 +139,21 @@ def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool, opacity: fl
 def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
     """
     Downloads OSM road network Within the given Polygon (WKT String) and calculates Centrality.
-    Args:
-        polygon_wkt: Well-Known Text string representation of the geometry.
     """
     try:
         # 1. Convert WKT string back to Shapely Geometry
         polygon_geom = shapely.wkt.loads(polygon_wkt)
 
-        # 2. Download Graph using POLYGON (Strictly inside the Travel Area)
-        # truncate_by_edge=True cleans up edges at the boundary
+        # 2. Download Graph using POLYGON
         G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
         
         if len(G.nodes) < 2:
             return {"error": "Not enough nodes found in the area."}
 
-        # 3. Calculate Closeness Centrality (Node-based: Integration)
+        # 3. Calculate Closeness Centrality (Integration)
         closeness_cent = nx.closeness_centrality(G) 
         
-        # 4. Calculate Edge Betweenness Centrality (Edge-based: Throughput)
+        # 4. Calculate Edge Betweenness Centrality (Throughput)
         G_undir = G.to_undirected() 
         betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
         
@@ -194,9 +191,6 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
         nodes_geojson = []
         max_close = max(closeness_cent.values()) if closeness_cent else 1
         
-        # [MODIFIED GOAL 1]: ไม่ใช้ Colormap แล้ว กำหนดให้เป็นสีดำ (#000000) ทั้งหมด
-        # เพื่อแก้ปัญหาที่สีขาว/เทาอ่อนมองไม่เห็นบนแผนที่
-        
         top_node_data = None
         max_closeness_val = -1
 
@@ -212,7 +206,7 @@ def process_network_analysis(polygon_wkt: str, network_type: str = 'drive'):
                     "score": score
                 }
 
-            # Force Black Color
+            # Force Black Color as per requirement
             color_hex = "#000000"
             
             if norm_score > 0.0: 
@@ -264,7 +258,6 @@ def initialize_session_state():
         'cityplan_opacity': 0.7,
         'show_population': False,
         'show_traffic': False,
-        # Network Configs
         'show_betweenness': False,
         'show_closeness': False
     }
@@ -291,6 +284,9 @@ def reset_state():
 def clear_results():
     st.session_state.isochrone_data = None
     st.session_state.intersection_data = None
+    # Note: เราไม่ลบ network_data ที่นี่เพื่อให้ผู้ใช้ยังเห็นผลลัพธ์เก่าก่อนกดคำนวณใหม่ได้ 
+    # หรือจะลบก็ได้ขึ้นอยู่กับ UX แต่ในที่นี้เราจะเคลียร์เฉพาะ Isochrone เพื่อบังคับให้คำนวณใหม่
+    st.session_state.network_data = None 
 
 def generate_export_json() -> str:
     export_data = {
@@ -378,18 +374,34 @@ def render_sidebar():
         st.markdown("---")
         
         # --- Network Analysis Section ---
-        with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=False):
+        with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=True):
             st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
             
             if st.session_state.isochrone_data:
-                st.info("✅ **Scope:** พื้นที่ Travel Areas ทั้งหมด (Based on Isochrone)", icon="🗺️")
+                st.info("✅ **Scope:** พื้นที่ Travel Areas ทั้งหมด", icon="🗺️")
                 can_analyze_net = True
             else:
-                st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone (Travel Areas) ก่อน", icon="🛑")
+                st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
                 can_analyze_net = False
             
             analyze_net_btn = st.button("🚀 Run Network Analysis", use_container_width=True, disabled=not can_analyze_net)
             
+            # --- GOAL 1 & 2: Show Result & Add Button here for persistence ---
+            if st.session_state.network_data and st.session_state.network_data.get('top_node'):
+                top_node = st.session_state.network_data['top_node']
+                st.markdown("---")
+                st.markdown(f"**🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center)**")
+                st.caption(f"Score: {top_node['score']:.4f}")
+                st.code(f"{top_node['lat']:.5f}, {top_node['lon']:.5f}")
+                
+                # ปุ่ม ADD
+                if st.button("➕ เพิ่มจุดนี้ลงในรายการ", use_container_width=True, type="secondary"):
+                    st.session_state.markers.append({'lat': top_node['lat'], 'lng': top_node['lon'], 'active': True})
+                    clear_results() # Clear ผลลัพธ์เก่าเพราะ Input เปลี่ยน
+                    st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
+                    st.rerun()
+            # -------------------------------------------------------------
+
             st.markdown("##### Layer Controls")
             st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
             st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
@@ -399,7 +411,7 @@ def render_sidebar():
         st.markdown("---")
         
         # --- Existing Settings ---
-        with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=True):
+        with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=False):
             st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
             st.checkbox("🚦 การจราจร (Google Traffic)", key="show_traffic")
             st.checkbox("👥 ความหนาแน่นประชากร", key="show_population")
@@ -452,9 +464,9 @@ def perform_network_analysis():
         st.error("กรุณาคำนวณ Isochrone ก่อนเริ่มวิเคราะห์ Network")
         return
 
-    with st.spinner('กำลังรวมพื้นที่ Travel Areas และดาวน์โหลดโครงข่ายถนน (OSMnx)... อาจใช้เวลาพอสมควรขึ้นอยู่กับขนาดพื้นที่'):
+    with st.spinner('กำลังรวมพื้นที่ Travel Areas และดาวน์โหลดโครงข่ายถนน (OSMnx)... อาจใช้เวลาพอสมควร'):
         try:
-            # 1. Extract and Union Geometries from Isochrone Data
+            # 1. Extract and Union Geometries
             features = st.session_state.isochrone_data.get('features', [])
             polygons = [shape(f['geometry']) for f in features]
             
@@ -462,29 +474,28 @@ def perform_network_analysis():
                 st.error("ไม่พบข้อมูล Polygon ใน Isochrone")
                 return
 
-            # Combine all travel areas into one big geometry (or multipolygon)
             combined_polygon = unary_union(polygons)
 
-            # 2. Pass this combined polygon (as WKT String) to the analysis function
+            # 2. Process
             result = process_network_analysis(combined_polygon.wkt)
             
             if "error" in result:
-                st.error(f"เกิดข้อผิดพลาดในการวิเคราะห์ Network: {result['error']}")
+                st.error(f"เกิดข้อผิดพลาด: {result['error']}")
             else:
                 st.session_state.network_data = result
-                
                 top_node = result.get('top_node')
-                if top_node:
-                    st.success(f"🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center): พิกัด {top_node['lat']:.5f}, {top_node['lon']:.5f} (Score: {top_node['score']:.4f})")
                 
-                st.toast(f"วิเคราะห์เสร็จสิ้น! แสดงผลตามขอบเขต Travel Areas", icon="✅")
+                # แสดง Toast สำเร็จ
+                if top_node:
+                    st.toast(f"Network Analysis Completed! Score: {top_node['score']:.4f}", icon="🏆")
+                else:
+                    st.toast("Network Analysis Completed!", icon="✅")
         
         except Exception as e:
             st.error(f"Error processing geometry: {e}")
 
 def render_map():
     style = MAP_STYLES[st.session_state.map_style_name]
-    # Center map based on markers or default
     if st.session_state.markers:
         center = [st.session_state.markers[-1]['lat'], st.session_state.markers[-1]['lng']]
     else:
@@ -523,10 +534,9 @@ def render_map():
                 st.session_state.network_data["nodes"],
                 name="Node Integration",
                 marker=folium.CircleMarker(),
-                # [MODIFIED GOAL 1]: เปลี่ยนขอบเป็นสีดำ และใช้สี fill จาก properties ซึ่งเป็นสีดำแล้ว
                 style_function=lambda x: {
-                    'fillColor': x['properties']['color'], # Black
-                    'color': '#000000',                    # Black Border (Was White)
+                    'fillColor': x['properties']['color'], 
+                    'color': '#000000',                    
                     'weight': 1,
                     'radius': x['properties']['radius'],
                     'fillOpacity': 0.9
@@ -539,7 +549,7 @@ def render_map():
             if top_node:
                 folium.Marker(
                     [top_node['lat'], top_node['lon']],
-                    popup=f"🏆 The Center (Integration Score: {top_node['score']:.4f})",
+                    popup=f"🏆 Center (Score: {top_node['score']:.4f})",
                     icon=folium.Icon(color='orange', icon='star', prefix='fa'),
                     tooltip="จุดที่อยู่ตรงกลางที่สุด"
                 ).add_to(m)
@@ -603,7 +613,7 @@ def main():
         clat, clng = map_out['last_clicked']['lat'], map_out['last_clicked']['lng']
         if not st.session_state.markers or (abs(clat - st.session_state.markers[-1]['lat']) > 1e-5):
             st.session_state.markers.append({'lat': clat, 'lng': clng, 'active': True})
-            clear_results() # Clear cache on new marker
+            clear_results() 
             st.rerun()
 
 if __name__ == "__main__":
