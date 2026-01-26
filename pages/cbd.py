@@ -10,20 +10,19 @@ import networkx as nx
 import osmnx as ox
 import matplotlib.cm as cm
 import matplotlib.colors as colors
-from typing import List, Dict, Any, Optional, Tuple
-import os  # Added for file checking
+from typing import List, Dict, Any, Optional
+import io
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
 # ============================================================================
 
 PAGE_CONFIG = {
-    "page_title": "Geoapify CBD x Longdo GIS + Network Analysis (Offline Mode)",
+    "page_title": "Geoapify CBD x Longdo GIS + Network Analysis (Cached)",
     "page_icon": "🌍",
     "layout": "wide"
 }
 
-# --- API & Defaults ---
 DEFAULT_CONFIG = {
     "JSON_URL": "https://raw.githubusercontent.com/firstnattapon/Stock_Price/refs/heads/main/Geoapify_Map/geoapify_cbd_project.json",
     "LAT": 20.219443,
@@ -32,13 +31,8 @@ DEFAULT_CONFIG = {
     "LONGDO_KEY": "0a999afb0da60c5c45d010e9c171ffc8"
 }
 
-# --- Offline Cache Configuration ---
-CACHE_FILENAME = "network_cache.graphml"
-CACHE_RADIUS_M = 8000  # รัศมี 8 กม. ครอบคลุมตัวเมืองเชียงราย (โหลดครั้งเดียวใช้ยาวๆ)
-
 LONGDO_WMS_URL = f"https://ms.longdo.com/mapproxy/service?key={DEFAULT_CONFIG['LONGDO_KEY']}"
 
-# --- Visual Assets ---
 MARKER_COLORS = ['red', 'blue', 'green', 'purple', 'orange', 'black', 'pink', 'cadetblue']
 HEX_COLORS = ['#D63E2A', '#38AADD', '#72B026', '#D252B9', '#F69730', '#333333', '#FF91EA', '#436978']
 
@@ -89,6 +83,7 @@ def get_border_color(original_marker_idx: Optional[int]) -> str:
 
 def calculate_intersection(features: List[Dict], num_active_markers: int) -> Optional[Dict]:
     if num_active_markers < 2: return None
+    
     polys_per_active_idx = {}
     for feat in features:
         active_idx = feat['properties']['active_index']
@@ -123,72 +118,23 @@ def fetch_api_data_cached(api_key: str, travel_mode: str, ranges_str: str, marke
     except Exception:
         return None
 
-# --- NEW: Offline / Cache Network Loading ---
-@st.cache_resource(show_spinner="Loading Base Map Network...")
-def get_large_network_cache(center_lat: float, center_lon: float, dist: int, network_type: str = 'drive'):
-    """
-    โหลดกราฟขนาดใหญ่ (ครอบคลุมทั้งเมือง) มาเก็บไว้ใน RAM/File
-    เพื่อไม่ต้องโหลดใหม่ทุกครั้งที่รัน Analysis
-    """
-    # 1. ตรวจสอบว่ามีไฟล์ Cache หรือไม่
-    if os.path.exists(CACHE_FILENAME):
-        # st.toast("📂 Loading Network from Local Cache (Offline Mode)", icon="⚡")
-        try:
-            G = ox.load_graphml(CACHE_FILENAME)
-            return G
-        except Exception as e:
-            st.warning(f"Cache file corrupted, redownloading... {e}")
-    
-    # 2. ถ้าไม่มี ให้ดาวน์โหลดใหม่ (ทำครั้งแรกครั้งเดียว)
-    # st.toast(f"🌐 Downloading Base Map ({dist/1000}km radius)... This happens once.", icon="⏳")
-    try:
-        G = ox.graph_from_point((center_lat, center_lon), dist=dist, network_type=network_type, truncate_by_edge=True)
-        # Save to file for next time
-        ox.save_graphml(G, CACHE_FILENAME)
-        return G
-    except Exception as e:
-        st.error(f"Failed to download base map: {e}")
-        return None
-
+@st.cache_data(show_spinner=False, ttl=3600)
 def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
     """
-    Calculates Centrality using Offline Cache First, falling back to Online if needed.
+    Downloads OSM road network Within the given Polygon and calculates Centrality.
+    Optimized: Uses caching decorator to avoid re-downloading for same inputs in session.
     """
     try:
+        # 1. Load Geometry & Download Graph
         polygon_geom = wkt.loads(polygon_wkt_str)
+        # Suppress OSMnx logs for cleaner UI
+        ox.settings.log_console = False
+        G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
         
-        # 1. พยายามโหลดจาก Cache ก้อนใหญ่ก่อน (Offline Strategy)
-        G_full = get_large_network_cache(DEFAULT_CONFIG['LAT'], DEFAULT_CONFIG['LON'], CACHE_RADIUS_M, network_type)
-        
-        G = None
-        used_method = "Unknown"
-
-        if G_full:
-            try:
-                # 2. ตัด (Clip) กราฟใหญ่ ให้เหลือแค่ใน Polygon CBD
-                # หมายเหตุ: ox.truncate.truncate_graph_polygon ตัดกราฟให้เหลือเฉพาะ node ที่อยู่ใน polygon
-                G = ox.truncate.truncate_graph_polygon(G_full, polygon_geom, quadrat_width=100, retain_all=True)
-                
-                # เช็คว่าตัดออกมาแล้วมีโหนดไหม (ถ้า Polygon อยู่นอกพื้นที่ Cache กราฟจะเป็นว่าง)
-                if len(G.nodes) < 2:
-                    G = None  # Force fallback
-                else:
-                    used_method = "Offline Cache (Fast) ⚡"
-            except Exception:
-                G = None
-
-        # 3. Fallback: ถ้าตัดจาก Cache ไม่ได้ (เช่น ไปส่องพื้นที่จังหวัดอื่น) ให้โหลดสด (Online Strategy)
-        if G is None:
-            # st.toast("⚠️ Area outside cache. Downloading from OSM (Online Mode)...", icon="☁️")
-            used_method = "Online Download (Slow) 🐢"
-            G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
-
         if len(G.nodes) < 2:
             return {"error": "Not enough nodes found in the area."}
 
-        # st.toast(f"Analyzed using: {used_method}", icon="ℹ️")
-
-        # 4. Calculate Centrality Measures (เหมือนเดิม)
+        # 2. Calculate Centrality Measures
         closeness_cent = nx.closeness_centrality(G) 
         max_close = max(closeness_cent.values()) if closeness_cent else 1
         
@@ -196,9 +142,14 @@ def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') 
         betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
         max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
         
-        # 5. Format Data for Visualization
+        # 3. Format Data for Visualization
         edges_geojson = []
-        cmap_bet = cm.get_cmap('plasma') 
+        # Updated to use matplotlib.colormaps to avoid deprecation warning
+        try:
+            cmap_bet =  cm.get_cmap('plasma')
+        except:
+             # Fallback for newer matplotlib versions
+            cmap_bet =  colors.LinearSegmentedColormap.from_list("plasma", ["blue", "red"])
 
         for u, v, k, data in G.edges(keys=True, data=True):
             score = betweenness_cent.get(tuple(sorted((u, v))), 0)
@@ -246,7 +197,7 @@ def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') 
             "edges": {"type": "FeatureCollection", "features": edges_geojson},
             "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
             "top_node": top_node_data if top_node_data["score"] != -1 else None,
-            "stats": {"nodes_count": len(G.nodes), "edges_count": len(G.edges), "method": used_method}
+            "stats": {"nodes_count": len(G.nodes), "edges_count": len(G.edges)}
         }
 
     except Exception as e:
@@ -319,6 +270,7 @@ def render_sidebar():
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
         
+        # --- Config Import/Export ---
         with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
             export_data = json.dumps({
                 "markers": st.session_state.markers,
@@ -327,8 +279,8 @@ def render_sidebar():
             
             st.download_button("Download Config (.json)", export_data, "geo_cbd_config.json", "application/json", use_container_width=True)
             
-            uploaded_file = st.file_uploader("Upload .json", type=["json"], label_visibility="collapsed")
-            if uploaded_file and st.button("ยืนยันการโหลด", use_container_width=True):
+            uploaded_file = st.file_uploader("Upload Config", type=["json"], label_visibility="collapsed")
+            if uploaded_file and st.button("ยืนยันการโหลด Config", use_container_width=True):
                 try:
                     data = json.load(uploaded_file)
                     st.session_state.markers = data.get("markers", st.session_state.markers)
@@ -342,6 +294,7 @@ def render_sidebar():
 
         st.markdown("---")
         
+        # --- Manual Coordinate Input ---
         with st.container():
             c1, c2 = st.columns([0.7, 0.3])
             coords_input = c1.text_input("Coords", placeholder="20.21, 100.40", label_visibility="collapsed", key="manual_coords")
@@ -364,6 +317,7 @@ def render_sidebar():
             reset_state()
             st.rerun()
 
+        # --- Marker List ---
         active_list = [(i, m) for i, m in enumerate(st.session_state.markers) if m.get('active', True)]
         st.write(f"📍 Active Markers: **{len(active_list)}**")
         
@@ -386,42 +340,68 @@ def render_sidebar():
         
         # --- Network Analysis Panel ---
         with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=True):
-            st.caption("วิเคราะห์ความสำคัญของถนน (Offline Cache Enabled)")
+            st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
+            
+            # --- GOAL 1: DATABASE CACHE / IMPORT EXPORT ---
+            st.markdown("###### 📂 Database Cache (Import/Export)")
+            
+            # Import Logic
+            uploaded_net = st.file_uploader("โหลดผลวิเคราะห์ (.json)", type=["json"], key="net_upload", label_visibility="collapsed")
+            if uploaded_net:
+                try:
+                    loaded_data = json.load(uploaded_net)
+                    # Simple validation
+                    if "edges" in loaded_data and "nodes" in loaded_data:
+                        st.session_state.network_data = loaded_data
+                        st.success("✅ โหลดข้อมูล Cache สำเร็จ! ไม่ต้องคำนวณใหม่")
+                    else:
+                        st.error("Format ไฟล์ไม่ถูกต้อง")
+                except Exception as e:
+                    st.error(f"Error loading: {e}")
+
+            # Run Button
             can_analyze = st.session_state.isochrone_data is not None
             if can_analyze:
                 st.info("✅ **Scope:** พื้นที่ Travel Areas ทั้งหมด", icon="🗺️")
-            else:
-                st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
+            elif not st.session_state.network_data:
+                st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน หรือโหลด Cache", icon="🛑")
             
-            do_network = st.button("🚀 Run Network Analysis", use_container_width=True, disabled=not can_analyze)
+            do_network = st.button("🚀 Run Network Analysis (New)", use_container_width=True, disabled=not can_analyze)
 
-            if st.session_state.network_data and st.session_state.network_data.get('top_node'):
-                top = st.session_state.network_data['top_node']
-                stats = st.session_state.network_data.get('stats', {})
-                st.markdown("---")
-                st.markdown(f"**🏆 Integration Center**")
-                st.caption(f"Score: {top['score']:.4f}")
+            # Display Results & Controls
+            if st.session_state.network_data:
+                # Export Logic
+                net_json = json.dumps(st.session_state.network_data, ensure_ascii=False)
+                st.download_button(
+                    "💾 บันทึกผลวิเคราะห์ (Save Cache)", 
+                    data=net_json, 
+                    file_name="network_analysis_cache.json", 
+                    mime="application/json", 
+                    use_container_width=True
+                )
                 
-                # Show source method (Offline/Online)
-                if 'method' in stats:
-                     st.caption(f"Mode: {stats['method']}")
+                if st.session_state.network_data.get('top_node'):
+                    top = st.session_state.network_data['top_node']
+                    st.markdown("---")
+                    st.markdown(f"**🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center)**")
+                    st.caption(f"Score: {top['score']:.4f}")
+                    st.code(f"{top['lat']:.5f}, {top['lon']:.5f}")
+                    
+                    if st.button("➕ เพิ่มจุดนี้ลงในรายการ", use_container_width=True, type="secondary"):
+                        st.session_state.markers.append({'lat': top['lat'], 'lng': top['lon'], 'active': True})
+                        clear_results(keep_network=True) # Keep network data when adding point
+                        st.toast("เพิ่มจุดใหม่เรียบร้อย!", icon="✅")
+                        st.rerun()
 
-                st.code(f"{top['lat']:.5f}, {top['lon']:.5f}")
-                
-                if st.button("➕ เพิ่มจุดนี้ลงในรายการ", use_container_width=True, type="secondary"):
-                    st.session_state.markers.append({'lat': top['lat'], 'lng': top['lon'], 'active': True})
-                    clear_results()
-                    st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
-                    st.rerun()
-
-            st.markdown("##### Layer Controls")
-            st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
-            st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
-            st.checkbox("Show Nodes (Integration)", key="show_closeness")
-            st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
+                st.markdown("##### Layer Controls")
+                st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
+                st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
+                st.checkbox("Show Nodes (Integration)", key="show_closeness")
+                st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
 
         st.markdown("---")
         
+        # --- Map Settings ---
         with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=False):
             st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
             st.checkbox("🚦 การจราจร (Google Traffic)", key="show_traffic")
@@ -479,16 +459,18 @@ def perform_calculation(active_list):
                 st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน")
 
 def perform_network_analysis():
-    if not st.session_state.isochrone_data: return st.error("No Isochrone data found.")
+    # If data is already loaded via Import, do nothing or confirm
+    if not st.session_state.isochrone_data: 
+        return st.error("No Isochrone data found. Please run calculation first or Load Cache.")
     
-    # Updated text to reflect new cache behavior
-    with st.spinner('กำลังวิเคราะห์โครงข่ายถนน (OSMnx - Cached/Optimized)...'):
+    with st.spinner('กำลังดาวน์โหลดแผนที่และวิเคราะห์โครงข่ายถนน (OSMnx)... อาจใช้เวลา 30-60 วินาที'):
         try:
             feats = st.session_state.isochrone_data.get('features', [])
             polys = [shape(f['geometry']) for f in feats]
             if not polys: return st.error("No polygons to analyze.")
             combined_polygon = unary_union(polys)
             
+            # This is the heavy function
             result = process_network_analysis(combined_polygon.wkt)
             
             if "error" in result:
@@ -513,6 +495,7 @@ def render_map():
             attr="Google Traffic", name="Google Traffic", overlay=True
         ).add_to(m)
 
+    # --- Network Analysis Layers ---
     net_data = st.session_state.network_data
     if net_data:
         if st.session_state.show_betweenness and net_data.get("edges"):
@@ -597,6 +580,7 @@ def main():
     if map_output and map_output.get('last_clicked'):
         clicked = map_output['last_clicked']
         last_marker = st.session_state.markers[-1] if st.session_state.markers else None
+        # Simple debounce
         if not last_marker or abs(clicked['lat'] - last_marker['lat']) > 1e-5 or abs(clicked['lng'] - last_marker['lng']) > 1e-5:
             st.session_state.markers.append({'lat': clicked['lat'], 'lng': clicked['lng'], 'active': True})
             clear_results()
