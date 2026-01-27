@@ -389,7 +389,7 @@ def render_sidebar():
         st.markdown("---")
         
         # --- Map Settings ---
-        with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=False):
+        with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=True):
             st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
             st.checkbox("🚦 การจราจร (Google Traffic)", key="show_traffic")
             st.checkbox("👥 ความหนาแน่นประชากร", key="show_population")
