@@ -552,7 +552,7 @@ def render_map():
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
-    return st_folium(m, height=950, use_container_width=True, key="main_map")
+    return st_folium(m, height=900, use_container_width=True, key="main_map")
 
 # ============================================================================
 # 5. MAIN EXECUTION
