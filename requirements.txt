@@ -21,3 +21,4 @@ traveltimepy
 shapely
 networkx
 osmnx
+paho-mqtt
