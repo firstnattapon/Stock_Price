@@ -1,154 +1,96 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
 
-# 1. ตั้งค่าหน้าเว็บ
-st.set_page_config(
-    page_title="Dashboard คูปองคงเหลือ",
-    page_icon="🎫",
-    layout="wide"
-)
+st.set_page_config(page_title="Generator เลขตอง", page_icon="🎫", layout="wide")
 
-# URL ของ Firebase (ตัด .json ออกเพื่อนำไปต่อท้ายในฟังก์ชัน)
 BASE_URL = "https://smart-washer-a830b-default-rtdb.asia-southeast1.firebasedatabase.app/coupons"
 
-# 2. ฟังก์ชันสำหรับดึงข้อมูล (Read)
-def load_data():
-    try:
-        response = requests.get(f"{BASE_URL}.json")
-        response.raise_for_status()
-        data = response.json()
-        return data
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการดึงข้อมูล: {e}")
-        return None
-
-# 3. ฟังก์ชันสำหรับเพิ่มข้อมูล (Create/Update)
-def add_coupon(coupon_id, status, value=None):
-    # สร้าง URL สำหรับ node นั้นๆ โดยเฉพาะ เช่น /coupons/11111.json
-    url = f"{BASE_URL}/{coupon_id}.json"
+# ฟังก์ชันสร้างเฉพาะเลขตอง 11111 - 99999 (9 ใบ)
+def create_repdigits_only(value, status):
+    data_payload = {}
+    current_time = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # ข้อมูลที่จะส่งขึ้นไป
-    payload = {
-        "status": status,
-        "value": value,
-        "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    try:
-        # ใช้ PUT เพื่อระบุ ID เอง (ถ้าใช้ POST Firebase จะสุ่ม ID ยาวๆ ให้)
-        response = requests.put(url, json=payload)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        st.error(f"บันทึกไม่สำเร็จ: {e}")
-        return False
+    # วนลูปเลข 1 ถึง 9 แล้วทำซ้ำ 5 ครั้ง
+    generated_list = []
+    for i in range(1, 10):
+        code = str(i) * 5  # เช่น "1" * 5 = "11111"
+        
+        data_payload[code] = {
+            "status": status,
+            "value": value,
+            "timestamp": current_time,
+            "type": "vip_repdigit" # ระบุประเภทไว้หน่อยว่าเป็นเลขตอง
+        }
+        generated_list.append(code)
 
-# --- ส่วนแสดงผลหลัก (Main Interface) ---
-st.title("🎫 ระบบตรวจสอบและจัดการคูปอง (Smart Washer)")
+    try:
+        # ใช้ PATCH เพื่อส่งข้อมูลทั้ง 9 ตัวขึ้นไปทีเดียว
+        response = requests.patch(f"{BASE_URL}.json", json=data_payload)
+        response.raise_for_status()
+        return True, generated_list
+    except Exception as e:
+        return False, str(e)
+
+# --- ส่วนหน้าจอใช้งาน ---
+st.title("🎫 สร้างคูปองเลขสวย (เลขตอง 5 หลัก)")
 st.markdown("---")
 
-# ==========================================
-# ส่วนที่เพิ่ม: Sidebar สำหรับเพิ่มข้อมูล (Add Data)
-# ==========================================
-with st.sidebar:
-    st.header("➕ เพิ่ม/แก้ไข คูปอง")
+st.info("ระบบจะสร้างเลข: 11111, 22222, 33333, 44444, 55555, 66666, 77777, 88888, 99999 (รวม 9 ใบ)")
+
+with st.form("repdigit_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        val = st.number_input("มูลค่าคูปอง (บาท)", value=500)
+    with col2:
+        stat = st.selectbox("สถานะ", ["active", "vip", "used"])
+        
+    submit = st.form_submit_button("🚀 กดปุ่มนี้เพื่อสร้าง 9 ใบ ทีเดียว")
     
-    with st.form("add_coupon_form"):
-        # กำหนดช่วงเลขคูปอง 11111 - 99999 ตามที่ต้องการ
-        new_id = st.number_input(
-            "ระบุเลขคูปอง (5 หลัก)", 
-            min_value=11111, 
-            max_value=99999, 
-            step=1,
-            help="ใส่เลขระหว่าง 11111 ถึง 99999"
-        )
-        
-        new_status = st.selectbox("สถานะ", ["active", "used", "expired"])
-        new_value = st.number_input("มูลค่า (บาท)", min_value=0, value=100)
-        
-        submitted = st.form_submit_button("บันทึกข้อมูล")
-        
-        if submitted:
-            if 11111 <= new_id <= 99999:
-                success = add_coupon(new_id, new_status, new_value)
-                if success:
-                    st.success(f"บันทึกคูปอง {new_id} เรียบร้อย!")
-                    st.cache_data.clear() # เคลียร์ cache
-                    # ใช้ rerun เพื่อรีเฟรชตารางข้อมูลทันที
-                    st.rerun()
+    if submit:
+        with st.spinner("กำลังส่งข้อมูลเข้า Firebase..."):
+            success, result = create_repdigits_only(val, stat)
+            
+            if success:
+                st.success("✅ บันทึกสำเร็จ! สร้างคูปองดังนี้:")
+                st.write(result) # แสดงรายการเลขที่สร้าง
+                st.balloons() # เอฟเฟกต์ลูกโป่งฉลอง
             else:
-                st.error("กรุณาระบุเลขคูปองให้ถูกต้อง (11111-99999)")
+                st.error(f"เกิดข้อผิดพลาด: {result}")
 
-# ==========================================
-# ส่วนแสดงผลข้อมูลเดิม (View Data)
-# ==========================================
+# --- ส่วนแสดงผลข้อมูลในระบบ ---
+st.markdown("---")
+st.subheader("📦 ข้อมูลคูปองล่าสุด")
 
-# ปุ่ม Refresh
-if st.button("🔄 อัปเดตตารางข้อมูล"):
-    st.cache_data.clear()
+if st.button("🔄 รีเฟรชดูข้อมูล"):
     st.rerun()
 
-# โหลดข้อมูล
-data = load_data()
-
-if data:
-    # การแปลงข้อมูล (เหมือนโค้ดเดิมของคุณ)
-    if isinstance(data, dict):
+# ดึงข้อมูลมาแสดง (โค้ดแสดงผลมาตรฐาน)
+try:
+    r = requests.get(f"{BASE_URL}.json")
+    data = r.json()
+    
+    if data:
+        # แปลงเป็น DataFrame แบบง่าย
         items = []
-        for key, value in data.items():
-            if isinstance(value, dict):
-                value['coupon_code'] = key # เปลี่ยนชื่อ key ให้อ่านง่าย
-                items.append(value)
-            else:
-                items.append({'coupon_code': key, 'value': value})
-        df = pd.DataFrame(items)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    v['code'] = k
+                    items.append(v)
         
-    elif isinstance(data, list):
-        # กรณี List ต้องจัดการ index ให้ตรงกับเลขคูปองถ้าเป็นไปได้
-        # หรือถ้า Firebase เก็บเป็น array ที่มีค่า null เยอะๆ อาจจะต้อง clean
-        items = []
-        for i, val in enumerate(data):
-            if val is not None:
-                if isinstance(val, dict):
-                    val['coupon_code'] = i
-                    items.append(val)
-                else:
-                    items.append({'coupon_code': i, 'value': val})
-        df = pd.DataFrame(items)
-    else:
-        df = pd.DataFrame()
-
-    if not df.empty:
-        # ย้าย coupon_code มาคอลัมน์แรก
-        if 'coupon_code' in df.columns:
+        if items:
+            df = pd.DataFrame(items)
+            # ย้าย code มาคอลัมน์แรก
             cols = df.columns.tolist()
-            cols.insert(0, cols.pop(cols.index('coupon_code')))
-            df = df[cols]
-            
-            # ทำให้เป็น string เพื่อไม่ให้แสดง comma (เช่น 11,111)
-            df['coupon_code'] = df['coupon_code'].astype(str) 
-
-        # Metric
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("จำนวนคูปองทั้งหมด", f"{len(df)} ใบ")
-        with c2:
-            # นับเฉพาะ Active
-            if 'status' in df.columns:
-                active_count = len(df[df['status'] == 'active'])
-                st.metric("สถานะ Active", f"{active_count} ใบ")
-            else:
-                st.metric("สถานะ Active", "-")
-
-        st.subheader("📋 รายการคูปอง")
-        st.dataframe(
-            df, 
-            use_container_width=True,
-            hide_index=True
-        )
+            if 'code' in cols:
+                cols.insert(0, cols.pop(cols.index('code')))
+                df = df[cols]
+                
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.warning("รูปแบบข้อมูลไม่ถูกต้อง")
     else:
-        st.info("ไม่พบข้อมูลคูปอง")
-else:
-    st.info("ยังไม่มีข้อมูลในฐานข้อมูล")
+        st.info("ยังไม่มีข้อมูลในระบบ")
+except:
+    st.error("เชื่อมต่อฐานข้อมูลไม่ได้")
