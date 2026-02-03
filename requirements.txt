@@ -22,4 +22,4 @@ shapely
 networkx
 osmnx
 paho-mqtt
-mpy-cross==1.27.0
+mpy-cross>=1.27.0
