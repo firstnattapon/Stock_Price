@@ -374,6 +374,54 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
     
     return result
 
+# GitHub Cache Repository Configuration
+GITHUB_CACHE_CONFIG = {
+    "api_url": "https://api.github.com/repos/firstnattapon/Stock_Price/contents/Geoapify_Map",
+    "raw_base_url": "https://raw.githubusercontent.com/firstnattapon/Stock_Price/main/Geoapify_Map"
+}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_github_cache_list() -> List[Dict[str, str]]:
+    """
+    ดึงรายชื่อไฟล์ _cache.zip จาก GitHub repository.
+    Returns: List of dicts with 'name' and 'download_url' keys
+    """
+    try:
+        response = requests.get(GITHUB_CACHE_CONFIG["api_url"], timeout=10)
+        if response.status_code != 200:
+            return []
+        
+        files = response.json()
+        cache_files = []
+        
+        for f in files:
+            if isinstance(f, dict) and f.get('name', '').endswith('_cache.zip'):
+                cache_files.append({
+                    'name': f['name'],
+                    'download_url': f.get('download_url', ''),
+                    'size_kb': f.get('size', 0) // 1024
+                })
+        
+        return cache_files
+    except Exception:
+        return []
+
+def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[str]]:
+    """
+    ดาวน์โหลด cache file จาก GitHub.
+    Returns: (zip_bytes, error_message)
+    """
+    try:
+        response = requests.get(download_url, timeout=60)
+        if response.status_code == 200:
+            return response.content, None
+        else:
+            return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
+    except requests.Timeout:
+        return None, "หมดเวลาในการดาวน์โหลด กรุณาลองใหม่"
+    except Exception as e:
+        return None, f"เกิดข้อผิดพลาด: {str(e)}"
+
 # ============================================================================
 # OPTIMIZED NETWORK ANALYSIS - PURE CACHED FUNCTIONS
 # ============================================================================
@@ -753,7 +801,43 @@ def render_sidebar():
             else:
                 st.caption("📊 **Cache ว่างเปล่า**")
             
-            # Import Cache Section
+            # --- GitHub Cache Selection ---
+            st.markdown("---")
+            st.markdown("##### 🌐 Cache จาก GitHub")
+            
+            github_caches = fetch_github_cache_list()
+            
+            if github_caches:
+                cache_options = ["-- เลือก Cache --"] + [f"{c['name']} ({c['size_kb']} KB)" for c in github_caches]
+                selected_idx = st.selectbox(
+                    "เลือก Cache จาก Repository",
+                    range(len(cache_options)),
+                    format_func=lambda i: cache_options[i],
+                    key="github_cache_select",
+                    label_visibility="collapsed"
+                )
+                
+                if selected_idx > 0:
+                    selected_cache = github_caches[selected_idx - 1]
+                    if st.button("📥 ดาวน์โหลด & นำเข้า", use_container_width=True, type="primary"):
+                        with st.spinner(f"กำลังดาวน์โหลด {selected_cache['name']}..."):
+                            zip_bytes, error = download_github_cache(selected_cache['download_url'])
+                            
+                            if zip_bytes:
+                                result = import_cache_from_zip(zip_bytes)
+                                if result['success']:
+                                    msg = f"นำเข้าสำเร็จ! ({result['imported']} ใหม่, {result['skipped']} ข้าม)"
+                                    st.toast(msg, icon="✅")
+                                    st.rerun()
+                                else:
+                                    for err in result['errors']:
+                                        st.error(err)
+                            else:
+                                st.error(f"❌ {error}")
+            else:
+                st.caption("⚠️ ไม่พบ cache ใน GitHub หรือไม่สามารถเชื่อมต่อได้")
+            
+            # Import Cache Section (Manual Upload)
             st.markdown("---")
             uploaded_cache = st.file_uploader(
                 "📥 Import Cache (.zip)", 
@@ -762,7 +846,7 @@ def render_sidebar():
                 label_visibility="visible"
             )
             if uploaded_cache:
-                if st.button("✅ ยืนยันการนำเข้า", use_container_width=True, type="primary"):
+                if st.button("✅ ยืนยันการนำเข้า", use_container_width=True, type="secondary"):
                     result = import_cache_from_zip(uploaded_cache.read())
                     if result['success']:
                         msg = f"นำเข้าสำเร็จ! ({result['imported']} ใหม่, {result['skipped']} ข้าม)"
