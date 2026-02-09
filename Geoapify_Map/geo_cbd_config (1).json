@@ -1,0 +1,30 @@
+{
+  "markers": [
+    {
+      "lat": 20.2151657,
+      "lng": 100.4042877,
+      "active": true
+    }
+  ],
+  "settings": {
+    "api_key": "4eefdfb0b0d349e595595b9c03a69e3d",
+    "map_style_name": "Esri Light Gray (แนะนำสำหรับดูผังเมือง)",
+    "travel_mode": "drive",
+    "time_intervals": [
+      10
+    ],
+    "show_dol": false,
+    "show_cityplan": false,
+    "cityplan_opacity": 0.7,
+    "show_population": false,
+    "show_traffic": false,
+    "colors": {
+      "step1": "#2A9D8F",
+      "step2": "#E9C46A",
+      "step3": "#F4A261",
+      "step4": "#D62828"
+    },
+    "show_betweenness": true,
+    "show_closeness": true
+  }
+}
