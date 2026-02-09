@@ -13,6 +13,12 @@ import matplotlib.colors as colors
 from typing import List, Dict, Any, Optional, Tuple
 import time
 import hashlib
+import pickle
+import os
+from pathlib import Path
+import zipfile
+import io
+from math import radians, sin, cos, sqrt, atan2
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
@@ -64,6 +70,10 @@ TRAVEL_MODE_NAMES = {
 
 TIME_OPTIONS = [5, 10, 15, 20, 30, 45, 60]
 
+# Cache Directory (for disk-based OSM graph storage)
+CACHE_DIR = Path("./cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
 # Network Analysis Configuration
 NETWORK_CONFIG = {
     'min_closeness_threshold': 0.0,  # Minimum closeness score to display nodes
@@ -71,7 +81,9 @@ NETWORK_CONFIG = {
     'edge_weight_multiplier': 4,  # Multiplier for normalized betweenness
     'cache_ttl_seconds': 3600,  # Cache duration for API calls
     'click_debounce_seconds': 0.5,  # Minimum time between map clicks
-    'click_distance_threshold_meters': 10  # Minimum distance to add new marker
+    'click_distance_threshold_meters': 10,  # Minimum distance to add new marker
+    'large_graph_threshold': 2000,  # Node count threshold for approximation algorithms
+    'closeness_sample_size': 200  # Sample size for closeness approximation
 }
 
 # Keys to persist in config file
@@ -99,8 +111,6 @@ def get_border_color(original_marker_idx: Optional[int]) -> str:
 
 def calculate_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate approximate distance in meters using Haversine formula."""
-    from math import radians, sin, cos, sqrt, atan2
-    
     R = 6371000  # Earth radius in meters
     
     lat1_rad, lon1_rad = radians(lat1), radians(lon1)
@@ -210,11 +220,13 @@ def safe_fetch_isochrone(api_key: str, travel_mode: str, ranges_str: str,
         return None, f"Unexpected Error: {str(e)}"
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
-def fetch_api_data_cached(api_key: str, travel_mode: str, ranges_str: str, 
-                          marker_lat: float, marker_lon: float) -> Optional[List[Dict]]:
-    """Cached wrapper for API calls - returns features or None."""
-    features, error = safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
-    return features  # Cache will store None on error, which is acceptable
+def fetch_api_data_with_error(api_key: str, travel_mode: str, ranges_str: str, 
+                               marker_lat: float, marker_lon: float) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    """
+    Cached wrapper for API calls - returns (features, error_message).
+    This eliminates the need for double API calls on cache miss.
+    """
+    return safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
 def union_all_polygons(features_json_str: str) -> str:
@@ -229,94 +241,357 @@ def union_all_polygons(features_json_str: str) -> str:
     combined = unary_union(polys)
     return combined.wkt
 
-@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
-def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
+# ============================================================================
+# CACHE MANAGEMENT HELPERS
+# ============================================================================
+
+def get_cache_key(polygon_wkt_str: str, network_type: str) -> str:
+    """Generate a stable cache key from polygon bounds and network type."""
+    polygon = wkt.loads(polygon_wkt_str)
+    bounds = polygon.bounds  # (minx, miny, maxx, maxy)
+    
+    # Round to 3 decimal places (~100m precision) for cache key stability
+    rounded_bounds = tuple(round(b, 3) for b in bounds)
+    key_str = f"{rounded_bounds}_{network_type}"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+def load_graph_from_cache(cache_key: str) -> Optional[nx.MultiDiGraph]:
+    """Load cached OSM graph from disk."""
+    cache_file = CACHE_DIR / f"osm_graph_{cache_key}.pkl"
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        except Exception:
+            return None
+    return None
+
+def save_graph_to_cache(cache_key: str, graph: nx.MultiDiGraph):
+    """Save OSM graph to disk cache."""
+    cache_file = CACHE_DIR / f"osm_graph_{cache_key}.pkl"
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass  # Silent fail - caching is optional
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Get cache directory statistics."""
+    if not CACHE_DIR.exists():
+        return {"count": 0, "size_mb": 0}
+    
+    cache_files = list(CACHE_DIR.glob("osm_graph_*.pkl"))
+    total_size = sum(f.stat().st_size for f in cache_files)
+    
+    return {
+        "count": len(cache_files),
+        "size_mb": total_size / (1024 * 1024)
+    }
+
+def clear_cache():
+    """Clear all cached OSM graphs."""
+    if CACHE_DIR.exists():
+        for cache_file in CACHE_DIR.glob("osm_graph_*.pkl"):
+            try:
+                cache_file.unlink()
+            except Exception:
+                pass
+
+def export_cache_as_zip() -> Optional[bytes]:
     """
-    Downloads OSM road network within the given Polygon (WKT String) and calculates Centrality.
-    Cached by polygon WKT hash for performance.
+    สร้าง ZIP file ของ cache ทั้งหมดสำหรับ download.
+    Returns: bytes ของ ZIP file หรือ None ถ้าไม่มี cache
+    """
+    if not CACHE_DIR.exists():
+        return None
+    
+    cache_files = list(CACHE_DIR.glob("osm_graph_*.pkl"))
+    if not cache_files:
+        return None
+    
+    # สร้าง ZIP ใน memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for cache_file in cache_files:
+            zf.write(cache_file, cache_file.name)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
+    """
+    นำเข้า cache จาก ZIP file ที่อัปโหลด.
+    Returns: Dict with 'success', 'imported', 'skipped', 'errors'
+    """
+    result = {
+        'success': False,
+        'imported': 0,
+        'skipped': 0,
+        'errors': []
+    }
+    
+    try:
+        # Ensure cache directory exists
+        CACHE_DIR.mkdir(exist_ok=True)
+        
+        zip_buffer = io.BytesIO(zip_bytes)
+        with zipfile.ZipFile(zip_buffer, 'r') as zf:
+            for file_info in zf.infolist():
+                # Validate filename pattern
+                if not file_info.filename.startswith('osm_graph_') or not file_info.filename.endswith('.pkl'):
+                    result['errors'].append(f"Skipped invalid file: {file_info.filename}")
+                    continue
+                
+                target_path = CACHE_DIR / file_info.filename
+                
+                # Skip if file already exists
+                if target_path.exists():
+                    result['skipped'] += 1
+                    continue
+                
+                # Extract and validate
+                try:
+                    data = zf.read(file_info.filename)
+                    
+                    # Validate pickle format
+                    test_buffer = io.BytesIO(data)
+                    pickle.load(test_buffer)  # Just validate, discard result
+                    
+                    # Save to cache
+                    with open(target_path, 'wb') as f:
+                        f.write(data)
+                    result['imported'] += 1
+                    
+                except Exception as e:
+                    result['errors'].append(f"Failed to import {file_info.filename}: {str(e)}")
+        
+        result['success'] = result['imported'] > 0 or result['skipped'] > 0
+        
+    except zipfile.BadZipFile:
+        result['errors'].append("Invalid ZIP file format")
+    except Exception as e:
+        result['errors'].append(f"Import failed: {str(e)}")
+    
+    return result
+
+# GitHub Cache Repository Configuration
+GITHUB_CACHE_CONFIG = {
+    "api_url": "https://api.github.com/repos/firstnattapon/Stock_Price/contents/Geoapify_Map",
+    "raw_base_url": "https://raw.githubusercontent.com/firstnattapon/Stock_Price/main/Geoapify_Map"
+}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_github_cache_list() -> List[Dict[str, str]]:
+    """
+    ดึงรายชื่อไฟล์ _cache.zip จาก GitHub repository.
+    Returns: List of dicts with 'name' and 'download_url' keys
     """
     try:
-        # 1. Load Geometry & Download Graph
+        response = requests.get(GITHUB_CACHE_CONFIG["api_url"], timeout=10)
+        if response.status_code != 200:
+            return []
+        
+        files = response.json()
+        cache_files = []
+        
+        for f in files:
+            if isinstance(f, dict) and f.get('name', '').endswith('_cache.zip'):
+                cache_files.append({
+                    'name': f['name'],
+                    'download_url': f.get('download_url', ''),
+                    'size_kb': f.get('size', 0) // 1024
+                })
+        
+        return cache_files
+    except Exception:
+        return []
+
+def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[str]]:
+    """
+    ดาวน์โหลด cache file จาก GitHub.
+    Returns: (zip_bytes, error_message)
+    """
+    try:
+        response = requests.get(download_url, timeout=60)
+        if response.status_code == 200:
+            return response.content, None
+        else:
+            return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
+    except requests.Timeout:
+        return None, "หมดเวลาในการดาวน์โหลด กรุณาลองใหม่"
+    except Exception as e:
+        return None, f"เกิดข้อผิดพลาด: {str(e)}"
+
+# ============================================================================
+# OPTIMIZED NETWORK ANALYSIS - PURE CACHED FUNCTIONS
+# ============================================================================
+
+def _fetch_osm_graph(polygon_wkt_str: str, network_type: str) -> Tuple[Optional[nx.MultiDiGraph], bool, Optional[str]]:
+    """
+    Pure function to fetch OSM graph with disk caching.
+    Returns: (graph, was_cached, error_message)
+    """
+    try:
+        cache_key = get_cache_key(polygon_wkt_str, network_type)
         polygon_geom = wkt.loads(polygon_wkt_str)
+        
+        # Try to load from cache first
+        G = load_graph_from_cache(cache_key)
+        
+        if G is not None:
+            return G, True, None
+        
+        # Download from OSM
         G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
         
-        if len(G.nodes) < 2:
-            return {"error": "Not enough nodes found in the area. Try a larger region or check if OSM data is available."}
-
-        # 2. Calculate Centrality Measures
-        # Closeness (Node-based): How easy is it to reach this node?
-        closeness_cent = nx.closeness_centrality(G) 
-        max_close = max(closeness_cent.values()) if closeness_cent else 1
+        # Save to cache for next time
+        save_graph_to_cache(cache_key, G)
         
-        # Betweenness (Edge-based): How much traffic flows through this road?
-        G_undir = G.to_undirected() 
-        betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
-        max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
+        return G, False, None
         
-        # 3. Format Data for Visualization (GeoJSON preparation)
-        # 3.1 Edges (Betweenness)
-        edges_geojson = []
-        cmap_bet = cm.get_cmap('plasma') 
+    except ValueError as e:
+        return None, False, f"Invalid geometry: {str(e)}"
+    except ox._errors.InsufficientResponseError:
+        return None, False, "No OSM data available for this area. Try a different location or larger region."
+    except Exception as e:
+        return None, False, f"Failed to fetch OSM graph: {str(e)}"
 
-        for u, v, k, data in G.edges(keys=True, data=True):
-            score = betweenness_cent.get(tuple(sorted((u, v))), 0)
-            norm_score = score / max_bet if max_bet > 0 else 0
-            
-            # Helper to extract geometry or create straight line
-            geom = mapping(data['geometry']) if 'geometry' in data else {
-                "type": "LineString",
-                "coordinates": [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
+def _compute_centrality(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
+    """
+    Pure cached function for centrality computation.
+    No UI elements - suitable for @st.cache_data.
+    """
+    # Fetch graph (disk cached separately)
+    G, was_cached, error = _fetch_osm_graph(polygon_wkt_str, network_type)
+    
+    if error:
+        return {"error": error}
+    
+    if len(G.nodes) < 2:
+        return {"error": "Not enough nodes found in the area. Try a larger region or check if OSM data is available."}
+    
+    # Calculate Closeness Centrality (standard method - no sampling parameter in NetworkX)
+    node_count = len(G.nodes)
+    is_large_graph = node_count > NETWORK_CONFIG['large_graph_threshold']
+    
+    # Note: NetworkX closeness_centrality doesn't support 'k' parameter for sampling
+    closeness_cent = nx.closeness_centrality(G)
+    
+    max_close = max(closeness_cent.values()) if closeness_cent else 1
+    
+    # Calculate Betweenness Centrality
+    G_undir = G.to_undirected()
+    betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
+    max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
+    
+    # Format GeoJSON - Edges (Betweenness)
+    edges_geojson = []
+    cmap_bet = cm.get_cmap('plasma')
+    
+    for u, v, k, data in G.edges(keys=True, data=True):
+        score = betweenness_cent.get(tuple(sorted((u, v))), 0)
+        norm_score = score / max_bet if max_bet > 0 else 0
+        
+        geom = mapping(data['geometry']) if 'geometry' in data else {
+            "type": "LineString",
+            "coordinates": [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+        }
+        
+        edges_geojson.append({
+            "type": "Feature",
+            "geometry": geom,
+            "properties": {
+                "type": "road",
+                "betweenness": norm_score,
+                "color": colors.to_hex(cmap_bet(norm_score)),
+                "stroke_weight": NETWORK_CONFIG['edge_weight_base'] + (norm_score * NETWORK_CONFIG['edge_weight_multiplier'])
             }
-            
-            edges_geojson.append({
+        })
+    
+    # Format GeoJSON - Nodes (Closeness / Integration)
+    nodes_geojson = []
+    top_node_data = {"score": -1, "lat": 0, "lon": 0}
+    
+    for node, data in G.nodes(data=True):
+        score = closeness_cent.get(node, 0)
+        norm_score = score / max_close if max_close > 0 else 0
+        
+        if score > top_node_data["score"]:
+            top_node_data = {"lat": data['y'], "lon": data['x'], "score": score}
+        
+        if norm_score > NETWORK_CONFIG['min_closeness_threshold']:
+            nodes_geojson.append({
                 "type": "Feature",
-                "geometry": geom,
+                "geometry": {"type": "Point", "coordinates": [data['x'], data['y']]},
                 "properties": {
-                    "type": "road",
-                    "betweenness": norm_score,
-                    "color": colors.to_hex(cmap_bet(norm_score)),
-                    "stroke_weight": NETWORK_CONFIG['edge_weight_base'] + (norm_score * NETWORK_CONFIG['edge_weight_multiplier'])
+                    "type": "intersection",
+                    "closeness": norm_score,
+                    "color": "#000000",
+                    "radius": 2 + (norm_score * 6)
                 }
             })
-
-        # 3.2 Nodes (Closeness / Integration)
-        nodes_geojson = []
-        top_node_data = {"score": -1, "lat": 0, "lon": 0}
-
-        for node, data in G.nodes(data=True):
-            score = closeness_cent.get(node, 0)
-            norm_score = score / max_close if max_close > 0 else 0
-            
-            # Update Top Node
-            if score > top_node_data["score"]:
-                top_node_data = {"lat": data['y'], "lon": data['x'], "score": score}
-            
-            # Filter distinct nodes for map clarity
-            if norm_score > NETWORK_CONFIG['min_closeness_threshold']: 
-                nodes_geojson.append({
-                    "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [data['x'], data['y']]},
-                    "properties": {
-                        "type": "intersection",
-                        "closeness": norm_score,
-                        "color": "#000000",
-                        "radius": 2 + (norm_score * 6)
-                    }
-                })
-            
-        return {
-            "edges": {"type": "FeatureCollection", "features": edges_geojson},
-            "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
-            "top_node": top_node_data if top_node_data["score"] != -1 else None,
-            "stats": {"nodes_count": len(G.nodes), "edges_count": len(G.edges)}
+    
+    return {
+        "edges": {"type": "FeatureCollection", "features": edges_geojson},
+        "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
+        "top_node": top_node_data if top_node_data["score"] != -1 else None,
+        "stats": {
+            "nodes_count": len(G.nodes),
+            "edges_count": len(G.edges),
+            "used_approximation": is_large_graph,
+            "was_cached": was_cached
         }
+    }
 
-    except ValueError as e:
-        return {"error": f"Invalid geometry: {str(e)}"}
-    except ox._errors.InsufficientResponseError:
-        return {"error": "No OSM data available for this area. Try a different location or larger region."}
-    except Exception as e:
-        return {"error": f"Network analysis failed: {str(e)}"}
+def process_network_analysis_with_ui(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
+    """
+    UI wrapper that shows progress while computation runs.
+    Separates UI concerns from cached computation.
+    """
+    progress_bar = st.progress(0)
+    status_container = st.empty()
+    
+    try:
+        # Stage 1: Prepare (5%)
+        status_container.info("🔍 **Stage 1/3:** กำลังเตรียมข้อมูลพื้นที่...")
+        progress_bar.progress(0.05)
+        
+        # Stage 2: Check cache status (10%)
+        cache_key = get_cache_key(polygon_wkt_str, network_type)
+        is_cached = load_graph_from_cache(cache_key) is not None
+        
+        if is_cached:
+            status_container.success("✅ **พบข้อมูลใน Cache!** กำลังโหลด...")
+        else:
+            status_container.warning("⏳ **กำลังดาวน์โหลดข้อมูลครั้งแรก...** (อาจใช้เวลา 5-10 นาที)")
+        
+        progress_bar.progress(0.10)
+        
+        # Stage 3: Run computation (10% -> 90%)
+        status_container.info("🛣️ **Stage 2/3:** กำลังวิเคราะห์โครงข่ายถนน...")
+        progress_bar.progress(0.30)
+        
+        # Call the pure cached function
+        result = _compute_centrality(polygon_wkt_str, network_type)
+        
+        progress_bar.progress(0.90)
+        
+        # Stage 4: Complete (100%)
+        if "error" in result:
+            status_container.error(f"❌ {result['error']}")
+        else:
+            stats = result.get('stats', {})
+            status_container.success(f"✅ **สำเร็จ!** วิเคราะห์ {stats.get('nodes_count', 0):,} โหนด และ {stats.get('edges_count', 0):,} ถนน")
+        
+        progress_bar.progress(1.0)
+        
+    finally:
+        # Always clean up UI elements
+        progress_bar.empty()
+        status_container.empty()
+    
+    return result
 
 # ============================================================================
 # 3. STATE MANAGEMENT
@@ -497,14 +772,103 @@ def render_sidebar():
             else:
                 st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
             
+            # Cache Management Section
+            cache_stats = get_cache_stats()
+            st.markdown("##### 💾 Cache Management")
+            
+            if cache_stats['count'] > 0:
+                st.caption(f"📊 **{cache_stats['count']} ไฟล์** ({cache_stats['size_mb']:.1f} MB)")
+                
+                # Export Cache Button
+                zip_data = export_cache_as_zip()
+                if zip_data:
+                    st.download_button(
+                        "📤 Export Cache (.zip)",
+                        data=zip_data,
+                        file_name="osmnx_cache.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+                
+                # Clear Cache Button
+                if st.button("🗑️ ล้าง Cache", use_container_width=True, type="secondary"):
+                    clear_cache()
+                    st.toast("ล้าง Cache สำเร็จ!", icon="✅")
+                    st.rerun()
+            else:
+                st.caption("📊 **Cache ว่างเปล่า**")
+            
+            # --- GitHub Cache Selection ---
+            st.markdown("---")
+            st.markdown("##### 🌐 Cache จาก GitHub")
+            
+            github_caches = fetch_github_cache_list()
+            
+            if github_caches:
+                cache_options = ["-- เลือก Cache --"] + [f"{c['name']} ({c['size_kb']} KB)" for c in github_caches]
+                selected_idx = st.selectbox(
+                    "เลือก Cache จาก Repository",
+                    range(len(cache_options)),
+                    format_func=lambda i: cache_options[i],
+                    key="github_cache_select",
+                    label_visibility="collapsed"
+                )
+                
+                if selected_idx > 0:
+                    selected_cache = github_caches[selected_idx - 1]
+                    if st.button("📥 ดาวน์โหลด & นำเข้า", use_container_width=True, type="primary"):
+                        with st.spinner(f"กำลังดาวน์โหลด {selected_cache['name']}..."):
+                            zip_bytes, error = download_github_cache(selected_cache['download_url'])
+                            
+                            if zip_bytes:
+                                result = import_cache_from_zip(zip_bytes)
+                                if result['success']:
+                                    msg = f"นำเข้าสำเร็จ! ({result['imported']} ใหม่, {result['skipped']} ข้าม)"
+                                    st.toast(msg, icon="✅")
+                                    st.rerun()
+                                else:
+                                    for err in result['errors']:
+                                        st.error(err)
+                            else:
+                                st.error(f"❌ {error}")
+            else:
+                st.caption("⚠️ ไม่พบ cache ใน GitHub หรือไม่สามารถเชื่อมต่อได้")
+            
+            # Import Cache Section (Manual Upload)
+            st.markdown("---")
+            uploaded_cache = st.file_uploader(
+                "📥 Import Cache (.zip)", 
+                type=["zip"], 
+                key="cache_uploader",
+                label_visibility="visible"
+            )
+            if uploaded_cache:
+                if st.button("✅ ยืนยันการนำเข้า", use_container_width=True, type="secondary"):
+                    result = import_cache_from_zip(uploaded_cache.read())
+                    if result['success']:
+                        msg = f"นำเข้าสำเร็จ! ({result['imported']} ใหม่, {result['skipped']} ข้าม)"
+                        st.toast(msg, icon="✅")
+                        st.rerun()
+                    else:
+                        for err in result['errors']:
+                            st.error(err)
+            
+            st.markdown("---")
+            
             do_network = st.button("🚀 Run Network Analysis", use_container_width=True, disabled=not can_analyze)
 
             # Display Results & Add Center Button
             if st.session_state.network_data and st.session_state.network_data.get('top_node'):
                 top = st.session_state.network_data['top_node']
+                stats = st.session_state.network_data.get('stats', {})
                 st.markdown("---")
                 st.markdown(f"**🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center)**")
                 st.caption(f"Score: {top['score']:.4f}")
+                
+                # Show if approximation was used
+                if stats.get('used_approximation'):
+                    st.caption("⚡ *ใช้ Approximation (กราฟขนาดใหญ่)*")
+                    
                 st.code(f"{top['lat']:.5f}, {top['lon']:.5f}")
                 
                 if st.button("➕ เพิ่มจุดนี้ลงในรายการ", use_container_width=True, type="secondary"):
@@ -558,17 +922,13 @@ def perform_calculation(active_list: List[Tuple[int, Dict]]):
         errors = []
         
         for act_idx, (orig_idx, marker) in enumerate(active_list):
-            features = fetch_api_data_cached(
+            # Use combined function to avoid double API call
+            features, error_msg = fetch_api_data_with_error(
                 st.session_state.api_key, st.session_state.travel_mode, 
                 ranges_str, marker['lat'], marker['lng']
             )
             
             if features is None:
-                # Fetch error details
-                _, error_msg = safe_fetch_isochrone(
-                    st.session_state.api_key, st.session_state.travel_mode,
-                    ranges_str, marker['lat'], marker['lng']
-                )
                 errors.append(f"จุดที่ {orig_idx + 1}: {error_msg}")
                 continue
             
@@ -615,8 +975,8 @@ def perform_network_analysis():
             if not combined_wkt:
                 return st.error("❌ No polygons to analyze.")
             
-            # 2. Process Data (cached by WKT hash)
-            result = process_network_analysis(combined_wkt)
+            # 2. Process Data with UI progress indicators
+            result = process_network_analysis_with_ui(combined_wkt)
             
             if "error" in result:
                 st.error(f"❌ Network Analysis Failed: {result['error']}")
