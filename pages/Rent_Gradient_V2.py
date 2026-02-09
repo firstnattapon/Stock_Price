@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import zipfile
 import io
+from math import radians, sin, cos, sqrt, atan2
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
@@ -110,8 +111,6 @@ def get_border_color(original_marker_idx: Optional[int]) -> str:
 
 def calculate_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate approximate distance in meters using Haversine formula."""
-    from math import radians, sin, cos, sqrt, atan2
-    
     R = 6371000  # Earth radius in meters
     
     lat1_rad, lon1_rad = radians(lat1), radians(lon1)
@@ -221,11 +220,13 @@ def safe_fetch_isochrone(api_key: str, travel_mode: str, ranges_str: str,
         return None, f"Unexpected Error: {str(e)}"
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
-def fetch_api_data_cached(api_key: str, travel_mode: str, ranges_str: str, 
-                          marker_lat: float, marker_lon: float) -> Optional[List[Dict]]:
-    """Cached wrapper for API calls - returns features or None."""
-    features, error = safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
-    return features  # Cache will store None on error, which is acceptable
+def fetch_api_data_with_error(api_key: str, travel_mode: str, ranges_str: str, 
+                               marker_lat: float, marker_lon: float) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    """
+    Cached wrapper for API calls - returns (features, error_message).
+    This eliminates the need for double API calls on cache miss.
+    """
+    return safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
 def union_all_polygons(features_json_str: str) -> str:
@@ -246,8 +247,7 @@ def union_all_polygons(features_json_str: str) -> str:
 
 def get_cache_key(polygon_wkt_str: str, network_type: str) -> str:
     """Generate a stable cache key from polygon bounds and network type."""
-    from shapely import wkt as wkt_loader
-    polygon = wkt_loader.loads(polygon_wkt_str)
+    polygon = wkt.loads(polygon_wkt_str)
     bounds = polygon.bounds  # (minx, miny, maxx, maxy)
     
     # Round to 3 decimal places (~100m precision) for cache key stability
@@ -375,165 +375,178 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
     return result
 
 # ============================================================================
-# OPTIMIZED NETWORK ANALYSIS WITH PROGRESS INDICATORS
+# OPTIMIZED NETWORK ANALYSIS - PURE CACHED FUNCTIONS
 # ============================================================================
 
-@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
-def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
+def _fetch_osm_graph(polygon_wkt_str: str, network_type: str) -> Tuple[Optional[nx.MultiDiGraph], bool, Optional[str]]:
     """
-    Downloads OSM road network within the given Polygon (WKT String) and calculates Centrality.
-    NOW WITH: Progressive loading UI, disk caching, and optimized calculations!
+    Pure function to fetch OSM graph with disk caching.
+    Returns: (graph, was_cached, error_message)
     """
     try:
-        # Generate cache key
         cache_key = get_cache_key(polygon_wkt_str, network_type)
-        
-        # Create progress container
-        progress_bar = st.progress(0)
-        status_container = st.empty()
-        
-        # Stage 1: Load Geometry (5%)
-        status_container.info("🔍 **Stage 1/5:** กำลังเตรียมข้อมูลพื้นที่...")
-        progress_bar.progress(0.05)
         polygon_geom = wkt.loads(polygon_wkt_str)
-        
-        # Stage 2: Download/Load OSM Graph (50%)
-        status_container.info("📡 **Stage 2/5:** กำลังโหลดข้อมูลถนนจาก OpenStreetMap...")
         
         # Try to load from cache first
         G = load_graph_from_cache(cache_key)
         
         if G is not None:
-            status_container.success("✅ **โหลดจาก Cache สำเร็จ!** (ประหยัดเวลา ~5-10 นาที)")
-            progress_bar.progress(0.55)
-            time.sleep(0.5)  # Brief pause to show message
-        else:
-            status_container.warning("⏳ **กำลังดาวน์โหลดข้อมูลครั้งแรก...** (อาจใช้เวลา 5-10 นาที)")
-            progress_bar.progress(0.10)
-            
-            # Download from OSM (this is the slow part)
-            G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
-            
-            # Save to cache for next time
-            save_graph_to_cache(cache_key, G)
-            status_container.success("✅ **ดาวน์โหลดสำเร็จ!** (บันทึกแคชแล้ว)")
-            progress_bar.progress(0.55)
+            return G, True, None
         
-        if len(G.nodes) < 2:
-            progress_bar.empty()
-            status_container.empty()
-            return {"error": "Not enough nodes found in the area. Try a larger region or check if OSM data is available."}
+        # Download from OSM
+        G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
+        
+        # Save to cache for next time
+        save_graph_to_cache(cache_key, G)
+        
+        return G, False, None
+        
+    except ValueError as e:
+        return None, False, f"Invalid geometry: {str(e)}"
+    except ox._errors.InsufficientResponseError:
+        return None, False, "No OSM data available for this area. Try a different location or larger region."
+    except Exception as e:
+        return None, False, f"Failed to fetch OSM graph: {str(e)}"
 
-        # Stage 3: Calculate Closeness Centrality (70%)
-        node_count = len(G.nodes)
-        is_large_graph = node_count > NETWORK_CONFIG['large_graph_threshold']
+@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
+def _compute_centrality(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
+    """
+    Pure cached function for centrality computation.
+    No UI elements - suitable for @st.cache_data.
+    """
+    # Fetch graph (disk cached separately)
+    G, was_cached, error = _fetch_osm_graph(polygon_wkt_str, network_type)
+    
+    if error:
+        return {"error": error}
+    
+    if len(G.nodes) < 2:
+        return {"error": "Not enough nodes found in the area. Try a larger region or check if OSM data is available."}
+    
+    # Calculate Closeness Centrality
+    node_count = len(G.nodes)
+    is_large_graph = node_count > NETWORK_CONFIG['large_graph_threshold']
+    
+    if is_large_graph:
+        sample_k = min(NETWORK_CONFIG['closeness_sample_size'], node_count)
+        closeness_cent = nx.closeness_centrality(G, k=sample_k)
+    else:
+        closeness_cent = nx.closeness_centrality(G)
+    
+    max_close = max(closeness_cent.values()) if closeness_cent else 1
+    
+    # Calculate Betweenness Centrality
+    G_undir = G.to_undirected()
+    betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
+    max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
+    
+    # Format GeoJSON - Edges (Betweenness)
+    edges_geojson = []
+    cmap_bet = cm.get_cmap('plasma')
+    
+    for u, v, k, data in G.edges(keys=True, data=True):
+        score = betweenness_cent.get(tuple(sorted((u, v))), 0)
+        norm_score = score / max_bet if max_bet > 0 else 0
         
-        if is_large_graph:
-            status_container.info(f"⚡ **Stage 3/5:** กำลังวิเคราะห์ Integration (โหนด {node_count:,} จุด - ใช้ Approximation)")
-            progress_bar.progress(0.60)
-            # Use sampling for large graphs (10x faster, 95%+ accuracy)
-            sample_k = min(NETWORK_CONFIG['closeness_sample_size'], node_count)
-            closeness_cent = nx.closeness_centrality(G, k=sample_k)
-        else:
-            status_container.info(f"🔢 **Stage 3/5:** กำลังวิเคราะห์ Integration (โหนด {node_count:,} จุด)")
-            progress_bar.progress(0.60)
-            closeness_cent = nx.closeness_centrality(G)
+        geom = mapping(data['geometry']) if 'geometry' in data else {
+            "type": "LineString",
+            "coordinates": [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+        }
         
-        max_close = max(closeness_cent.values()) if closeness_cent else 1
-        progress_bar.progress(0.70)
-        
-        # Stage 4: Calculate Betweenness Centrality (85%)
-        status_container.info(f"🛣️ **Stage 4/5:** กำลังวิเคราะห์ Betweenness (เส้นทาง {len(G.edges):,} เส้น)")
-        progress_bar.progress(0.75)
-        
-        G_undir = G.to_undirected() 
-        betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight='length')
-        max_bet = max(betweenness_cent.values()) if betweenness_cent else 1
-        progress_bar.progress(0.85)
-        
-        # Stage 5: Format GeoJSON (95%)
-        status_container.info("🎨 **Stage 5/5:** กำลังจัดรูปแบบข้อมูลสำหรับแสดงผล...")
-        progress_bar.progress(0.90)
-        
-        # 5.1 Edges (Betweenness)
-        edges_geojson = []
-        cmap_bet = cm.get_cmap('plasma') 
-
-        for u, v, k, data in G.edges(keys=True, data=True):
-            score = betweenness_cent.get(tuple(sorted((u, v))), 0)
-            norm_score = score / max_bet if max_bet > 0 else 0
-            
-            # Helper to extract geometry or create straight line
-            geom = mapping(data['geometry']) if 'geometry' in data else {
-                "type": "LineString",
-                "coordinates": [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+        edges_geojson.append({
+            "type": "Feature",
+            "geometry": geom,
+            "properties": {
+                "type": "road",
+                "betweenness": norm_score,
+                "color": colors.to_hex(cmap_bet(norm_score)),
+                "stroke_weight": NETWORK_CONFIG['edge_weight_base'] + (norm_score * NETWORK_CONFIG['edge_weight_multiplier'])
             }
-            
-            edges_geojson.append({
+        })
+    
+    # Format GeoJSON - Nodes (Closeness / Integration)
+    nodes_geojson = []
+    top_node_data = {"score": -1, "lat": 0, "lon": 0}
+    
+    for node, data in G.nodes(data=True):
+        score = closeness_cent.get(node, 0)
+        norm_score = score / max_close if max_close > 0 else 0
+        
+        if score > top_node_data["score"]:
+            top_node_data = {"lat": data['y'], "lon": data['x'], "score": score}
+        
+        if norm_score > NETWORK_CONFIG['min_closeness_threshold']:
+            nodes_geojson.append({
                 "type": "Feature",
-                "geometry": geom,
+                "geometry": {"type": "Point", "coordinates": [data['x'], data['y']]},
                 "properties": {
-                    "type": "road",
-                    "betweenness": norm_score,
-                    "color": colors.to_hex(cmap_bet(norm_score)),
-                    "stroke_weight": NETWORK_CONFIG['edge_weight_base'] + (norm_score * NETWORK_CONFIG['edge_weight_multiplier'])
+                    "type": "intersection",
+                    "closeness": norm_score,
+                    "color": "#000000",
+                    "radius": 2 + (norm_score * 6)
                 }
             })
+    
+    return {
+        "edges": {"type": "FeatureCollection", "features": edges_geojson},
+        "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
+        "top_node": top_node_data if top_node_data["score"] != -1 else None,
+        "stats": {
+            "nodes_count": len(G.nodes),
+            "edges_count": len(G.edges),
+            "used_approximation": is_large_graph,
+            "was_cached": was_cached
+        }
+    }
 
-        progress_bar.progress(0.95)
+def process_network_analysis_with_ui(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
+    """
+    UI wrapper that shows progress while computation runs.
+    Separates UI concerns from cached computation.
+    """
+    progress_bar = st.progress(0)
+    status_container = st.empty()
+    
+    try:
+        # Stage 1: Prepare (5%)
+        status_container.info("🔍 **Stage 1/3:** กำลังเตรียมข้อมูลพื้นที่...")
+        progress_bar.progress(0.05)
         
-        # 5.2 Nodes (Closeness / Integration)
-        nodes_geojson = []
-        top_node_data = {"score": -1, "lat": 0, "lon": 0}
-
-        for node, data in G.nodes(data=True):
-            score = closeness_cent.get(node, 0)
-            norm_score = score / max_close if max_close > 0 else 0
-            
-            # Update Top Node
-            if score > top_node_data["score"]:
-                top_node_data = {"lat": data['y'], "lon": data['x'], "score": score}
-            
-            # Filter distinct nodes for map clarity
-            if norm_score > NETWORK_CONFIG['min_closeness_threshold']: 
-                nodes_geojson.append({
-                    "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [data['x'], data['y']]},
-                    "properties": {
-                        "type": "intersection",
-                        "closeness": norm_score,
-                        "color": "#000000",
-                        "radius": 2 + (norm_score * 6)
-                    }
-                })
+        # Stage 2: Check cache status (10%)
+        cache_key = get_cache_key(polygon_wkt_str, network_type)
+        is_cached = load_graph_from_cache(cache_key) is not None
         
-        # Final stage complete
+        if is_cached:
+            status_container.success("✅ **พบข้อมูลใน Cache!** กำลังโหลด...")
+        else:
+            status_container.warning("⏳ **กำลังดาวน์โหลดข้อมูลครั้งแรก...** (อาจใช้เวลา 5-10 นาที)")
+        
+        progress_bar.progress(0.10)
+        
+        # Stage 3: Run computation (10% -> 90%)
+        status_container.info("🛣️ **Stage 2/3:** กำลังวิเคราะห์โครงข่ายถนน...")
+        progress_bar.progress(0.30)
+        
+        # Call the pure cached function
+        result = _compute_centrality(polygon_wkt_str, network_type)
+        
+        progress_bar.progress(0.90)
+        
+        # Stage 4: Complete (100%)
+        if "error" in result:
+            status_container.error(f"❌ {result['error']}")
+        else:
+            stats = result.get('stats', {})
+            status_container.success(f"✅ **สำเร็จ!** วิเคราะห์ {stats.get('nodes_count', 0):,} โหนด และ {stats.get('edges_count', 0):,} ถนน")
+        
         progress_bar.progress(1.0)
-        status_container.success(f"✅ **สำเร็จ!** วิเคราะห์ {node_count:,} โหนด และ {len(G.edges):,} ถนน")
-        time.sleep(1)  # Show success message briefly
         
-        # Clear progress indicators
+    finally:
+        # Always clean up UI elements
         progress_bar.empty()
         status_container.empty()
-            
-        return {
-            "edges": {"type": "FeatureCollection", "features": edges_geojson},
-            "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
-            "top_node": top_node_data if top_node_data["score"] != -1 else None,
-            "stats": {
-                "nodes_count": len(G.nodes), 
-                "edges_count": len(G.edges),
-                "used_approximation": is_large_graph,
-                "cached": G is not None
-            }
-        }
-
-    except ValueError as e:
-        return {"error": f"Invalid geometry: {str(e)}"}
-    except ox._errors.InsufficientResponseError:
-        return {"error": "No OSM data available for this area. Try a different location or larger region."}
-    except Exception as e:
-        return {"error": f"Network analysis failed: {str(e)}"}
+    
+    return result
 
 # ============================================================================
 # 3. STATE MANAGEMENT
@@ -828,17 +841,13 @@ def perform_calculation(active_list: List[Tuple[int, Dict]]):
         errors = []
         
         for act_idx, (orig_idx, marker) in enumerate(active_list):
-            features = fetch_api_data_cached(
+            # Use combined function to avoid double API call
+            features, error_msg = fetch_api_data_with_error(
                 st.session_state.api_key, st.session_state.travel_mode, 
                 ranges_str, marker['lat'], marker['lng']
             )
             
             if features is None:
-                # Fetch error details
-                _, error_msg = safe_fetch_isochrone(
-                    st.session_state.api_key, st.session_state.travel_mode,
-                    ranges_str, marker['lat'], marker['lng']
-                )
                 errors.append(f"จุดที่ {orig_idx + 1}: {error_msg}")
                 continue
             
@@ -885,8 +894,8 @@ def perform_network_analysis():
             if not combined_wkt:
                 return st.error("❌ No polygons to analyze.")
             
-            # 2. Process Data (cached by WKT hash)
-            result = process_network_analysis(combined_wkt)
+            # 2. Process Data with UI progress indicators
+            result = process_network_analysis_with_ui(combined_wkt)
             
             if "error" in result:
                 st.error(f"❌ Network Analysis Failed: {result['error']}")
