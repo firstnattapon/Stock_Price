@@ -4,13 +4,15 @@ from streamlit_folium import st_folium
 import requests
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
-from shapely import wkt  # Updated import for stability
+from shapely import wkt
 import json
 import networkx as nx
 import osmnx as ox
 import matplotlib.cm as cm
 import matplotlib.colors as colors
 from typing import List, Dict, Any, Optional, Tuple
+import time
+import hashlib
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
@@ -27,7 +29,7 @@ DEFAULT_CONFIG = {
     "JSON_URL": "https://raw.githubusercontent.com/firstnattapon/Stock_Price/refs/heads/main/Geoapify_Map/geoapify_cbd_project.json",
     "LAT": 20.219443,
     "LON": 100.403630,
-    "GEOAPIFY_KEY": "4eefdfb0b0d349e595595b9c03a69e3d", # Default key provided
+    "GEOAPIFY_KEY": "4eefdfb0b0d349e595595b9c03a69e3d",
     "LONGDO_KEY": "0a999afb0da60c5c45d010e9c171ffc8"
 }
 
@@ -62,6 +64,16 @@ TRAVEL_MODE_NAMES = {
 
 TIME_OPTIONS = [5, 10, 15, 20, 30, 45, 60]
 
+# Network Analysis Configuration
+NETWORK_CONFIG = {
+    'min_closeness_threshold': 0.0,  # Minimum closeness score to display nodes
+    'edge_weight_base': 2,  # Base width for edges
+    'edge_weight_multiplier': 4,  # Multiplier for normalized betweenness
+    'cache_ttl_seconds': 3600,  # Cache duration for API calls
+    'click_debounce_seconds': 0.5,  # Minimum time between map clicks
+    'click_distance_threshold_meters': 10  # Minimum distance to add new marker
+}
+
 # Keys to persist in config file
 SESSION_KEYS_TO_SAVE = [
     'api_key', 'map_style_name', 'travel_mode', 'time_intervals', 
@@ -84,6 +96,49 @@ def get_border_color(original_marker_idx: Optional[int]) -> str:
     """Determine border color based on marker index to differentiate sources."""
     if original_marker_idx is None: return '#3388ff'
     return HEX_COLORS[original_marker_idx % len(HEX_COLORS)]
+
+def calculate_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate approximate distance in meters using Haversine formula."""
+    from math import radians, sin, cos, sqrt, atan2
+    
+    R = 6371000  # Earth radius in meters
+    
+    lat1_rad, lon1_rad = radians(lat1), radians(lon1)
+    lat2_rad, lon2_rad = radians(lat2), radians(lon2)
+    
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    
+    a = sin(dlat/2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    
+    return R * c
+
+def should_add_marker(new_lat: float, new_lon: float) -> bool:
+    """
+    Robust debouncing logic to prevent duplicate markers.
+    Returns True if marker should be added, False otherwise.
+    """
+    last_click = st.session_state.get('last_processed_click')
+    
+    if last_click is None:
+        return True
+    
+    # Check time threshold
+    time_diff = time.time() - last_click['timestamp']
+    if time_diff < NETWORK_CONFIG['click_debounce_seconds']:
+        return False
+    
+    # Check distance threshold
+    distance = calculate_distance_meters(
+        last_click['lat'], last_click['lon'],
+        new_lat, new_lon
+    )
+    
+    if distance < NETWORK_CONFIG['click_distance_threshold_meters']:
+        return False
+    
+    return True
 
 def calculate_intersection(features: List[Dict], num_active_markers: int) -> Optional[Dict]:
     """Calculate the geometric intersection (CBD) of isochrones."""
@@ -109,28 +164,76 @@ def calculate_intersection(features: List[Dict], num_active_markers: int) -> Opt
     except Exception:
         return None
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_api_data_cached(api_key: str, travel_mode: str, ranges_str: str, marker_lat: float, marker_lon: float) -> Optional[List[Dict]]:
-    """Fetch isochrone data from Geoapify API."""
+def safe_fetch_isochrone(api_key: str, travel_mode: str, ranges_str: str, 
+                         marker_lat: float, marker_lon: float) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    """
+    Safely fetch isochrone data with proper error handling.
+    Returns: (features_list, error_message)
+    """
     url = "https://api.geoapify.com/v1/isoline"
     params = {
         "lat": marker_lat, "lon": marker_lon, 
         "type": "time", "mode": travel_mode, 
         "range": ranges_str, "apiKey": api_key
     }
+    
     try:
         response = requests.get(url, params=params, timeout=15)
+        
         if response.status_code == 200:
-            return response.json().get('features', [])
-        return None
-    except Exception:
-        return None
+            data = response.json()
+            features = data.get('features')
+            
+            if features is None:
+                return None, "API response missing 'features' data"
+            
+            return features, None
+            
+        elif response.status_code == 401:
+            return None, "❌ Invalid API Key - Please check your Geoapify API key"
+        elif response.status_code == 403:
+            return None, "❌ API Key Forbidden - Check your account permissions"
+        elif response.status_code == 429:
+            return None, "⚠️ Rate Limit Exceeded - Please wait before retrying"
+        else:
+            return None, f"API Error (Status {response.status_code}): {response.text[:100]}"
+            
+    except requests.Timeout:
+        return None, "⏱️ Request Timeout - API took too long to respond"
+    except requests.ConnectionError:
+        return None, "🌐 Connection Error - Check your internet connection"
+    except requests.RequestException as e:
+        return None, f"Network Error: {str(e)}"
+    except json.JSONDecodeError:
+        return None, "Invalid JSON response from API"
+    except Exception as e:
+        return None, f"Unexpected Error: {str(e)}"
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
+def fetch_api_data_cached(api_key: str, travel_mode: str, ranges_str: str, 
+                          marker_lat: float, marker_lon: float) -> Optional[List[Dict]]:
+    """Cached wrapper for API calls - returns features or None."""
+    features, error = safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    return features  # Cache will store None on error, which is acceptable
+
+@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
+def union_all_polygons(features_json_str: str) -> str:
+    """
+    Union all polygon features and return WKT string for stable caching.
+    Takes JSON string to ensure hashable input for Streamlit cache.
+    """
+    features = json.loads(features_json_str)
+    polys = [shape(f['geometry']) for f in features]
+    if not polys:
+        return ""
+    combined = unary_union(polys)
+    return combined.wkt
+
+@st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG['cache_ttl_seconds'])
 def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') -> Dict[str, Any]:
     """
-    Downloads OSM road network Within the given Polygon (WKT String) and calculates Centrality.
-    Refactored for readability while maintaining exact logic.
+    Downloads OSM road network within the given Polygon (WKT String) and calculates Centrality.
+    Cached by polygon WKT hash for performance.
     """
     try:
         # 1. Load Geometry & Download Graph
@@ -138,7 +241,7 @@ def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') 
         G = ox.graph_from_polygon(polygon_geom, network_type=network_type, truncate_by_edge=True)
         
         if len(G.nodes) < 2:
-            return {"error": "Not enough nodes found in the area."}
+            return {"error": "Not enough nodes found in the area. Try a larger region or check if OSM data is available."}
 
         # 2. Calculate Centrality Measures
         # Closeness (Node-based): How easy is it to reach this node?
@@ -172,7 +275,7 @@ def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') 
                     "type": "road",
                     "betweenness": norm_score,
                     "color": colors.to_hex(cmap_bet(norm_score)),
-                    "stroke_weight": 2 + (norm_score * 4)
+                    "stroke_weight": NETWORK_CONFIG['edge_weight_base'] + (norm_score * NETWORK_CONFIG['edge_weight_multiplier'])
                 }
             })
 
@@ -189,14 +292,14 @@ def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') 
                 top_node_data = {"lat": data['y'], "lon": data['x'], "score": score}
             
             # Filter distinct nodes for map clarity
-            if norm_score > 0.0: 
+            if norm_score > NETWORK_CONFIG['min_closeness_threshold']: 
                 nodes_geojson.append({
                     "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [data['x'], data['y']]},
                     "properties": {
                         "type": "intersection",
                         "closeness": norm_score,
-                        "color": "#000000", # Fixed black as per original
+                        "color": "#000000",
                         "radius": 2 + (norm_score * 6)
                     }
                 })
@@ -208,8 +311,12 @@ def process_network_analysis(polygon_wkt_str: str, network_type: str = 'drive') 
             "stats": {"nodes_count": len(G.nodes), "edges_count": len(G.edges)}
         }
 
+    except ValueError as e:
+        return {"error": f"Invalid geometry: {str(e)}"}
+    except ox._errors.InsufficientResponseError:
+        return {"error": "No OSM data available for this area. Try a different location or larger region."}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Network analysis failed: {str(e)}"}
 
 # ============================================================================
 # 3. STATE MANAGEMENT
@@ -221,7 +328,8 @@ def initialize_session_state():
         'markers': [{'lat': DEFAULT_CONFIG['LAT'], 'lng': DEFAULT_CONFIG['LON'], 'active': True}],
         'isochrone_data': None,
         'intersection_data': None,
-        'network_data': None, 
+        'network_data': None,
+        'last_processed_click': None,  # For click debouncing: {'timestamp': float, 'lat': float, 'lon': float}
         'colors': {'step1': '#2A9D8F', 'step2': '#E9C46A', 'step3': '#F4A261', 'step4': '#D62828'},
         'api_key': DEFAULT_CONFIG['GEOAPIFY_KEY'],
         'map_style_name': "Esri Light Gray (แนะนำสำหรับดูผังเมือง)",
@@ -247,26 +355,41 @@ def initialize_session_state():
         except Exception: 
             pass
 
-    # Apply defaults
+    # Apply defaults using setdefault pattern
     for key, value in default_state.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+        st.session_state.setdefault(key, value)
 
     # Ensure 'active' key exists in markers
     for m in st.session_state.markers:
         m.setdefault('active', True)
 
-def clear_results(keep_network: bool = False):
-    """Clear calculation results to force re-computation on data change."""
-    st.session_state.isochrone_data = None
-    st.session_state.intersection_data = None
-    if not keep_network:
-        st.session_state.network_data = None 
+def clear_results(layers: Optional[List[str]] = None):
+    """
+    Smart cache invalidation - clear only specified layers.
+    
+    Args:
+        layers: List of layers to clear. Options: ['isochrone', 'intersection', 'network']
+                If None, clears all layers.
+    """
+    if layers is None:
+        layers = ['isochrone', 'intersection', 'network']
+    
+    if 'isochrone' in layers:
+        st.session_state.isochrone_data = None
+    if 'intersection' in layers:
+        st.session_state.intersection_data = None
+    if 'network' in layers:
+        st.session_state.network_data = None
 
 def reset_state():
     """Reset to factory defaults."""
     st.session_state.markers = [{'lat': DEFAULT_CONFIG['LAT'], 'lng': DEFAULT_CONFIG['LON'], 'active': True}]
+    st.session_state.last_processed_click = None
     clear_results()
+
+def get_active_markers() -> List[Tuple[int, Dict]]:
+    """Pure function to extract active markers with their original indices."""
+    return [(i, m) for i, m in enumerate(st.session_state.markers) if m.get('active', True)]
 
 # ============================================================================
 # 4. UI COMPONENTS
@@ -283,6 +406,7 @@ def add_wms_layer(m: folium.Map, layers: str, name: str, show: bool, opacity: fl
     ).add_to(m)
 
 def render_sidebar():
+    """Render sidebar UI and return button states with active marker list."""
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
         
@@ -306,7 +430,8 @@ def render_sidebar():
                     clear_results()
                     st.toast("✅ โหลดการตั้งค่าสำเร็จ!", icon="💾")
                     st.rerun()
-                except Exception as e: st.error(f"Error: {e}")
+                except Exception as e: 
+                    st.error(f"Error loading config: {e}")
 
         st.markdown("---")
         
@@ -318,9 +443,10 @@ def render_sidebar():
                 try:
                     lat_str, lng_str = coords_input.strip().split(',')
                     st.session_state.markers.append({'lat': float(lat_str), 'lng': float(lng_str), 'active': True})
-                    clear_results()
+                    clear_results(['isochrone', 'intersection'])
                     st.rerun()
-                except: st.error("Format: Lat, Lng")
+                except: 
+                    st.error("Format: Lat, Lng")
             
         st.text_input("Geoapify API Key", key="api_key", type="password")
         
@@ -328,29 +454,36 @@ def render_sidebar():
         c1, c2 = st.columns(2)
         if c1.button("❌ ลบจุดล่าสุด", use_container_width=True) and st.session_state.markers:
             st.session_state.markers.pop()
-            clear_results()
+            clear_results(['isochrone', 'intersection'])
             st.rerun()
         if c2.button("🔄 รีเซ็ต", use_container_width=True):
             reset_state()
             st.rerun()
 
         # --- Marker List ---
-        active_list = [(i, m) for i, m in enumerate(st.session_state.markers) if m.get('active', True)]
+        active_list = get_active_markers()
         st.write(f"📍 Active Markers: **{len(active_list)}**")
         
         if st.session_state.markers:
             st.markdown("---")
             for i, m in enumerate(st.session_state.markers):
                 col1, col2, col3 = st.columns([0.15, 0.70, 0.15])
-                is_active = col1.checkbox(" ", value=m.get('active', True), key=f"active_chk_{i}", label_visibility="collapsed")
-                st.session_state.markers[i]['active'] = is_active
+                
+                # Track previous state for change detection
+                prev_active = m.get('active', True)
+                is_active = col1.checkbox(" ", value=prev_active, key=f"active_chk_{i}", label_visibility="collapsed")
+                
+                # Only clear isochrone/intersection if marker state changed, preserve network
+                if is_active != prev_active:
+                    st.session_state.markers[i]['active'] = is_active
+                    clear_results(['isochrone', 'intersection'])
                 
                 style = f"color:{MARKER_COLORS[i % len(MARKER_COLORS)]}; font-weight:bold;" if is_active else "color:gray; text-decoration:line-through;"
                 col2.markdown(f"<span style='{style}'>● จุดที่ {i+1}</span> <span style='font-size:0.8em'>({m['lat']:.4f}, {m['lng']:.4f})</span>", unsafe_allow_html=True)
                 
                 if col3.button("✕", key=f"del_btn_{i}"):
                     st.session_state.markers.pop(i)
-                    clear_results()
+                    clear_results(['isochrone', 'intersection'])
                     st.rerun()
 
         st.markdown("---")
@@ -376,7 +509,7 @@ def render_sidebar():
                 
                 if st.button("➕ เพิ่มจุดนี้ลงในรายการ", use_container_width=True, type="secondary"):
                     st.session_state.markers.append({'lat': top['lat'], 'lng': top['lon'], 'active': True})
-                    clear_results()
+                    clear_results(['isochrone', 'intersection'])
                     st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
                     st.rerun()
 
@@ -406,31 +539,53 @@ def render_sidebar():
             st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals")
             
         do_calc = st.button("🧩 คำนวณหา Isochrone CBD", type="primary", use_container_width=True)
-        return do_calc, do_network, active_list
+        
+    return do_calc, do_network, active_list
 
-def perform_calculation(active_list):
-    """Business Logic: Calculate Isochrones and Intersection."""
-    if not st.session_state.api_key: return st.warning("กรุณาใส่ API Key")
-    if not active_list: return st.warning("กรุณาเลือกจุดอย่างน้อย 1 จุด")
-    if not st.session_state.time_intervals: return st.warning("กรุณาเลือกช่วงเวลา")
+def perform_calculation(active_list: List[Tuple[int, Dict]]):
+    """Business Logic: Calculate Isochrones and Intersection with proper error handling."""
+    # Validation
+    if not st.session_state.api_key: 
+        return st.warning("⚠️ กรุณาใส่ API Key")
+    if not active_list: 
+        return st.warning("⚠️ กรุณาเลือกจุดอย่างน้อย 1 จุด")
+    if not st.session_state.time_intervals: 
+        return st.warning("⚠️ กรุณาเลือกช่วงเวลา")
 
     with st.spinner('กำลังคำนวณ Isochrone...'):
         all_features = []
         ranges_str = ",".join(str(t * 60) for t in sorted(st.session_state.time_intervals))
+        errors = []
         
         for act_idx, (orig_idx, marker) in enumerate(active_list):
             features = fetch_api_data_cached(
                 st.session_state.api_key, st.session_state.travel_mode, 
                 ranges_str, marker['lat'], marker['lng']
             )
-            if features:
-                for f in features:
-                    f['properties'].update({
-                        'travel_time_minutes': f['properties'].get('value', 0) / 60,
-                        'original_index': orig_idx,
-                        'active_index': act_idx
-                    })
-                    all_features.append(f)
+            
+            if features is None:
+                # Fetch error details
+                _, error_msg = safe_fetch_isochrone(
+                    st.session_state.api_key, st.session_state.travel_mode,
+                    ranges_str, marker['lat'], marker['lng']
+                )
+                errors.append(f"จุดที่ {orig_idx + 1}: {error_msg}")
+                continue
+            
+            for f in features:
+                f['properties'].update({
+                    'travel_time_minutes': f['properties'].get('value', 0) / 60,
+                    'original_index': orig_idx,
+                    'active_index': act_idx
+                })
+                all_features.append(f)
+        
+        # Display errors if any
+        if errors:
+            for error in errors:
+                st.error(error)
+            if not all_features:
+                return  # All requests failed
         
         if all_features:
             st.session_state.isochrone_data = {"type": "FeatureCollection", "features": all_features}
@@ -447,29 +602,33 @@ def perform_calculation(active_list):
                 st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน")
 
 def perform_network_analysis():
-    """Business Logic: Execute Network Analysis."""
-    if not st.session_state.isochrone_data: return st.error("No Isochrone data found.")
+    """Business Logic: Execute Network Analysis with enhanced error handling."""
+    if not st.session_state.isochrone_data: 
+        return st.error("❌ No Isochrone data found. Please calculate isochrones first.")
     
     with st.spinner('กำลังรวมพื้นที่และวิเคราะห์โครงข่ายถนน (OSMnx)... อาจใช้เวลาสักครู่'):
         try:
-            # 1. Union All Travel Polygons
-            feats = st.session_state.isochrone_data.get('features', [])
-            polys = [shape(f['geometry']) for f in feats]
-            if not polys: return st.error("No polygons to analyze.")
-            combined_polygon = unary_union(polys)
+            # 1. Union All Travel Polygons using cached function
+            feats_json = json.dumps(st.session_state.isochrone_data.get('features', []))
+            combined_wkt = union_all_polygons(feats_json)
             
-            # 2. Process Data
-            result = process_network_analysis(combined_polygon.wkt)
+            if not combined_wkt:
+                return st.error("❌ No polygons to analyze.")
+            
+            # 2. Process Data (cached by WKT hash)
+            result = process_network_analysis(combined_wkt)
             
             if "error" in result:
-                st.error(f"Analysis Failed: {result['error']}")
+                st.error(f"❌ Network Analysis Failed: {result['error']}")
+                st.info("💡 **Tips:**\n- Try a larger area\n- Check if the location has road data in OpenStreetMap\n- Verify internet connection")
             else:
                 st.session_state.network_data = result
                 score_info = f"Score: {result['top_node']['score']:.4f}" if result.get('top_node') else ""
-                st.toast(f"Analysis Completed! {score_info}", icon="🏆")
+                st.toast(f"✅ Analysis Completed! {score_info}", icon="🏆")
                 
         except Exception as e:
-            st.error(f"Processing Error: {e}")
+            st.error(f"❌ Processing Error: {e}")
+            st.info("💡 If the error persists, try a different location or smaller time intervals.")
 
 def render_map():
     """Render Folium Map with all layers."""
@@ -487,7 +646,7 @@ def render_map():
 
     # --- Network Analysis Layers ---
     net_data = st.session_state.network_data
-    if net_data:
+    if net_data and 'error' not in net_data:
         # Edges (Betweenness)
         if st.session_state.show_betweenness and net_data.get("edges"):
             folium.GeoJson(
@@ -575,14 +734,19 @@ def main():
         
     map_output = render_map()
     
-    # Handle map clicks for adding markers
+    # Handle map clicks for adding markers with robust debouncing
     if map_output and map_output.get('last_clicked'):
         clicked = map_output['last_clicked']
-        # Simple debounce check: don't add if it's the exact same coordinate as the last one
-        last_marker = st.session_state.markers[-1] if st.session_state.markers else None
-        if not last_marker or abs(clicked['lat'] - last_marker['lat']) > 1e-5 or abs(clicked['lng'] - last_marker['lng']) > 1e-5:
+        
+        if should_add_marker(clicked['lat'], clicked['lng']):
+            # Add marker and update last click tracker
             st.session_state.markers.append({'lat': clicked['lat'], 'lng': clicked['lng'], 'active': True})
-            clear_results()
+            st.session_state.last_processed_click = {
+                'timestamp': time.time(),
+                'lat': clicked['lat'],
+                'lon': clicked['lng']
+            }
+            clear_results(['isochrone', 'intersection'])
             st.rerun()
 
 if __name__ == "__main__":
