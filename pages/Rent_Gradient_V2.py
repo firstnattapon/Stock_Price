@@ -16,6 +16,8 @@ import hashlib
 import pickle
 import os
 from pathlib import Path
+import zipfile
+import io
 
 # ============================================================================
 # 1. CONSTANTS & CONFIGURATION
@@ -294,6 +296,83 @@ def clear_cache():
                 cache_file.unlink()
             except Exception:
                 pass
+
+def export_cache_as_zip() -> Optional[bytes]:
+    """
+    สร้าง ZIP file ของ cache ทั้งหมดสำหรับ download.
+    Returns: bytes ของ ZIP file หรือ None ถ้าไม่มี cache
+    """
+    if not CACHE_DIR.exists():
+        return None
+    
+    cache_files = list(CACHE_DIR.glob("osm_graph_*.pkl"))
+    if not cache_files:
+        return None
+    
+    # สร้าง ZIP ใน memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for cache_file in cache_files:
+            zf.write(cache_file, cache_file.name)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
+    """
+    นำเข้า cache จาก ZIP file ที่อัปโหลด.
+    Returns: Dict with 'success', 'imported', 'skipped', 'errors'
+    """
+    result = {
+        'success': False,
+        'imported': 0,
+        'skipped': 0,
+        'errors': []
+    }
+    
+    try:
+        # Ensure cache directory exists
+        CACHE_DIR.mkdir(exist_ok=True)
+        
+        zip_buffer = io.BytesIO(zip_bytes)
+        with zipfile.ZipFile(zip_buffer, 'r') as zf:
+            for file_info in zf.infolist():
+                # Validate filename pattern
+                if not file_info.filename.startswith('osm_graph_') or not file_info.filename.endswith('.pkl'):
+                    result['errors'].append(f"Skipped invalid file: {file_info.filename}")
+                    continue
+                
+                target_path = CACHE_DIR / file_info.filename
+                
+                # Skip if file already exists
+                if target_path.exists():
+                    result['skipped'] += 1
+                    continue
+                
+                # Extract and validate
+                try:
+                    data = zf.read(file_info.filename)
+                    
+                    # Validate pickle format
+                    test_buffer = io.BytesIO(data)
+                    pickle.load(test_buffer)  # Just validate, discard result
+                    
+                    # Save to cache
+                    with open(target_path, 'wb') as f:
+                        f.write(data)
+                    result['imported'] += 1
+                    
+                except Exception as e:
+                    result['errors'].append(f"Failed to import {file_info.filename}: {str(e)}")
+        
+        result['success'] = result['imported'] > 0 or result['skipped'] > 0
+        
+    except zipfile.BadZipFile:
+        result['errors'].append("Invalid ZIP file format")
+    except Exception as e:
+        result['errors'].append(f"Import failed: {str(e)}")
+    
+    return result
 
 # ============================================================================
 # OPTIMIZED NETWORK ANALYSIS WITH PROGRESS INDICATORS
@@ -635,16 +714,52 @@ def render_sidebar():
             else:
                 st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
             
-            # Cache Statistics
+            # Cache Management Section
             cache_stats = get_cache_stats()
+            st.markdown("##### 💾 Cache Management")
+            
             if cache_stats['count'] > 0:
-                st.caption(f"💾 **Cache:** {cache_stats['count']} ไฟล์ ({cache_stats['size_mb']:.1f} MB)")
+                st.caption(f"📊 **{cache_stats['count']} ไฟล์** ({cache_stats['size_mb']:.1f} MB)")
+                
+                # Export Cache Button
+                zip_data = export_cache_as_zip()
+                if zip_data:
+                    st.download_button(
+                        "📤 Export Cache (.zip)",
+                        data=zip_data,
+                        file_name="osmnx_cache.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+                
+                # Clear Cache Button
                 if st.button("🗑️ ล้าง Cache", use_container_width=True, type="secondary"):
                     clear_cache()
                     st.toast("ล้าง Cache สำเร็จ!", icon="✅")
                     st.rerun()
             else:
-                st.caption("💾 **Cache:** ว่างเปล่า")
+                st.caption("📊 **Cache ว่างเปล่า**")
+            
+            # Import Cache Section
+            st.markdown("---")
+            uploaded_cache = st.file_uploader(
+                "📥 Import Cache (.zip)", 
+                type=["zip"], 
+                key="cache_uploader",
+                label_visibility="visible"
+            )
+            if uploaded_cache:
+                if st.button("✅ ยืนยันการนำเข้า", use_container_width=True, type="primary"):
+                    result = import_cache_from_zip(uploaded_cache.read())
+                    if result['success']:
+                        msg = f"นำเข้าสำเร็จ! ({result['imported']} ใหม่, {result['skipped']} ข้าม)"
+                        st.toast(msg, icon="✅")
+                        st.rerun()
+                    else:
+                        for err in result['errors']:
+                            st.error(err)
+            
+            st.markdown("---")
             
             do_network = st.button("🚀 Run Network Analysis", use_container_width=True, disabled=not can_analyze)
 
