@@ -83,7 +83,20 @@ NETWORK_CONFIG = {
     'click_debounce_seconds': 0.5,  # Minimum time between map clicks
     'click_distance_threshold_meters': 10,  # Minimum distance to add new marker
     'large_graph_threshold': 2000,  # Node count threshold for approximation algorithms
-    'closeness_sample_size': 200  # Sample size for closeness approximation
+}
+
+# Timeout constants (seconds)
+TIMEOUT_API = 15
+TIMEOUT_INIT = 3
+TIMEOUT_GITHUB_LIST = 10
+TIMEOUT_GITHUB_DOWNLOAD = 60
+
+# Map Geoapify travel_mode -> OSMnx network_type
+TRAVEL_MODE_TO_NETWORK_TYPE = {
+    'drive': 'drive',
+    'walk': 'walk',
+    'bicycle': 'bike',
+    'transit': 'drive',  # OSMnx has no transit; fallback to drive
 }
 
 # Keys to persist in config file
@@ -188,7 +201,7 @@ def safe_fetch_isochrone(api_key: str, travel_mode: str, ranges_str: str,
     }
     
     try:
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=TIMEOUT_API)
         
         if response.status_code == 200:
             data = response.json()
@@ -387,7 +400,7 @@ def fetch_github_cache_list() -> List[Dict[str, str]]:
     Returns: List of dicts with 'name' and 'download_url' keys
     """
     try:
-        response = requests.get(GITHUB_CACHE_CONFIG["api_url"], timeout=10)
+        response = requests.get(GITHUB_CACHE_CONFIG["api_url"], timeout=TIMEOUT_GITHUB_LIST)
         if response.status_code != 200:
             return []
         
@@ -412,7 +425,7 @@ def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[
     Returns: (zip_bytes, error_message)
     """
     try:
-        response = requests.get(download_url, timeout=60)
+        response = requests.get(download_url, timeout=TIMEOUT_GITHUB_DOWNLOAD)
         if response.status_code == 200:
             return response.content, None
         else:
@@ -487,7 +500,10 @@ def _compute_centrality(polygon_wkt_str: str, network_type: str = 'drive') -> Di
     
     # Format GeoJSON - Edges (Betweenness)
     edges_geojson = []
-    cmap_bet = cm.get_cmap('plasma')
+    try:
+        cmap_bet = cm.colormaps['plasma']
+    except AttributeError:
+        cmap_bet = cm.get_cmap('plasma')  # fallback for older matplotlib
     
     for u, v, k, data in G.edges(keys=True, data=True):
         score = betweenness_cent.get(tuple(sorted((u, v))), 0)
@@ -622,7 +638,7 @@ def initialize_session_state():
     # Load initial data from JSON if markers are missing
     if 'markers' not in st.session_state:
         try:
-            resp = requests.get(DEFAULT_CONFIG['JSON_URL'], timeout=3)
+            resp = requests.get(DEFAULT_CONFIG['JSON_URL'], timeout=TIMEOUT_INIT)
             if resp.status_code == 200:
                 data = resp.json()
                 # Update defaults with remote data if available
@@ -779,16 +795,17 @@ def render_sidebar():
             if cache_stats['count'] > 0:
                 st.caption(f"📊 **{cache_stats['count']} ไฟล์** ({cache_stats['size_mb']:.1f} MB)")
                 
-                # Export Cache Button
-                zip_data = export_cache_as_zip()
-                if zip_data:
-                    st.download_button(
-                        "📤 Export Cache (.zip)",
-                        data=zip_data,
-                        file_name="osmnx_cache.zip",
-                        mime="application/zip",
-                        use_container_width=True
-                    )
+                # Export Cache Button (lazy: only generate ZIP when clicked)
+                if st.button("📤 Export Cache (.zip)", use_container_width=True, key="export_cache_btn"):
+                    zip_data = export_cache_as_zip()
+                    if zip_data:
+                        st.download_button(
+                            "� Download Ready",
+                            data=zip_data,
+                            file_name="osmnx_cache.zip",
+                            mime="application/zip",
+                            use_container_width=True
+                        )
                 
                 # Clear Cache Button
                 if st.button("🗑️ ล้าง Cache", use_container_width=True, type="secondary"):
@@ -909,12 +926,15 @@ def render_sidebar():
 def perform_calculation(active_list: List[Tuple[int, Dict]]):
     """Business Logic: Calculate Isochrones and Intersection with proper error handling."""
     # Validation
-    if not st.session_state.api_key: 
-        return st.warning("⚠️ กรุณาใส่ API Key")
-    if not active_list: 
-        return st.warning("⚠️ กรุณาเลือกจุดอย่างน้อย 1 จุด")
-    if not st.session_state.time_intervals: 
-        return st.warning("⚠️ กรุณาเลือกช่วงเวลา")
+    if not st.session_state.api_key:
+        st.warning("⚠️ กรุณาใส่ API Key")
+        return
+    if not active_list:
+        st.warning("⚠️ กรุณาเลือกจุดอย่างน้อย 1 จุด")
+        return
+    if not st.session_state.time_intervals:
+        st.warning("⚠️ กรุณาเลือกช่วงเวลา")
+        return
 
     with st.spinner('กำลังคำนวณ Isochrone...'):
         all_features = []
@@ -956,15 +976,16 @@ def perform_calculation(active_list: List[Tuple[int, Dict]]):
                     "type": "FeatureCollection", 
                     "features": [{"type": "Feature", "geometry": cbd_geom, "properties": {"type": "cbd"}}]
                 }
-                st.success("✅ พบพื้นที่ CBD!")
+                st.toast("✅ พบพื้นที่ CBD!", icon="🎯")
             else:
                 st.session_state.intersection_data = None
-                st.warning("⚠️ ไม่พบพื้นที่ทับซ้อน")
+                st.toast("⚠️ ไม่พบพื้นที่ทับซ้อน", icon="⚠️")
 
 def perform_network_analysis():
     """Business Logic: Execute Network Analysis with enhanced error handling."""
-    if not st.session_state.isochrone_data: 
-        return st.error("❌ No Isochrone data found. Please calculate isochrones first.")
+    if not st.session_state.isochrone_data:
+        st.error("❌ No Isochrone data found. Please calculate isochrones first.")
+        return
     
     with st.spinner('กำลังรวมพื้นที่และวิเคราะห์โครงข่ายถนน (OSMnx)... อาจใช้เวลาสักครู่'):
         try:
@@ -976,7 +997,8 @@ def perform_network_analysis():
                 return st.error("❌ No polygons to analyze.")
             
             # 2. Process Data with UI progress indicators
-            result = process_network_analysis_with_ui(combined_wkt)
+            net_type = TRAVEL_MODE_TO_NETWORK_TYPE.get(st.session_state.travel_mode, 'drive')
+            result = process_network_analysis_with_ui(combined_wkt, net_type)
             
             if "error" in result:
                 st.error(f"❌ Network Analysis Failed: {result['error']}")
