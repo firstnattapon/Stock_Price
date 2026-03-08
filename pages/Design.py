@@ -1,5 +1,5 @@
 """
-PYTRON – Architecture Design Framework v2.0
+PYTRON – Architecture Design Framework v2.1
 Simple · Stable · Fast
 
 8-stage pipeline from site intelligence to construction documentation.
@@ -347,32 +347,59 @@ with st.sidebar:
 
         st.markdown("---")
 
-        # AI Response Import
+        # AI Response Import (supports v2.0 flat + v2.1 nested stage_XX_output)
         ai_upload = st.file_uploader("⬆ Import AI Response JSON", type=["json"], key="ai_resp_upload")
         if ai_upload:
             try:
                 ai_data = json.load(ai_upload)
+                # --- Detect v2.1 nested format ---
+                is_v21 = "stage_02_output" in ai_data
+                if is_v21:
+                    s02 = ai_data.get("stage_02_output", {})
+                    s03 = ai_data.get("stage_03_output", {})
+                    s04 = ai_data.get("stage_04_output", {})
+                    new_rooms = s02.get("optimized_rooms", [])
+                    new_adj = s04.get("adjacency_matrix", [])
+                    new_groups = s02.get("space_groups_optimized", [])
+                    circ_val = s03.get("circulation_factor_recommended")
+                else:
+                    new_rooms = ai_data.get("optimized_rooms", [])
+                    new_adj = ai_data.get("adjacency_matrix", [])
+                    new_groups = ai_data.get("space_groups_optimized", [])
+                    circ_val = ai_data.get("circulation_factor_recommended")
+
                 errors = []
-                if "optimized_rooms" not in ai_data:
+                if not new_rooms:
                     errors.append("Missing 'optimized_rooms'")
-                if "adjacency_matrix" not in ai_data:
+                if not new_adj:
                     errors.append("Missing 'adjacency_matrix'")
                 if errors:
                     st.error("Validation failed: " + ", ".join(errors))
                 else:
-                    new_rooms = ai_data["optimized_rooms"]
-                    new_adj = ai_data["adjacency_matrix"]
                     if len(new_adj) != len(new_rooms):
                         st.error(f"Room count ({len(new_rooms)}) != adjacency matrix size ({len(new_adj)})")
                     else:
                         st.session_state["rooms"] = new_rooms
                         st.session_state["adj_matrix"] = new_adj
-                        if "circulation_factor_recommended" in ai_data:
-                            st.session_state["circ_pct"] = float(ai_data["circulation_factor_recommended"]) * 100
-                        if "space_groups_optimized" in ai_data:
-                            st.session_state["space_groups"] = ai_data["space_groups_optimized"]
+                        if circ_val is not None:
+                            cv = float(circ_val)
+                            st.session_state["circ_pct"] = cv * 100 if cv < 1 else cv
+                        if new_groups:
+                            st.session_state["space_groups"] = new_groups
+                        # v2.1 extra stage data
+                        if is_v21:
+                            st.session_state["ai_stage_data"] = {
+                                "stage_03": s03,
+                                "stage_04": s04,
+                                "network": ai_data.get("stage_05_output", {}),
+                                "schematic": ai_data.get("stage_06_output", {}),
+                            }
+                            st.session_state["ai_verdict"] = ai_data.get("overall_design_verdict", {})
+                            st.session_state["ai_warnings"] = ai_data.get("professional_warnings", [])
+                            st.session_state["ai_principles"] = ai_data.get("design_principles_applied", [])
                         st.session_state["ai_response_imported"] = True
-                        st.success(f"✅ Imported {len(new_rooms)} rooms, adjacency auto-filled, circ={st.session_state['circ_pct']:.0f}%")
+                        ver = "v2.1" if is_v21 else "v2.0"
+                        st.success(f"✅ [{ver}] Imported {len(new_rooms)} rooms, circ={st.session_state['circ_pct']:.0f}%")
                         st.rerun()
             except Exception as e:
                 st.error(f"Import failed: {e}")
@@ -805,9 +832,37 @@ elif stage_idx == 4:
         with mc4:
             st.markdown(f'<div class="metric-glow"><h3>Connectivity</h3><p>{connectivity_score:.2f}</p></div>', unsafe_allow_html=True)
 
+        # AI Network Analysis (v2.1)
+        ai_net = st.session_state.get("ai_stage_data", {}).get("network", {})
+        if ai_net:
+            st.divider()
+            st.markdown("##### 🤖 AI Network Analysis")
+            hub_rooms = ai_net.get("hub_rooms", [])
+            if hub_rooms:
+                st.info(f"**Hub rooms:** {', '.join(hub_rooms)}")
+            clusters = ai_net.get("zone_clusters", [])
+            if clusters:
+                for cl in clusters:
+                    cname = cl.get("cluster_name_th", cl.get("cluster_name", ""))
+                    rooms_list = ", ".join(cl.get("rooms", []))
+                    cohesion = cl.get("internal_cohesion", "")
+                    st.markdown(f'<div class="pytron-card"><b>{cname}</b> ({cl.get("zone_type","")})<br>Rooms: {rooms_list}<br>Cohesion: {cohesion}</div>', unsafe_allow_html=True)
+            cpaths = ai_net.get("critical_paths", [])
+            if cpaths:
+                with st.expander("🛤️ Critical Paths", expanded=False):
+                    for cp in cpaths:
+                        arrow = " → ".join(cp.get("path", []))
+                        st.markdown(f"**{cp.get('importance','')}**: {arrow}")
+                        st.caption(cp.get("path_name_th", ""))
+            verdict = ai_net.get("spatial_network_quality_verdict", {})
+            if verdict:
+                st.success(f"Network Quality: **{verdict.get('score_label', '')}**")
+                for sug in verdict.get("improvement_suggestions_th", []):
+                    st.caption(f"💡 {sug}")
+
 
 # ═════════════════════════════════════════════════════════════════════
-# STAGE 06 – SCHEMATIC DESIGN (UNCHANGED)
+# STAGE 06 – SCHEMATIC DESIGN (v2.1: AI Schematic Data)
 # ═════════════════════════════════════════════════════════════════════
 elif stage_idx == 5:
     st.markdown('<div class="stage-badge">Stage 06</div>', unsafe_allow_html=True)
@@ -835,14 +890,105 @@ elif stage_idx == 5:
         est_floors = math.ceil(grand_total / max_footprint) if max_footprint > 0 else 1
         per_floor = grand_total / est_floors
 
+        # Use AI grid if available
+        ai_sch = st.session_state.get("ai_stage_data", {}).get("schematic", {})
+        grid_opts = ["4×4 m","5×6 m","4×6 m","6×6 m","8×8 m","6×9 m","8×12 m"]
+        ai_grid = ai_sch.get("recommended_structural_grid", "")
+        default_gi = grid_opts.index(ai_grid) if ai_grid in grid_opts else 0
+
         gc1, gc2, gc3 = st.columns(3)
         with gc1:
-            st.markdown(f'<div class="metric-glow"><h3>Est. Floors</h3><p>{est_floors}</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-glow"><h3>Est. Floors</h3><p>{ai_sch.get("estimated_floor_count", est_floors)}</p></div>', unsafe_allow_html=True)
         with gc2:
             st.markdown(f'<div class="metric-glow"><h3>Per Floor</h3><p>{per_floor:,.0f} m²</p></div>', unsafe_allow_html=True)
         with gc3:
-            grid = st.selectbox("Grid Module", ["4×4 m","6×6 m","8×8 m","6×9 m","8×12 m"])
+            grid = st.selectbox("Grid Module", grid_opts, index=default_gi)
             st.markdown(f'<div class="metric-glow"><h3>Grid</h3><p>{grid}</p></div>', unsafe_allow_html=True)
+
+        # AI Schematic panels (v2.1)
+        if ai_sch:
+            st.divider()
+            st.markdown("##### 🤖 AI Schematic Design")
+
+            # Grid rationale
+            if ai_sch.get("recommended_grid_rationale_th"):
+                st.info(f"**Grid Rationale:** {ai_sch['recommended_grid_rationale_th']}")
+
+            # Zone layout strategy
+            zls = ai_sch.get("zone_layout_strategy", {})
+            if zls:
+                with st.expander("🗺️ Zone Layout Strategy", expanded=True):
+                    st.markdown(f"**Strategy:** {zls.get('description_th', '')}")
+                    zc1, zc2, zc3 = st.columns(3)
+                    with zc1:
+                        st.markdown(f"**🚿 Wet Zone**\n\n{zls.get('wet_zone_placement', '')}")
+                    with zc2:
+                        st.markdown(f"**🛏️ Private Zone**\n\n{zls.get('private_zone_placement', '')}")
+                    with zc3:
+                        st.markdown(f"**🛋️ Social Zone**\n\n{zls.get('social_zone_placement', '')}")
+
+            # Block plan sequence
+            bps = ai_sch.get("block_plan_sequence", [])
+            if bps:
+                with st.expander("📐 Block Plan Sequence", expanded=True):
+                    for bp in bps:
+                        rooms_str = ", ".join(bp.get("rooms", []))
+                        st.markdown(f'<div class="pytron-card"><b>{bp.get("position","")}</b>: {rooms_str}<br><small>{bp.get("rationale_th","")}</small></div>', unsafe_allow_html=True)
+
+            # Facade strategy
+            fs = ai_sch.get("facade_strategy", {})
+            if fs:
+                with st.expander("🏢 Facade & Ventilation Strategy", expanded=False):
+                    st.markdown(f"**Primary Facade:** {fs.get('primary_facade_direction', '')}")
+                    st.markdown(f"**Windows:** {fs.get('window_placement_th', '')}")
+                    st.markdown(f"**Ventilation:** {fs.get('natural_ventilation_strategy_th', '')}")
+                    st.markdown(f"**Shading:** {fs.get('shading_recommendation_th', '')}")
+
+            # MEP
+            mep = ai_sch.get("mep_recommendations", {})
+            if mep:
+                with st.expander("⚙️ MEP Recommendations", expanded=False):
+                    st.markdown(f"**HVAC:** {mep.get('hvac_th', '')}")
+                    st.markdown(f"**Plumbing Stack:** {mep.get('plumbing_stack_location', '')}")
+                    st.markdown(f"**Electrical Panel:** {mep.get('electrical_panel_location', '')}")
+
+            # Structure
+            if ai_sch.get("structural_system_recommendation"):
+                st.caption(f"🏗️ Structure: {ai_sch['structural_system_recommendation']}")
+
+            # Summary
+            if ai_sch.get("schematic_design_summary_th"):
+                st.divider()
+                st.markdown(f'<div class="law-card">{ai_sch["schematic_design_summary_th"]}</div>', unsafe_allow_html=True)
+
+        # AI Overall Verdict (v2.1)
+        ai_verdict = st.session_state.get("ai_verdict", {})
+        ai_warnings = st.session_state.get("ai_warnings", [])
+        ai_principles = st.session_state.get("ai_principles", [])
+        if ai_verdict or ai_warnings:
+            st.divider()
+            st.markdown("##### 📊 AI Design Verdict")
+            if ai_verdict:
+                score = ai_verdict.get("score_out_of_10", "")
+                st.markdown(f'<div class="metric-glow"><h3>Design Score</h3><p>{score} / 10</p></div>', unsafe_allow_html=True)
+                st.markdown(f"**{ai_verdict.get('verdict_th', '')}**")
+                vc1, vc2 = st.columns(2)
+                with vc1:
+                    st.markdown("**✅ Strengths**")
+                    for s in ai_verdict.get("top_3_strengths_th", []):
+                        st.caption(f"• {s}")
+                with vc2:
+                    st.markdown("**🔧 Improvements**")
+                    for s in ai_verdict.get("top_3_improvements_th", []):
+                        st.caption(f"• {s}")
+            if ai_warnings:
+                with st.expander("⚠️ Professional Warnings", expanded=False):
+                    for w in ai_warnings:
+                        st.warning(w)
+            if ai_principles:
+                with st.expander("📜 Design Principles Applied", expanded=False):
+                    for p in ai_principles:
+                        st.caption(f"✓ {p}")
 
 
 # ═════════════════════════════════════════════════════════════════════
