@@ -197,6 +197,54 @@ DEFAULT_SPACE_GROUPS = [
 
 ZONE_COLORS = {"Social": "#6c63ff", "Private": "#f472b6", "Service": "#06b6d4", "Outdoor": "#34d399"}
 
+# ── Rental Presets (Thai) ─────────────────────────────────────────────
+RENTAL_ROOM_STANDARDS = {
+    "Bedroom":      {"min": 8.0,  "recommended": 10.0},
+    "Living Room":  {"min": 4.0,  "recommended": 6.0},
+    "Kitchen":      {"min": 6.0,  "recommended": 8.0},
+    "Dining Room":  {"min": 6.0,  "recommended": 8.0},
+    "Bathroom":     {"min": 4.0,  "recommended": 5.0},
+    "Closet":       {"min": 2.0,  "recommended": 3.0},
+}
+
+RENTAL_PRESETS = {
+    "ห้องเช่า Standard (30 m²)": {
+        "project_name": "ห้องเช่า Standard 30 m²",
+        "site_area": 200.0, "far": 2.0, "bcr": 60.0,
+        "setback_f": 3.0, "setback_s": 1.5, "setback_r": 1.5,
+        "circ_pct": 15.0,
+        "groups": [
+            {
+                "group_name": "ห้องนอน + นั่งเล่น",
+                "rooms": ["Bedroom", "Living Room"],
+                "zone": "Private", "size_mode": "manual",
+                "manual_areas": {"Bedroom": 8.0, "Living Room": 4.0},
+                "target_m2": 12,
+                "design_note_th": "แบ่งเขตด้วยเฟอร์นิเจอร์ ประหยัดพื้นที่",
+                "design_note_en": "Zone divided by furniture arrangement",
+            },
+            {
+                "group_name": "ครัว + กินข้าว",
+                "rooms": ["Kitchen", "Dining Room"],
+                "zone": "Service", "size_mode": "manual",
+                "manual_areas": {"Kitchen": 6.0, "Dining Room": 6.0},
+                "target_m2": 12,
+                "design_note_th": "ครัวกึ่งเปิด ต่อเนื่องพื้นที่กินข้าว",
+                "design_note_en": "Semi-open kitchen integrated with dining",
+            },
+            {
+                "group_name": "ห้องน้ำ + เสื้อผ้า",
+                "rooms": ["Bathroom", "Closet"],
+                "zone": "Service", "size_mode": "manual",
+                "manual_areas": {"Bathroom": 4.0, "Closet": 2.0},
+                "target_m2": 6,
+                "design_note_th": "Wet zone รวม Built-in closet ประหยัดพื้นที่",
+                "design_note_en": "Wet zone with integrated built-in wardrobe",
+            },
+        ],
+    },
+}
+
 def _zc(z: str) -> str:
     return ZONE_COLORS.get(z, "#94a3b8")
 
@@ -210,7 +258,11 @@ def _expand_groups_to_rooms(groups):
     for g in groups:
         for rname in g.get("rooms", []):
             sm = g.get("size_mode", "auto")
-            area = _get_room_area(rname, sm)
+            manual_areas = g.get("manual_areas", {})
+            if sm == "manual" and rname in manual_areas:
+                area = float(manual_areas[rname])
+            else:
+                area = _get_room_area(rname, sm)
             rooms.append({"name": rname, "area": area, "zone": g.get("zone", "Service"),
                           "priority": "High", "size_mode": sm, "group": g.get("group_name", "")})
     return rooms
@@ -230,6 +282,7 @@ def _rooms_in_same_group(a: str, b: str, groups) -> bool:
 # ─────────────────────────────────────────────────────────────────────
 _DEFAULTS: Dict = {
     "project_name": "Untitled Project",
+    "project_type": "Custom",
     "site_area": 400.0, "far": 2.5, "bcr": 60.0,
     "setback_f": 6.0, "setback_s": 3.0, "setback_r": 3.0,
     "wind_dir": "South-West", "sun_orient": "East-West", "noise_src": "North",
@@ -242,6 +295,10 @@ _DEFAULTS: Dict = {
     "roof_type": "Flat / Green Roof",
     "ai_prompt_exported": False,
     "ai_response_imported": False,
+    "ai_stage_data": {},
+    "ai_verdict": {},
+    "ai_warnings": [],
+    "ai_principles": [],
 }
 
 for k, v in _DEFAULTS.items():
@@ -261,7 +318,7 @@ if st.session_state["rooms"] is None:
 # ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🏛️ PYTRON")
-    st.caption("Architecture Design Framework v2.0")
+    st.caption("Architecture Design Framework v2.1")
     st.divider()
 
     st.session_state["project_name"] = st.text_input(
@@ -278,9 +335,16 @@ with st.sidebar:
     stage_idx = stage_labels.index(current)
     st.progress((stage_idx + 1) / len(stage_labels))
 
-    # AI import status
+    # Status badges
+    ptype = st.session_state.get("project_type", "Custom")
+    if ptype != "Custom":
+        st.markdown(f'<span style="color:#06b6d4;">🏠 {ptype}</span>', unsafe_allow_html=True)
     if st.session_state.get("ai_response_imported"):
-        st.markdown('<span style="color:#34d399;">● AI Response Imported</span>', unsafe_allow_html=True)
+        verdict = st.session_state.get("ai_verdict", {})
+        score = verdict.get("score", "")
+        label_th = verdict.get("label_th", "")
+        score_str = f" · {score}/10 {label_th}" if score else ""
+        st.markdown(f'<span style="color:#34d399;">● AI Imported{score_str}</span>', unsafe_allow_html=True)
 
     st.divider()
     with st.expander("💾 Export / Import", expanded=False):
@@ -294,20 +358,36 @@ with st.sidebar:
         )
         st.markdown("---")
 
-        # AI Prompt Export
+        # AI Prompt Export — Full Stage 02–06 Schema (Bilingual)
         if st.button("🤖 Export AI Prompt JSON", use_container_width=True):
-            sa = st.session_state["site_area"]
+            sa  = st.session_state["site_area"]
             far_v = st.session_state["far"]
+            rooms_flat = st.session_state.get("rooms", [])
+            names_list = [r["name"] for r in rooms_flat]
             prompt_obj = {
-                "task": "architectural_space_planning_optimization",
-                "version": "pytron-v2",
-                "system_instruction": "You are a professional architect with expertise in residential and commercial space planning. Analyze the given program definition and return an optimized spatial layout in the exact JSON schema specified. Follow Neufert architectural standards. Ensure all areas meet minimum requirements. Optimize adjacency relationships for functional flow. Return ONLY valid JSON — no markdown, no explanation.",
+                "task": "pytron_full_design_optimization_stage02_to_06",
+                "version": "pytron-v2.1-bilingual",
+                "language": "bilingual_th_en",
+                "system_instruction": (
+                    "You are a Gold-Standard Professional Architect (สถาปนิกมืออาชีพระดับมืออาชีพ). "
+                    "Analyze the provided architectural program and return a COMPLETE spatial design optimization "
+                    "covering Stage 02 through Stage 06. "
+                    "All rationale fields must be provided in BOTH Thai (th) and English (en). "
+                    "Follow Neufert standards strictly. Output ONLY pure JSON — no markdown, no explanation, "
+                    "no code fences. The JSON must exactly match the requested_output_schema."
+                ),
                 "project_context": {
                     "project_name": st.session_state["project_name"],
+                    "project_type": st.session_state.get("project_type", "Custom"),
                     "site_area_m2": sa,
                     "floor_area_ratio": far_v,
                     "building_coverage_ratio_pct": st.session_state["bcr"],
-                    "max_allowable_floor_area_m2": sa * far_v,
+                    "max_allowable_floor_area_m2": round(sa * far_v, 2),
+                    "setbacks_m": {
+                        "front": st.session_state["setback_f"],
+                        "side": st.session_state["setback_s"],
+                        "rear": st.session_state["setback_r"],
+                    },
                     "climate": {
                         "wind_direction": st.session_state["wind_dir"],
                         "sun_orientation": st.session_state["sun_orient"],
@@ -316,34 +396,149 @@ with st.sidebar:
                 },
                 "current_program": {
                     "space_groups": st.session_state.get("space_groups", []),
-                    "rooms_flat": st.session_state.get("rooms", []),
+                    "rooms_flat": rooms_flat,
                     "circulation_factor_pct": st.session_state["circ_pct"],
                     "current_adjacency_matrix": st.session_state.get("adj_matrix"),
-                },
-                "requested_output_schema": {
-                    "optimized_rooms": [{"name": "string", "area": "float m²", "zone": "string", "priority": "string", "size_mode": "string", "design_rationale": "string"}],
-                    "adjacency_matrix": "2D array NxN, values 0/1/2",
-                    "circulation_factor_recommended": "float 0.20-0.40",
-                    "space_groups_optimized": [{"group_name": "string", "rooms": ["list"], "zone": "string", "total_area_m2": "float", "notes": "string"}],
-                    "design_principles_applied": ["list of principles"],
-                    "warnings": ["list of warnings"],
-                    "total_area_check": "float",
+                    "room_names_ordered": names_list,
                 },
                 "hard_constraints": {
-                    "total_must_not_exceed_m2": sa * far_v,
+                    "total_must_not_exceed_m2": round(sa * far_v, 2),
                     "respect_neufert_minimums": True,
                     "output_must_be_pure_json": True,
+                    "adjacency_matrix_size": f"{len(names_list)}x{len(names_list)} matching room_names_ordered",
+                },
+                "requested_output_schema": {
+                    "_note": "Return ALL fields below. th = ภาษาไทย, en = English.",
+
+                    "stage_02_output": {
+                        "optimized_rooms": [
+                            {
+                                "name": "string — room name",
+                                "area": "float — optimized area m²",
+                                "zone": "Social | Private | Service | Outdoor",
+                                "priority": "High | Medium | Low",
+                                "size_mode": "auto | manual",
+                                "group": "string — group name",
+                                "design_rationale_th": "string — เหตุผลการออกแบบ",
+                                "design_rationale_en": "string — design rationale",
+                            }
+                        ],
+                        "space_groups_optimized": [
+                            {
+                                "group_name": "string",
+                                "group_name_th": "string — ชื่อกลุ่มห้องภาษาไทย",
+                                "rooms": ["list of room names"],
+                                "zone": "string",
+                                "total_area_m2": "float",
+                                "notes_th": "string — หมายเหตุภาษาไทย",
+                                "notes_en": "string — notes in English",
+                            }
+                        ],
+                    },
+
+                    "stage_03_output": {
+                        "circulation_factor_recommended": "float 0.10–0.40",
+                        "circulation_rationale_th": "string — เหตุผลค่า circulation",
+                        "circulation_rationale_en": "string — rationale for circulation factor",
+                        "room_quantification": [
+                            {
+                                "name": "string",
+                                "functional_m2": "float",
+                                "circulation_m2": "float",
+                                "total_m2": "float",
+                                "efficiency_note_th": "string",
+                                "efficiency_note_en": "string",
+                            }
+                        ],
+                        "total_functional_m2": "float",
+                        "total_with_circulation_m2": "float",
+                        "utilisation_pct_of_max": "float",
+                    },
+
+                    "stage_04_output": {
+                        "adjacency_matrix": f"2D array {len(names_list)}x{len(names_list)} — values 0/1/2 matching room_names_ordered",
+                        "adjacency_rationale": {
+                            "essential_pairs_th": ["string — คู่ที่ต้องชิดกัน"],
+                            "essential_pairs_en": ["string — pairs that must be adjacent"],
+                            "avoid_pairs_th": ["string — คู่ที่ควรแยก"],
+                            "avoid_pairs_en": ["string — pairs to separate"],
+                        },
+                        "relationship_strategy_th": "string — กลยุทธ์ความสัมพันธ์เชิงพื้นที่",
+                        "relationship_strategy_en": "string — spatial relationship strategy",
+                    },
+
+                    "stage_05_output": {
+                        "connectivity_score": "float 0.0–1.0",
+                        "hub_rooms": ["list — ห้องที่เป็น hub หลัก"],
+                        "zone_clusters": [
+                            {
+                                "cluster_name_th": "string — ชื่อ cluster ภาษาไทย",
+                                "cluster_name": "string — cluster name",
+                                "zone_type": "string",
+                                "rooms": ["list"],
+                                "internal_cohesion": "High | Medium | Low",
+                                "notes_th": "string",
+                                "notes_en": "string",
+                            }
+                        ],
+                        "critical_paths": [
+                            {
+                                "path_name_th": "string — ชื่อเส้นทาง",
+                                "path": ["room_A", "room_B", "room_C"],
+                                "importance": "Critical | High | Medium",
+                                "reason_th": "string",
+                                "reason_en": "string",
+                            }
+                        ],
+                        "spatial_network_quality_verdict": {
+                            "score_label": "Excellent | Good | Fair | Poor",
+                            "summary_th": "string — สรุปคุณภาพ spatial network",
+                            "summary_en": "string",
+                            "improvement_suggestions_th": ["string — ข้อเสนอแนะ"],
+                            "improvement_suggestions_en": ["string"],
+                        },
+                    },
+
+                    "stage_06_output": {
+                        "recommended_structural_grid": "4×4 m | 4×6 m | 5×6 m | 6×6 m | 8×8 m | 6×9 m | 8×12 m",
+                        "grid_rationale_th": "string — เหตุผลการเลือก grid",
+                        "grid_rationale_en": "string",
+                        "estimated_floors": "int",
+                        "area_per_floor_m2": "float",
+                        "zone_layout_strategy_th": "string — กลยุทธ์การจัดวาง zone",
+                        "zone_layout_strategy_en": "string",
+                        "block_plan_notes_th": "string — หมายเหตุ schematic block plan",
+                        "block_plan_notes_en": "string",
+                        "orientation_strategy_th": "string — กลยุทธ์การวางทิศทาง",
+                        "orientation_strategy_en": "string",
+                    },
+
+                    "design_principles_applied": [
+                        "string — หลักการออกแบบที่ใช้ (bilingual หรือ English)",
+                    ],
+                    "professional_warnings": [
+                        "string — คำเตือนจากสถาปนิก (bilingual)",
+                    ],
+                    "overall_design_verdict": {
+                        "score": "int 1–10",
+                        "label_th": "string — ระดับคุณภาพ",
+                        "label_en": "string",
+                        "summary_th": "string — สรุปภาพรวมโครงการ",
+                        "summary_en": "string",
+                    },
+                    "total_area_check": "float — grand total including circulation",
                 },
             }
-            prompt_json = json.dumps(prompt_obj, indent=2, default=str)
+            prompt_json = json.dumps(prompt_obj, indent=2, default=str, ensure_ascii=False)
             st.session_state["ai_prompt_exported"] = True
             st.download_button(
-                "⬇ Download AI Prompt",
+                "⬇ Download Full AI Prompt (Stage 02–06)",
                 data=prompt_json,
                 file_name=f"pytron_ai_prompt_{st.session_state['project_name'].replace(' ','_')}.json",
                 mime="application/json",
                 key="ai_prompt_dl",
             )
+            st.info("📋 วางทั้ง JSON นี้เป็น prompt ใน Claude / ChatGPT แล้ว Import กลับมา")
 
         st.markdown("---")
 
@@ -510,6 +705,75 @@ elif stage_idx == 1:
     zones = ["Social", "Private", "Service", "Outdoor"]
     all_room_names = list(ROOM_STANDARDS.keys())
     preset_group_names = [g["group_name"] for g in DEFAULT_SPACE_GROUPS] + ["Custom"]
+
+    # ── Project Type Selector ──────────────────────────────────────────
+    st.markdown("##### 🏠 Project Type")
+    ptype_options = ["Custom"] + list(RENTAL_PRESETS.keys())
+    ptype_idx = ptype_options.index(st.session_state.get("project_type", "Custom")) if st.session_state.get("project_type", "Custom") in ptype_options else 0
+    selected_ptype = st.selectbox("เลือกประเภทโปรเจค / Project Type", ptype_options, index=ptype_idx, label_visibility="collapsed")
+    st.session_state["project_type"] = selected_ptype
+
+    if selected_ptype != "Custom":
+        preset = RENTAL_PRESETS[selected_ptype]
+        total_target = sum(g["target_m2"] for g in preset["groups"])
+        # Info summary card
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            st.markdown(f'<div class="metric-glow"><h3>เป้าหมาย / Target</h3><p>{total_target} m²</p></div>', unsafe_allow_html=True)
+        with pc2:
+            st.markdown(f'<div class="metric-glow"><h3>กลุ่มห้อง / Groups</h3><p>{len(preset["groups"])}</p></div>', unsafe_allow_html=True)
+        with pc3:
+            st.markdown(f'<div class="metric-glow"><h3>Circulation</h3><p>{preset["circ_pct"]:.0f}%</p></div>', unsafe_allow_html=True)
+
+        # Group breakdown
+        for g in preset["groups"]:
+            rooms_str = " + ".join([f"{r} ({g['manual_areas'].get(r,0):.0f} m²)" for r in g["rooms"]])
+            st.markdown(f"""
+            <div class="pytron-card" style="padding:0.8rem 1.2rem;margin-bottom:0.5rem;">
+                <span class="zone-dot" style="background:{_zc(g['zone'])};"></span>
+                <b>{g['group_name']}</b> — {g['target_m2']} m²<br>
+                <span style="color:#94a3b8;font-size:0.85rem;">{rooms_str}</span><br>
+                <span style="color:#06b6d4;font-size:0.8rem;">🇹🇭 {g['design_note_th']}</span><br>
+                <span style="color:#94a3b8;font-size:0.8rem;">🇬🇧 {g['design_note_en']}</span>
+            </div>""", unsafe_allow_html=True)
+
+        col_load, col_skip = st.columns(2)
+        with col_load:
+            if st.button(f"⚡ โหลด Preset นี้ทันที", use_container_width=True, type="primary"):
+                p = RENTAL_PRESETS[selected_ptype]
+                st.session_state["project_name"]   = p["project_name"]
+                st.session_state["site_area"]      = p["site_area"]
+                st.session_state["far"]            = p["far"]
+                st.session_state["bcr"]            = p["bcr"]
+                st.session_state["setback_f"]      = p["setback_f"]
+                st.session_state["setback_s"]      = p["setback_s"]
+                st.session_state["setback_r"]      = p["setback_r"]
+                st.session_state["circ_pct"]       = p["circ_pct"]
+                st.session_state["space_groups"]   = [dict(g) for g in p["groups"]]
+                st.session_state["rooms"]          = _expand_groups_to_rooms(p["groups"])
+                # Auto-gen adjacency
+                _names = [r["name"] for r in st.session_state["rooms"]]
+                _n = len(_names)
+                _grps = st.session_state["space_groups"]
+                new_adj = [[0]*_n for _ in range(_n)]
+                for i in range(_n):
+                    for j in range(i+1, _n):
+                        a, b = _names[i], _names[j]
+                        val = _lookup_adjacency(a, b)
+                        if val >= 0:
+                            new_adj[i][j] = val; new_adj[j][i] = val
+                        elif _rooms_in_same_group(a, b, _grps):
+                            new_adj[i][j] = 1; new_adj[j][i] = 1
+                st.session_state["adj_matrix"] = new_adj
+                st.session_state["ai_response_imported"] = False
+                st.success(f"✅ Preset '{selected_ptype}' โหลดแล้ว — Stage 02–04 อัพเดทอัตโนมัติ")
+                st.rerun()
+        with col_skip:
+            if st.button("✏️ แก้ไข Groups เอง", use_container_width=True):
+                st.session_state["project_type"] = "Custom"
+                st.rerun()
+
+        st.divider()
 
     # Action buttons
     bc1, bc2 = st.columns(2)
@@ -1132,6 +1396,6 @@ with st.expander("📜 Professional Design Laws", expanded=False):
 
 st.markdown("""
 <div style="text-align:center;padding:1rem 0 0.5rem 0;opacity:0.4;font-size:0.75rem;">
-    PYTRON v2.0 · Architecture Design Framework · Simple · Stable · Fast
+    PYTRON v2.1 · Architecture Design Framework · Simple · Stable · Fast
 </div>
 """, unsafe_allow_html=True)
