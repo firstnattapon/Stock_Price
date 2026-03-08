@@ -129,7 +129,8 @@ if user_json:
 
         adj = data["adjacency_matrix"]
 
-        matrix = pd.DataFrame(adj).fillna("")
+        # แก้ไขบรรทัดนี้เพื่อรองรับจำนวน Array ที่ไม่เท่ากัน
+        matrix = pd.DataFrame.from_dict(adj, orient='index').fillna("")
 
         st.dataframe(matrix)
 
@@ -219,6 +220,7 @@ if user_json:
 
         st.pyplot(fig)
 
-    except:
-
-        st.error("Invalid JSON")
+    except json.JSONDecodeError:
+        st.error("Invalid JSON Format: โปรดตรวจสอบ Syntax ของ JSON อีกครั้ง")
+    except Exception as e:
+        st.error(f"Processing Error: เกิดข้อผิดพลาดในการสร้างกราฟิก - {e}")
