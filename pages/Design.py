@@ -197,52 +197,199 @@ DEFAULT_SPACE_GROUPS = [
 
 ZONE_COLORS = {"Social": "#6c63ff", "Private": "#f472b6", "Service": "#06b6d4", "Outdoor": "#34d399"}
 
-# ── Rental Presets (Thai) ─────────────────────────────────────────────
-RENTAL_ROOM_STANDARDS = {
-    "Bedroom":      {"min": 8.0,  "recommended": 10.0},
-    "Living Room":  {"min": 4.0,  "recommended": 6.0},
-    "Kitchen":      {"min": 6.0,  "recommended": 8.0},
-    "Dining Room":  {"min": 6.0,  "recommended": 8.0},
-    "Bathroom":     {"min": 4.0,  "recommended": 5.0},
-    "Closet":       {"min": 2.0,  "recommended": 3.0},
+# ── Rental Preset: ห้องเช่า Standard 30 m² ───────────────────────────
+RENTAL_PRESET_30 = {
+    "project_name": "ห้องเช่า Standard 30 m²",
+    "project_type": "ห้องเช่า Standard (30 m²)",
+    "site_area": 200.0, "far": 2.0, "bcr": 60.0,
+    "setback_f": 3.0, "setback_s": 1.5, "setback_r": 1.5,
+    "circ_pct": 12.0,
+    "groups": [
+        {
+            "group_name": "ห้องนอน + นั่งเล่น",
+            "rooms": ["Bedroom", "Living Room"],
+            "zone": "Private", "size_mode": "manual",
+            "manual_areas": {"Bedroom": 8.5, "Living Room": 4.5},
+            "target_m2": 13,
+            "design_note_th": "แบ่งโซนด้วยเฟอร์นิเจอร์ ไม่ต้องมีผนังกั้น",
+            "design_note_en": "Furniture-zoned open plan, no fixed partition",
+        },
+        {
+            "group_name": "ครัว + กินข้าว",
+            "rooms": ["Kitchen", "Dining Room"],
+            "zone": "Service", "size_mode": "manual",
+            "manual_areas": {"Kitchen": 5.0, "Dining Room": 3.5},
+            "target_m2": 8.5,
+            "design_note_th": "ครัว Galley กึ่งเปิด ต่อเนื่องพื้นที่กินข้าว",
+            "design_note_en": "Semi-open galley kitchen + adjoining dining",
+        },
+        {
+            "group_name": "ห้องน้ำ + เสื้อผ้า",
+            "rooms": ["Bathroom", "Closet"],
+            "zone": "Service", "size_mode": "manual",
+            "manual_areas": {"Bathroom": 3.5, "Closet": 1.5},
+            "target_m2": 5,
+            "design_note_th": "Wet zone รวม Built-in closet ท่อน้ำรวมผนังเดียว",
+            "design_note_en": "Wet zone + built-in wardrobe, shared plumbing wall",
+        },
+    ],
 }
 
-RENTAL_PRESETS = {
-    "ห้องเช่า Standard (30 m²)": {
-        "project_name": "ห้องเช่า Standard 30 m²",
-        "site_area": 200.0, "far": 2.0, "bcr": 60.0,
-        "setback_f": 3.0, "setback_s": 1.5, "setback_r": 1.5,
-        "circ_pct": 15.0,
-        "groups": [
-            {
-                "group_name": "ห้องนอน + นั่งเล่น",
-                "rooms": ["Bedroom", "Living Room"],
-                "zone": "Private", "size_mode": "manual",
-                "manual_areas": {"Bedroom": 8.0, "Living Room": 4.0},
-                "target_m2": 12,
-                "design_note_th": "แบ่งเขตด้วยเฟอร์นิเจอร์ ประหยัดพื้นที่",
-                "design_note_en": "Zone divided by furniture arrangement",
-            },
-            {
-                "group_name": "ครัว + กินข้าว",
-                "rooms": ["Kitchen", "Dining Room"],
-                "zone": "Service", "size_mode": "manual",
-                "manual_areas": {"Kitchen": 6.0, "Dining Room": 6.0},
-                "target_m2": 12,
-                "design_note_th": "ครัวกึ่งเปิด ต่อเนื่องพื้นที่กินข้าว",
-                "design_note_en": "Semi-open kitchen integrated with dining",
-            },
-            {
-                "group_name": "ห้องน้ำ + เสื้อผ้า",
-                "rooms": ["Bathroom", "Closet"],
-                "zone": "Service", "size_mode": "manual",
-                "manual_areas": {"Bathroom": 4.0, "Closet": 2.0},
-                "target_m2": 6,
-                "design_note_th": "Wet zone รวม Built-in closet ประหยัดพื้นที่",
-                "design_note_en": "Wet zone with integrated built-in wardrobe",
-            },
-        ],
+RENTAL_PRESETS = {"ห้องเช่า Standard (30 m²)": RENTAL_PRESET_30}
+
+# ── Default AI Response (Embedded — Stage 02–06) ──────────────────────
+DEFAULT_AI_RESPONSE = {
+  "stage_02_output": {
+    "optimized_rooms": [
+      {"name": "Bedroom",     "area": 8.5,  "zone": "Private", "priority": "High",   "size_mode": "auto", "group": "ห้องนอน + นั่งเล่น",
+       "design_rationale_th": "ขนาดขั้นต่ำ Neufert สำหรับเตียงเดี่ยว + ระยะเดิน 0.60 ม.", "design_rationale_en": "Neufert minimum for single-bed with 0.60 m clearance"},
+      {"name": "Living Room", "area": 4.5,  "zone": "Private", "priority": "High",   "size_mode": "auto", "group": "ห้องนอน + นั่งเล่น",
+       "design_rationale_th": "นั่งเล่นกะทัดรัด โซฟา 2 ที่นั่ง แบ่งโซนด้วยเฟอร์นิเจอร์", "design_rationale_en": "Compact lounge; 2-seat sofa; furniture zoning"},
+      {"name": "Kitchen",     "area": 5.0,  "zone": "Service", "priority": "High",   "size_mode": "auto", "group": "ครัว + กินข้าว",
+       "design_rationale_th": "ครัว Galley 1.20×2.40 ม. ทางเดินกว้างไม่น้อยกว่า 0.90 ม.", "design_rationale_en": "Galley kitchen 1.20×2.40 m; min 0.90 m aisle"},
+      {"name": "Dining Room", "area": 3.5,  "zone": "Service", "priority": "High",   "size_mode": "auto", "group": "ครัว + กินข้าว",
+       "design_rationale_th": "โต๊ะ 2 คน 0.60×0.80 ม. + ระยะเดิน 0.75 ม.", "design_rationale_en": "2-person dining 0.60×0.80 m + 0.75 m circulation"},
+      {"name": "Bathroom",    "area": 3.5,  "zone": "Service", "priority": "High",   "size_mode": "auto", "group": "ห้องน้ำ + เสื้อผ้า",
+       "design_rationale_th": "WC + อ่างล้างหน้า + ฝักบัว ภายใน 1.50×2.10 ม.", "design_rationale_en": "WC + basin + shower within 1.50×2.10 m"},
+      {"name": "Closet",      "area": 1.5,  "zone": "Service", "priority": "Medium", "size_mode": "auto", "group": "ห้องน้ำ + เสื้อผ้า",
+       "design_rationale_th": "Built-in ลึก 0.60 ม. ยาว 2.50 ม. ติดผนังห้องนอน", "design_rationale_en": "Built-in 0.60 m deep × 2.50 m wide flush against bedroom wall"},
+    ],
+    "space_groups_optimized": [
+      {"group_name": "ห้องนอน + นั่งเล่น", "group_name_th": "ห้องนอนและพื้นที่นั่งเล่นรวม",
+       "rooms": ["Bedroom","Living Room"], "zone": "Private", "total_area_m2": 13.0,
+       "notes_th": "แบ่งโซนด้วยเฟอร์นิเจอร์ หน้าต่างทิศใต้-ตะวันออกรับลม SW", "notes_en": "Furniture zoning; SE windows capture SW wind"},
+      {"group_name": "ครัว + กินข้าว", "group_name_th": "ครัวและพื้นที่รับประทานอาหาร",
+       "rooms": ["Kitchen","Dining Room"], "zone": "Service", "total_area_m2": 8.5,
+       "notes_th": "ครัวกึ่งเปิดเชื่อมพื้นที่กินข้าว จัดวางกลางยูนิต", "notes_en": "Semi-open kitchen + dining; central connector zone"},
+      {"group_name": "ห้องน้ำ + เสื้อผ้า", "group_name_th": "ห้องน้ำและตู้เก็บเสื้อผ้า",
+       "rooms": ["Bathroom","Closet"], "zone": "Service", "total_area_m2": 5.0,
+       "notes_th": "ท่อน้ำรวมผนังเดียว ตู้เสื้อผ้าเป็น acoustic buffer", "notes_en": "Shared plumbing wall; wardrobe as acoustic buffer"},
+    ],
+  },
+  "stage_03_output": {
+    "circulation_factor_recommended": 0.12,
+    "circulation_rationale_th": "ยูนิต 30 ตร.ม. ไม่มีโถงแยก ทางเดินหลักผ่านพื้นที่ใช้สอย ใช้ 12% ตามมาตรฐาน Neufert ยูนิตพักอาศัยกะทัดรัด",
+    "circulation_rationale_en": "No separate corridor; primary path runs through functional spaces; 12% per Neufert compact residential standard",
+    "room_quantification": [
+      {"name":"Bedroom",     "functional_m2":8.5, "circulation_m2":1.02,"total_m2":9.52,"efficiency_note_th":"ทางเข้าห้องน้ำรวมในพื้นที่ห้องนอน","efficiency_note_en":"Bathroom access absorbed within bedroom"},
+      {"name":"Living Room", "functional_m2":4.5, "circulation_m2":0.54,"total_m2":5.04,"efficiency_note_th":"ทางเดินหลักผ่านพื้นที่นั่งเล่น","efficiency_note_en":"Primary path passes through living area"},
+      {"name":"Kitchen",     "functional_m2":5.0, "circulation_m2":0.60,"total_m2":5.60,"efficiency_note_th":"ทางเดิน Galley รวมในพื้นที่แล้ว","efficiency_note_en":"Galley aisle included in functional area"},
+      {"name":"Dining Room", "functional_m2":3.5, "circulation_m2":0.42,"total_m2":3.92,"efficiency_note_th":"ใช้ทางเดินร่วมกับครัว","efficiency_note_en":"Shared circulation with kitchen"},
+      {"name":"Bathroom",    "functional_m2":3.5, "circulation_m2":0.42,"total_m2":3.92,"efficiency_note_th":"เผื่อระยะเปิดประตูเท่านั้น","efficiency_note_en":"Door swing clearance only"},
+      {"name":"Closet",      "functional_m2":1.5, "circulation_m2":0.18,"total_m2":1.68,"efficiency_note_th":"Built-in ไม่ต้องการทางเดินเพิ่ม","efficiency_note_en":"Built-in; negligible circulation"},
+    ],
+    "total_functional_m2": 26.5,
+    "total_with_circulation_m2": 29.68,
+    "utilisation_pct_of_max": 7.42,
+  },
+  "stage_04_output": {
+    "adjacency_matrix": [
+      [0,1,0,0,2,2],
+      [1,0,1,2,0,0],
+      [0,1,0,2,0,0],
+      [0,2,2,0,0,0],
+      [2,0,0,0,0,2],
+      [2,0,0,0,2,0],
+    ],
+    "adjacency_rationale": {
+      "essential_pairs_th": [
+        "Bedroom–Bathroom (2): เข้าห้องน้ำโดยตรงจากห้องนอน โดยเฉพาะกลางคืน",
+        "Bedroom–Closet (2): ตู้เสื้อผ้าต้องอยู่ติดห้องนอนเพื่อความสะดวกแต่งตัว",
+        "Living Room–Dining Room (2): ต่อเนื่อง Open Plan ในยูนิตเล็ก",
+        "Kitchen–Dining Room (2): ชิดติดกันเพื่อประสิทธิภาพการเสิร์ฟ",
+        "Bathroom–Closet (2): รวม Wet zone กับ Wardrobe ประหยัดงานระบบ",
+      ],
+      "essential_pairs_en": [
+        "Bedroom–Bathroom (2): Direct nighttime access",
+        "Bedroom–Closet (2): Immediate wardrobe access for dressing",
+        "Living Room–Dining Room (2): Open-plan continuity in compact unit",
+        "Kitchen–Dining Room (2): Food service efficiency",
+        "Bathroom–Closet (2): Shared plumbing wall, MEP saving",
+      ],
+      "avoid_pairs_th": ["Bedroom–Kitchen (0): ลดกลิ่นและเสียง","Living Room–Bathroom (0): ป้องกันมองเห็นห้องน้ำจากพื้นที่นั่งเล่น"],
+      "avoid_pairs_en": ["Bedroom–Kitchen (0): Eliminate odour/noise transfer","Living Room–Bathroom (0): Screen bathroom from living area"],
     },
+    "relationship_strategy_th": "Linear 3-Zone จากทิศใต้ไปเหนือ: Private → Food Service → Wet ห้องน้ำชิดผนังข้างระหว่าง Bedroom กับ Kitchen รวมท่อประปา",
+    "relationship_strategy_en": "Linear 3-zone S→N: Private → Food Service → Wet; Bathroom on side wall between Bedroom and Kitchen to share plumbing stack",
+  },
+  "stage_05_output": {
+    "connectivity_score": 0.72,
+    "hub_rooms": ["Living Room","Dining Room"],
+    "zone_clusters": [
+      {"cluster_name_th":"โซนส่วนตัว","cluster_name":"Private Zone","zone_type":"Private",
+       "rooms":["Bedroom","Living Room"],"internal_cohesion":"High",
+       "notes_th":"ต่อเนื่องไม่มีผนังกั้น แบ่งโซนด้วยพรมหรือระดับพื้น","notes_en":"Continuous space; zone division by floor finish or furniture"},
+      {"cluster_name_th":"โซนบริการอาหาร","cluster_name":"Food Service Zone","zone_type":"Service",
+       "rooms":["Kitchen","Dining Room"],"internal_cohesion":"High",
+       "notes_th":"Open-plan ครัว + กินข้าว จัด Galley+Banquette ได้","notes_en":"Open-plan food zone; galley + banquette arrangement"},
+      {"cluster_name_th":"โซนสุขาภิบาล","cluster_name":"Wet / Utility Zone","zone_type":"Service",
+       "rooms":["Bathroom","Closet"],"internal_cohesion":"High",
+       "notes_th":"ท่อน้ำรวมผนังเดียว ตู้เสื้อผ้าเป็นฉนวนเสียง","notes_en":"Shared plumbing wall; wardrobe doubles as acoustic insulation"},
+    ],
+    "critical_paths": [
+      {"path_name_th":"เส้นทางหลักภายในยูนิต","path":["Living Room","Dining Room","Kitchen"],"importance":"Critical",
+       "reason_th":"เส้นทางชีวิตประจำวัน ต้องต่อเนื่องปราศจากสิ่งกีดขวาง","reason_en":"Daily movement corridor; must be unobstructed"},
+      {"path_name_th":"เส้นทางห้องนอน-ห้องน้ำ","path":["Bedroom","Bathroom"],"importance":"Critical",
+       "reason_th":"ข้อกำหนดพื้นฐานสำหรับการพักอาศัย โดยเฉพาะกลางคืน","reason_en":"Fundamental residential requirement; critical for nighttime use"},
+      {"path_name_th":"เส้นทางแต่งตัว","path":["Bathroom","Closet","Bedroom"],"importance":"High",
+       "reason_th":"ลำดับกิจวัตร อาบน้ำ→เสื้อผ้า→แต่งตัว ต้องราบรื่น","reason_en":"Grooming sequence; logical non-circuitous path"},
+      {"path_name_th":"เส้นทางทางเข้า","path":["Living Room","Bedroom"],"importance":"Medium",
+       "reason_th":"ทางเข้าผ่าน Living ก่อนถึงห้องนอน ป้องกันมองเห็นห้องนอนโดยตรง","reason_en":"Entry through living screens bedroom from door"},
+    ],
+    "spatial_network_quality_verdict": {
+      "score_label": "Good",
+      "summary_th": "เครือข่ายพื้นที่ดีสำหรับยูนิต 30 ตร.ม. Living+Dining เป็น hub เชื่อมทุก zone เส้นทางวิกฤติตรงไปตรงมา",
+      "summary_en": "Good spatial network for 30 m² unit; Living+Dining as effective hubs; all critical paths direct and non-circuitous",
+      "improvement_suggestions_th": [
+        "เพิ่มประตูสองทาง Kitchen↔Living Room สร้าง circulation loop",
+        "ประตูบานเลื่อนระหว่าง Bedroom กับ Living Room เพื่อความยืดหยุ่น",
+        "ผนังครึ่งสูงหรือ Bookshelf divider เพิ่ม Privacy ระหว่าง Bedroom กับ Living Room",
+      ],
+      "improvement_suggestions_en": [
+        "Two-way access Kitchen↔Living Room to create circulation loop",
+        "Sliding door Bedroom↔Living Room for flexible open/closed configuration",
+        "Half-height wall or bookshelf divider for Bedroom privacy",
+      ],
+    },
+  },
+  "stage_06_output": {
+    "recommended_structural_grid": "5×6 m",
+    "grid_rationale_th": "Grid 5×6 ม. = 30 ตร.ม. พอดี กว้าง 5 ม. แบ่ง 2.5+2.5 ลึก 6 ม. แบ่ง 3 โซน ×2 ม. ตาม Linear Strategy",
+    "grid_rationale_en": "5×6 m yields exactly 30 m²; 5 m width splits into 2×2.5 m bays; 6 m depth divides into 3×2.0 m zones per linear strategy",
+    "estimated_floors": 4,
+    "area_per_floor_m2": 72.0,
+    "zone_layout_strategy_th": "Linear N-S: [ใต้→Private: Bedroom+Living] | [กลาง→Food Service: Kitchen+Dining] | [เหนือ→Wet: Bathroom+Closet] Corridor ทางตะวันออก",
+    "zone_layout_strategy_en": "Linear N-S: [S→Private: Bedroom+Living] | [Central→Food: Kitchen+Dining] | [N→Wet: Bathroom+Closet]; circulation spine on East edge",
+    "block_plan_notes_th": "หน้ากว้าง 5 ม. × ลึก 6 ม. แกน N-S 2 แถว 2.5 ม. ตะวันตก: Bedroom(2.5×3.5)+Bathroom(1.5×2.1)+Closet(0.6×2.5) ตะวันออก: Living(2.5×1.8)+Dining(2.5×1.4)+Kitchen(2.5×2.0) ประตูทางเข้ามุม SE",
+    "block_plan_notes_en": "5 m wide × 6 m deep; N-S axis 2×2.5 m bays. W bay: Bedroom(2.5×3.5m)+Bath(1.5×2.1m)+Closet(0.6×2.5m). E bay: Living(2.5×1.8m)+Dining(2.5×1.4m)+Kitchen(2.5×2.0m). Entry SE corner",
+    "orientation_strategy_th": "หน้าต่างหลัก (Bedroom+Living) ทิศใต้-ตะวันออก รับลม SW ครัวระบายทิศตะวันตก ผนังเหนือทึบกัน noise source",
+    "orientation_strategy_en": "Primary windows (Bedroom+Living) face SE to capture SW wind; kitchen exhaust W; North wall solid to block noise source",
+  },
+  "design_principles_applied": [
+    "Neufert Residential Minimum Standards — all room dimensions",
+    "หลักการ Compact Planning: พื้นที่ทุกตร.ม. มีหน้าที่ชัดเจน / Every m² serves a defined function",
+    "Linear Zone Segregation — Private → Semi-Public → Service on single axis",
+    "หลักการ Acoustic Zoning: Wet zone เป็น buffer ระหว่างห้องนอนกับแหล่งเสียง",
+    "Shared Plumbing Wall Strategy — Bathroom & Closet share plumbing stack",
+    "Natural Ventilation First — SW wind cross-ventilation before mechanical cooling",
+    "Furniture as Partition — avoid fixed walls in sub-30 m² units",
+    "Bioclimatic Orientation — windows/walls respond to wind, sun, noise",
+  ],
+  "professional_warnings": [
+    "⚠️ [TH] Bathroom 3.5 m² ขั้นต่ำ Neufert — หากเพิ่มอ่างอาบน้ำต้องขยายเป็น 4.0–4.5 m² / [EN] 3.5 m² is Neufert minimum; bathtub requires 4.0–4.5 m²",
+    "⚠️ [TH] utilisation 7.42% ของ FAR max — ที่ดิน 200 m² รองรับได้ ~13 ยูนิต ควรพิจารณาอาคารชุด / [EN] 7.42% utilisation; site could support ~13 units — consider multi-unit design",
+    "⚠️ [TH] Bedroom+Living รวมโซน — จำกัดผู้พัก 1–2 คนเพื่อ acoustic privacy / [EN] Combined zone limits occupancy to 1–2 persons",
+    "⚠️ [TH] ตรวจสอบกฎกระทรวงอาคาร พ.ศ. 2564 ขนาดห้องน้ำ ช่องแสง ช่องระบายอากาศ / [EN] Verify Thai Building Control Act B.E. 2564 compliance",
+    "⚠️ [TH] Closet 1.5 m² สำหรับ 1 คน — 2 คนต้องขยายเป็น 2.5–3.0 m² / [EN] 1.5 m² for single occupancy; 2 persons need 2.5–3.0 m²",
+  ],
+  "overall_design_verdict": {
+    "score": 7,
+    "label_th": "ดี — ใช้งานได้จริง ประหยัดพื้นที่ ประสิทธิภาพสูง",
+    "label_en": "Good — Functional, Space-Efficient, High Utilisation",
+    "summary_th": "ยูนิต 30 m² มีการออกแบบสมเหตุสมผลตามมาตรฐาน Neufert 3-zone Linear ช่วยให้สัญจรมีประสิทธิภาพ เส้นทางวิกฤติชัดเจน กลยุทธ์ท่อน้ำร่วมลดงบ MEP แนะนำพิจารณาพัฒนาอาคารชุดเพื่อเพิ่มผลตอบแทน",
+    "summary_en": "30 m² unit with rational Neufert-compliant planning; 3-zone linear arrangement ensures efficient circulation; shared plumbing wall reduces MEP cost; multi-unit development strongly recommended to maximise site ROI",
+  },
+  "total_area_check": 29.68,
 }
 
 def _zc(z: str) -> str:
@@ -281,14 +428,14 @@ def _rooms_in_same_group(a: str, b: str, groups) -> bool:
 # 2. SESSION STATE DEFAULTS
 # ─────────────────────────────────────────────────────────────────────
 _DEFAULTS: Dict = {
-    "project_name": "Untitled Project",
-    "project_type": "Custom",
-    "site_area": 400.0, "far": 2.5, "bcr": 60.0,
-    "setback_f": 6.0, "setback_s": 3.0, "setback_r": 3.0,
+    "project_name": "ห้องเช่า Standard 30 m²",
+    "project_type": "ห้องเช่า Standard (30 m²)",
+    "site_area": 200.0, "far": 2.0, "bcr": 60.0,
+    "setback_f": 3.0, "setback_s": 1.5, "setback_r": 1.5,
     "wind_dir": "South-West", "sun_orient": "East-West", "noise_src": "North",
     "space_groups": None,
     "rooms": None,
-    "circ_pct": 30.0,
+    "circ_pct": 12.0,
     "adj_matrix": None,
     "structure_sys": "Reinforced Concrete Frame",
     "facade_mat": "Exposed Concrete + Timber Cladding",
@@ -305,9 +452,43 @@ for k, v in _DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+# ── Auto-load Rental Preset + DEFAULT_AI_RESPONSE on first run ────────
+def _apply_ai_response(ai_data: dict):
+    """Parse v2.1 nested AI response and populate all session state."""
+    s02 = ai_data.get("stage_02_output", {})
+    s03 = ai_data.get("stage_03_output", {})
+    s04 = ai_data.get("stage_04_output", {})
+    new_rooms  = s02.get("optimized_rooms", [])
+    new_adj    = s04.get("adjacency_matrix", [])
+    new_groups = s02.get("space_groups_optimized", [])
+    circ_val   = s03.get("circulation_factor_recommended")
+    if new_rooms:
+        st.session_state["rooms"] = new_rooms
+    if new_adj and len(new_adj) == len(new_rooms):
+        st.session_state["adj_matrix"] = new_adj
+    if circ_val is not None:
+        cv = float(circ_val)
+        st.session_state["circ_pct"] = cv * 100 if cv < 1 else cv
+    if new_groups:
+        st.session_state["space_groups"] = new_groups
+    st.session_state["ai_stage_data"] = {
+        "stage_03": s03,
+        "stage_04": s04,
+        "network":  ai_data.get("stage_05_output", {}),
+        "schematic":ai_data.get("stage_06_output", {}),
+    }
+    st.session_state["ai_verdict"]    = ai_data.get("overall_design_verdict", {})
+    st.session_state["ai_warnings"]   = ai_data.get("professional_warnings", [])
+    st.session_state["ai_principles"] = ai_data.get("design_principles_applied", [])
+    st.session_state["ai_response_imported"] = True
+
 if st.session_state["space_groups"] is None:
-    st.session_state["space_groups"] = [dict(g) for g in DEFAULT_SPACE_GROUPS]
-    st.session_state["rooms"] = _expand_groups_to_rooms(st.session_state["space_groups"])
+    # Load rental preset groups as default
+    preset = RENTAL_PRESET_30
+    st.session_state["space_groups"] = [dict(g) for g in preset["groups"]]
+    st.session_state["rooms"] = _expand_groups_to_rooms(preset["groups"])
+    # Apply embedded AI response as default values
+    _apply_ai_response(DEFAULT_AI_RESPONSE)
 
 if st.session_state["rooms"] is None:
     st.session_state["rooms"] = _expand_groups_to_rooms(st.session_state["space_groups"])
@@ -338,13 +519,13 @@ with st.sidebar:
     # Status badges
     ptype = st.session_state.get("project_type", "Custom")
     if ptype != "Custom":
-        st.markdown(f'<span style="color:#06b6d4;">🏠 {ptype}</span>', unsafe_allow_html=True)
+        st.markdown(f'<span style="color:#06b6d4;font-size:0.8rem;">🏠 {ptype}</span>', unsafe_allow_html=True)
     if st.session_state.get("ai_response_imported"):
         verdict = st.session_state.get("ai_verdict", {})
-        score = verdict.get("score", "")
-        label_th = verdict.get("label_th", "")
-        score_str = f" · {score}/10 {label_th}" if score else ""
-        st.markdown(f'<span style="color:#34d399;">● AI Imported{score_str}</span>', unsafe_allow_html=True)
+        score   = verdict.get("score", "")
+        lthai   = verdict.get("label_th", "")
+        strtag  = f" {score}/10 · {lthai}" if score else ""
+        st.markdown(f'<span style="color:#34d399;font-size:0.8rem;">● AI Ready{strtag}</span>', unsafe_allow_html=True)
 
     st.divider()
     with st.expander("💾 Export / Import", expanded=False):
@@ -360,21 +541,20 @@ with st.sidebar:
 
         # AI Prompt Export — Full Stage 02–06 Schema (Bilingual)
         if st.button("🤖 Export AI Prompt JSON", use_container_width=True):
-            sa  = st.session_state["site_area"]
+            sa    = st.session_state["site_area"]
             far_v = st.session_state["far"]
-            rooms_flat = st.session_state.get("rooms", [])
-            names_list = [r["name"] for r in rooms_flat]
+            rooms_flat  = st.session_state.get("rooms", [])
+            names_list  = [r["name"] for r in rooms_flat]
             prompt_obj = {
                 "task": "pytron_full_design_optimization_stage02_to_06",
                 "version": "pytron-v2.1-bilingual",
                 "language": "bilingual_th_en",
                 "system_instruction": (
                     "You are a Gold-Standard Professional Architect (สถาปนิกมืออาชีพระดับมืออาชีพ). "
-                    "Analyze the provided architectural program and return a COMPLETE spatial design optimization "
-                    "covering Stage 02 through Stage 06. "
-                    "All rationale fields must be provided in BOTH Thai (th) and English (en). "
-                    "Follow Neufert standards strictly. Output ONLY pure JSON — no markdown, no explanation, "
-                    "no code fences. The JSON must exactly match the requested_output_schema."
+                    "Return a COMPLETE spatial design optimization covering Stage 02–06. "
+                    "All rationale fields MUST be provided in BOTH Thai (_th) and English (_en). "
+                    "Follow Neufert standards strictly. "
+                    "Output ONLY pure JSON — no markdown, no explanation, no code fences."
                 ),
                 "project_context": {
                     "project_name": st.session_state["project_name"],
@@ -383,16 +563,8 @@ with st.sidebar:
                     "floor_area_ratio": far_v,
                     "building_coverage_ratio_pct": st.session_state["bcr"],
                     "max_allowable_floor_area_m2": round(sa * far_v, 2),
-                    "setbacks_m": {
-                        "front": st.session_state["setback_f"],
-                        "side": st.session_state["setback_s"],
-                        "rear": st.session_state["setback_r"],
-                    },
-                    "climate": {
-                        "wind_direction": st.session_state["wind_dir"],
-                        "sun_orientation": st.session_state["sun_orient"],
-                        "noise_source": st.session_state["noise_src"],
-                    },
+                    "setbacks_m": {"front": st.session_state["setback_f"], "side": st.session_state["setback_s"], "rear": st.session_state["setback_r"]},
+                    "climate": {"wind_direction": st.session_state["wind_dir"], "sun_orientation": st.session_state["sun_orient"], "noise_source": st.session_state["noise_src"]},
                 },
                 "current_program": {
                     "space_groups": st.session_state.get("space_groups", []),
@@ -405,199 +577,92 @@ with st.sidebar:
                     "total_must_not_exceed_m2": round(sa * far_v, 2),
                     "respect_neufert_minimums": True,
                     "output_must_be_pure_json": True,
-                    "adjacency_matrix_size": f"{len(names_list)}x{len(names_list)} matching room_names_ordered",
+                    "adjacency_matrix_must_be": f"{len(names_list)}×{len(names_list)} matching room_names_ordered",
                 },
                 "requested_output_schema": {
-                    "_note": "Return ALL fields below. th = ภาษาไทย, en = English.",
-
+                    "_note": "Return ALL fields. _th = ภาษาไทย, _en = English",
                     "stage_02_output": {
-                        "optimized_rooms": [
-                            {
-                                "name": "string — room name",
-                                "area": "float — optimized area m²",
-                                "zone": "Social | Private | Service | Outdoor",
-                                "priority": "High | Medium | Low",
-                                "size_mode": "auto | manual",
-                                "group": "string — group name",
-                                "design_rationale_th": "string — เหตุผลการออกแบบ",
-                                "design_rationale_en": "string — design rationale",
-                            }
-                        ],
-                        "space_groups_optimized": [
-                            {
-                                "group_name": "string",
-                                "group_name_th": "string — ชื่อกลุ่มห้องภาษาไทย",
-                                "rooms": ["list of room names"],
-                                "zone": "string",
-                                "total_area_m2": "float",
-                                "notes_th": "string — หมายเหตุภาษาไทย",
-                                "notes_en": "string — notes in English",
-                            }
-                        ],
+                        "optimized_rooms": [{"name":"str","area":"float m²","zone":"Social|Private|Service|Outdoor","priority":"High|Medium|Low","size_mode":"auto|manual","group":"str","design_rationale_th":"str","design_rationale_en":"str"}],
+                        "space_groups_optimized": [{"group_name":"str","group_name_th":"str","rooms":["list"],"zone":"str","total_area_m2":"float","notes_th":"str","notes_en":"str"}],
                     },
-
                     "stage_03_output": {
                         "circulation_factor_recommended": "float 0.10–0.40",
-                        "circulation_rationale_th": "string — เหตุผลค่า circulation",
-                        "circulation_rationale_en": "string — rationale for circulation factor",
-                        "room_quantification": [
-                            {
-                                "name": "string",
-                                "functional_m2": "float",
-                                "circulation_m2": "float",
-                                "total_m2": "float",
-                                "efficiency_note_th": "string",
-                                "efficiency_note_en": "string",
-                            }
-                        ],
-                        "total_functional_m2": "float",
-                        "total_with_circulation_m2": "float",
-                        "utilisation_pct_of_max": "float",
+                        "circulation_rationale_th": "str", "circulation_rationale_en": "str",
+                        "room_quantification": [{"name":"str","functional_m2":"float","circulation_m2":"float","total_m2":"float","efficiency_note_th":"str","efficiency_note_en":"str"}],
+                        "total_functional_m2": "float", "total_with_circulation_m2": "float", "utilisation_pct_of_max": "float",
                     },
-
                     "stage_04_output": {
-                        "adjacency_matrix": f"2D array {len(names_list)}x{len(names_list)} — values 0/1/2 matching room_names_ordered",
-                        "adjacency_rationale": {
-                            "essential_pairs_th": ["string — คู่ที่ต้องชิดกัน"],
-                            "essential_pairs_en": ["string — pairs that must be adjacent"],
-                            "avoid_pairs_th": ["string — คู่ที่ควรแยก"],
-                            "avoid_pairs_en": ["string — pairs to separate"],
-                        },
-                        "relationship_strategy_th": "string — กลยุทธ์ความสัมพันธ์เชิงพื้นที่",
-                        "relationship_strategy_en": "string — spatial relationship strategy",
+                        "adjacency_matrix": f"2D array {len(names_list)}×{len(names_list)} values 0/1/2",
+                        "adjacency_rationale": {"essential_pairs_th":["str"],"essential_pairs_en":["str"],"avoid_pairs_th":["str"],"avoid_pairs_en":["str"]},
+                        "relationship_strategy_th": "str", "relationship_strategy_en": "str",
                     },
-
                     "stage_05_output": {
                         "connectivity_score": "float 0.0–1.0",
-                        "hub_rooms": ["list — ห้องที่เป็น hub หลัก"],
-                        "zone_clusters": [
-                            {
-                                "cluster_name_th": "string — ชื่อ cluster ภาษาไทย",
-                                "cluster_name": "string — cluster name",
-                                "zone_type": "string",
-                                "rooms": ["list"],
-                                "internal_cohesion": "High | Medium | Low",
-                                "notes_th": "string",
-                                "notes_en": "string",
-                            }
-                        ],
-                        "critical_paths": [
-                            {
-                                "path_name_th": "string — ชื่อเส้นทาง",
-                                "path": ["room_A", "room_B", "room_C"],
-                                "importance": "Critical | High | Medium",
-                                "reason_th": "string",
-                                "reason_en": "string",
-                            }
-                        ],
-                        "spatial_network_quality_verdict": {
-                            "score_label": "Excellent | Good | Fair | Poor",
-                            "summary_th": "string — สรุปคุณภาพ spatial network",
-                            "summary_en": "string",
-                            "improvement_suggestions_th": ["string — ข้อเสนอแนะ"],
-                            "improvement_suggestions_en": ["string"],
-                        },
+                        "hub_rooms": ["list"],
+                        "zone_clusters": [{"cluster_name_th":"str","cluster_name":"str","zone_type":"str","rooms":["list"],"internal_cohesion":"High|Medium|Low","notes_th":"str","notes_en":"str"}],
+                        "critical_paths": [{"path_name_th":"str","path":["room_A","room_B"],"importance":"Critical|High|Medium","reason_th":"str","reason_en":"str"}],
+                        "spatial_network_quality_verdict": {"score_label":"Excellent|Good|Fair|Poor","summary_th":"str","summary_en":"str","improvement_suggestions_th":["str"],"improvement_suggestions_en":["str"]},
                     },
-
                     "stage_06_output": {
-                        "recommended_structural_grid": "4×4 m | 4×6 m | 5×6 m | 6×6 m | 8×8 m | 6×9 m | 8×12 m",
-                        "grid_rationale_th": "string — เหตุผลการเลือก grid",
-                        "grid_rationale_en": "string",
-                        "estimated_floors": "int",
-                        "area_per_floor_m2": "float",
-                        "zone_layout_strategy_th": "string — กลยุทธ์การจัดวาง zone",
-                        "zone_layout_strategy_en": "string",
-                        "block_plan_notes_th": "string — หมายเหตุ schematic block plan",
-                        "block_plan_notes_en": "string",
-                        "orientation_strategy_th": "string — กลยุทธ์การวางทิศทาง",
-                        "orientation_strategy_en": "string",
+                        "recommended_structural_grid": "4×4 m|4×6 m|5×6 m|6×6 m|8×8 m|6×9 m|8×12 m",
+                        "grid_rationale_th": "str", "grid_rationale_en": "str",
+                        "estimated_floors": "int", "area_per_floor_m2": "float",
+                        "zone_layout_strategy_th": "str", "zone_layout_strategy_en": "str",
+                        "block_plan_notes_th": "str", "block_plan_notes_en": "str",
+                        "orientation_strategy_th": "str", "orientation_strategy_en": "str",
                     },
-
-                    "design_principles_applied": [
-                        "string — หลักการออกแบบที่ใช้ (bilingual หรือ English)",
-                    ],
-                    "professional_warnings": [
-                        "string — คำเตือนจากสถาปนิก (bilingual)",
-                    ],
-                    "overall_design_verdict": {
-                        "score": "int 1–10",
-                        "label_th": "string — ระดับคุณภาพ",
-                        "label_en": "string",
-                        "summary_th": "string — สรุปภาพรวมโครงการ",
-                        "summary_en": "string",
-                    },
-                    "total_area_check": "float — grand total including circulation",
+                    "design_principles_applied": ["str (bilingual)"],
+                    "professional_warnings": ["str (bilingual)"],
+                    "overall_design_verdict": {"score":"int 1–10","label_th":"str","label_en":"str","summary_th":"str","summary_en":"str"},
+                    "total_area_check": "float",
                 },
             }
             prompt_json = json.dumps(prompt_obj, indent=2, default=str, ensure_ascii=False)
             st.session_state["ai_prompt_exported"] = True
-            st.download_button(
-                "⬇ Download Full AI Prompt (Stage 02–06)",
-                data=prompt_json,
+            st.download_button("⬇ Download Full AI Prompt (Stage 02–06)", data=prompt_json,
                 file_name=f"pytron_ai_prompt_{st.session_state['project_name'].replace(' ','_')}.json",
-                mime="application/json",
-                key="ai_prompt_dl",
-            )
-            st.info("📋 วางทั้ง JSON นี้เป็น prompt ใน Claude / ChatGPT แล้ว Import กลับมา")
+                mime="application/json", key="ai_prompt_dl")
+            st.info("📋 วาง JSON นี้เป็น prompt ใน Claude / ChatGPT แล้ว Import กลับมา")
 
         st.markdown("---")
 
-        # AI Response Import (supports v2.0 flat + v2.1 nested stage_XX_output)
+        # AI Response Import
         ai_upload = st.file_uploader("⬆ Import AI Response JSON", type=["json"], key="ai_resp_upload")
         if ai_upload:
             try:
                 ai_data = json.load(ai_upload)
-                # --- Detect v2.1 nested format ---
                 is_v21 = "stage_02_output" in ai_data
                 if is_v21:
-                    s02 = ai_data.get("stage_02_output", {})
-                    s03 = ai_data.get("stage_03_output", {})
-                    s04 = ai_data.get("stage_04_output", {})
-                    new_rooms = s02.get("optimized_rooms", [])
-                    new_adj = s04.get("adjacency_matrix", [])
-                    new_groups = s02.get("space_groups_optimized", [])
-                    circ_val = s03.get("circulation_factor_recommended")
+                    _apply_ai_response(ai_data)
+                    n = len(st.session_state["rooms"])
+                    st.success(f"✅ [v2.1] Imported {n} rooms, Stage 02–06 ready, circ={st.session_state['circ_pct']:.0f}%")
+                    st.rerun()
                 else:
                     new_rooms = ai_data.get("optimized_rooms", [])
-                    new_adj = ai_data.get("adjacency_matrix", [])
-                    new_groups = ai_data.get("space_groups_optimized", [])
-                    circ_val = ai_data.get("circulation_factor_recommended")
-
-                errors = []
-                if not new_rooms:
-                    errors.append("Missing 'optimized_rooms'")
-                if not new_adj:
-                    errors.append("Missing 'adjacency_matrix'")
-                if errors:
-                    st.error("Validation failed: " + ", ".join(errors))
-                else:
-                    if len(new_adj) != len(new_rooms):
-                        st.error(f"Room count ({len(new_rooms)}) != adjacency matrix size ({len(new_adj)})")
+                    new_adj   = ai_data.get("adjacency_matrix", [])
+                    errors = []
+                    if not new_rooms: errors.append("Missing 'optimized_rooms'")
+                    if not new_adj:   errors.append("Missing 'adjacency_matrix'")
+                    if errors:
+                        st.error("Validation failed: " + ", ".join(errors))
+                    elif len(new_adj) != len(new_rooms):
+                        st.error(f"Room count ({len(new_rooms)}) != matrix size ({len(new_adj)})")
                     else:
                         st.session_state["rooms"] = new_rooms
                         st.session_state["adj_matrix"] = new_adj
-                        if circ_val is not None:
-                            cv = float(circ_val)
-                            st.session_state["circ_pct"] = cv * 100 if cv < 1 else cv
-                        if new_groups:
-                            st.session_state["space_groups"] = new_groups
-                        # v2.1 extra stage data
-                        if is_v21:
-                            st.session_state["ai_stage_data"] = {
-                                "stage_03": s03,
-                                "stage_04": s04,
-                                "network": ai_data.get("stage_05_output", {}),
-                                "schematic": ai_data.get("stage_06_output", {}),
-                            }
-                            st.session_state["ai_verdict"] = ai_data.get("overall_design_verdict", {})
-                            st.session_state["ai_warnings"] = ai_data.get("professional_warnings", [])
-                            st.session_state["ai_principles"] = ai_data.get("design_principles_applied", [])
+                        cv = ai_data.get("circulation_factor_recommended")
+                        if cv: st.session_state["circ_pct"] = float(cv)*100 if float(cv)<1 else float(cv)
                         st.session_state["ai_response_imported"] = True
-                        ver = "v2.1" if is_v21 else "v2.0"
-                        st.success(f"✅ [{ver}] Imported {len(new_rooms)} rooms, circ={st.session_state['circ_pct']:.0f}%")
+                        st.success(f"✅ [v2.0] Imported {len(new_rooms)} rooms")
                         st.rerun()
             except Exception as e:
                 st.error(f"Import failed: {e}")
+
+        st.markdown("---")
+        if st.button("🔁 Reset to Default Preset", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
 
         st.markdown("---")
         # Standard import
@@ -701,79 +766,64 @@ elif stage_idx == 1:
     st.subheader("Program Definition")
     st.caption("Define spatial groups — rooms auto-sized from Neufert standards.")
 
+    # ── Active Preset Banner ───────────────────────────────────────────
+    ptype = st.session_state.get("project_type", "Custom")
+    if ptype in RENTAL_PRESETS:
+        preset = RENTAL_PRESETS[ptype]
+        total_tgt = sum(g["target_m2"] for g in preset["groups"])
+        verdict   = st.session_state.get("ai_verdict", {})
+        score     = verdict.get("score", "—")
+        label_th  = verdict.get("label_th", "")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        with sc1:
+            st.markdown(f'<div class="metric-glow"><h3>🏠 Preset</h3><p style="font-size:0.9rem;">{ptype}</p></div>', unsafe_allow_html=True)
+        with sc2:
+            st.markdown(f'<div class="metric-glow"><h3>Target Area</h3><p>{total_tgt} m²</p></div>', unsafe_allow_html=True)
+        with sc3:
+            st.markdown(f'<div class="metric-glow"><h3>AI Score</h3><p>{score}/10</p></div>', unsafe_allow_html=True)
+        with sc4:
+            st.markdown(f'<div class="metric-glow"><h3>Verdict</h3><p style="font-size:0.75rem;">{label_th}</p></div>', unsafe_allow_html=True)
+
+        # Group cards from preset
+        st.markdown("##### 📦 Space Groups (จาก AI Optimized)")
+        for g in preset["groups"]:
+            r_str = " + ".join([f"**{r}** {g['manual_areas'].get(r,0):.1f} m²" for r in g["rooms"]])
+            zc = _zc(g["zone"])
+            st.markdown(f"""
+            <div class="pytron-card" style="padding:0.75rem 1.1rem;margin-bottom:0.5rem;">
+              <span class="zone-dot" style="background:{zc};"></span>
+              <b>{g['group_name']}</b> — {g['target_m2']} m²<br>
+              <span style="color:#e2e8f0;font-size:0.85rem;">{" + ".join([f"{r} ({g['manual_areas'].get(r,0):.1f} m²)" for r in g["rooms"]])}</span><br>
+              <span style="color:#06b6d4;font-size:0.8rem;">🇹🇭 {g['design_note_th']}</span><br>
+              <span style="color:#94a3b8;font-size:0.8rem;">🇬🇧 {g['design_note_en']}</span>
+            </div>""", unsafe_allow_html=True)
+
+        # AI Principles + Warnings
+        ai_principles = st.session_state.get("ai_principles", [])
+        ai_warnings   = st.session_state.get("ai_warnings", [])
+        verdict_data  = st.session_state.get("ai_verdict", {})
+
+        if verdict_data.get("summary_th"):
+            with st.expander("📊 Overall Verdict", expanded=True):
+                st.markdown(f"**🇹🇭** {verdict_data.get('summary_th','')}")
+                st.markdown(f"**🇬🇧** {verdict_data.get('summary_en','')}")
+
+        if ai_warnings:
+            with st.expander(f"⚠️ Professional Warnings ({len(ai_warnings)})", expanded=False):
+                for w in ai_warnings:
+                    st.markdown(f'<div class="law-card">{w}</div>', unsafe_allow_html=True)
+
+        if ai_principles:
+            with st.expander(f"✅ Design Principles ({len(ai_principles)})", expanded=False):
+                for p in ai_principles:
+                    st.caption(f"✓ {p}")
+
+        st.divider()
+
     groups = st.session_state["space_groups"]
     zones = ["Social", "Private", "Service", "Outdoor"]
     all_room_names = list(ROOM_STANDARDS.keys())
     preset_group_names = [g["group_name"] for g in DEFAULT_SPACE_GROUPS] + ["Custom"]
-
-    # ── Project Type Selector ──────────────────────────────────────────
-    st.markdown("##### 🏠 Project Type")
-    ptype_options = ["Custom"] + list(RENTAL_PRESETS.keys())
-    ptype_idx = ptype_options.index(st.session_state.get("project_type", "Custom")) if st.session_state.get("project_type", "Custom") in ptype_options else 0
-    selected_ptype = st.selectbox("เลือกประเภทโปรเจค / Project Type", ptype_options, index=ptype_idx, label_visibility="collapsed")
-    st.session_state["project_type"] = selected_ptype
-
-    if selected_ptype != "Custom":
-        preset = RENTAL_PRESETS[selected_ptype]
-        total_target = sum(g["target_m2"] for g in preset["groups"])
-        # Info summary card
-        pc1, pc2, pc3 = st.columns(3)
-        with pc1:
-            st.markdown(f'<div class="metric-glow"><h3>เป้าหมาย / Target</h3><p>{total_target} m²</p></div>', unsafe_allow_html=True)
-        with pc2:
-            st.markdown(f'<div class="metric-glow"><h3>กลุ่มห้อง / Groups</h3><p>{len(preset["groups"])}</p></div>', unsafe_allow_html=True)
-        with pc3:
-            st.markdown(f'<div class="metric-glow"><h3>Circulation</h3><p>{preset["circ_pct"]:.0f}%</p></div>', unsafe_allow_html=True)
-
-        # Group breakdown
-        for g in preset["groups"]:
-            rooms_str = " + ".join([f"{r} ({g['manual_areas'].get(r,0):.0f} m²)" for r in g["rooms"]])
-            st.markdown(f"""
-            <div class="pytron-card" style="padding:0.8rem 1.2rem;margin-bottom:0.5rem;">
-                <span class="zone-dot" style="background:{_zc(g['zone'])};"></span>
-                <b>{g['group_name']}</b> — {g['target_m2']} m²<br>
-                <span style="color:#94a3b8;font-size:0.85rem;">{rooms_str}</span><br>
-                <span style="color:#06b6d4;font-size:0.8rem;">🇹🇭 {g['design_note_th']}</span><br>
-                <span style="color:#94a3b8;font-size:0.8rem;">🇬🇧 {g['design_note_en']}</span>
-            </div>""", unsafe_allow_html=True)
-
-        col_load, col_skip = st.columns(2)
-        with col_load:
-            if st.button(f"⚡ โหลด Preset นี้ทันที", use_container_width=True, type="primary"):
-                p = RENTAL_PRESETS[selected_ptype]
-                st.session_state["project_name"]   = p["project_name"]
-                st.session_state["site_area"]      = p["site_area"]
-                st.session_state["far"]            = p["far"]
-                st.session_state["bcr"]            = p["bcr"]
-                st.session_state["setback_f"]      = p["setback_f"]
-                st.session_state["setback_s"]      = p["setback_s"]
-                st.session_state["setback_r"]      = p["setback_r"]
-                st.session_state["circ_pct"]       = p["circ_pct"]
-                st.session_state["space_groups"]   = [dict(g) for g in p["groups"]]
-                st.session_state["rooms"]          = _expand_groups_to_rooms(p["groups"])
-                # Auto-gen adjacency
-                _names = [r["name"] for r in st.session_state["rooms"]]
-                _n = len(_names)
-                _grps = st.session_state["space_groups"]
-                new_adj = [[0]*_n for _ in range(_n)]
-                for i in range(_n):
-                    for j in range(i+1, _n):
-                        a, b = _names[i], _names[j]
-                        val = _lookup_adjacency(a, b)
-                        if val >= 0:
-                            new_adj[i][j] = val; new_adj[j][i] = val
-                        elif _rooms_in_same_group(a, b, _grps):
-                            new_adj[i][j] = 1; new_adj[j][i] = 1
-                st.session_state["adj_matrix"] = new_adj
-                st.session_state["ai_response_imported"] = False
-                st.success(f"✅ Preset '{selected_ptype}' โหลดแล้ว — Stage 02–04 อัพเดทอัตโนมัติ")
-                st.rerun()
-        with col_skip:
-            if st.button("✏️ แก้ไข Groups เอง", use_container_width=True):
-                st.session_state["project_type"] = "Custom"
-                st.rerun()
-
-        st.divider()
 
     # Action buttons
     bc1, bc2 = st.columns(2)
