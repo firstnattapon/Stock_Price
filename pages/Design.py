@@ -335,7 +335,7 @@ with tab2:
                       help="สัดส่วนที่นำไปคูณเพื่อให้เต็มกรอบ Site พอดีเป๊ะ")
 
             st.dataframe(df.style.format("{:.2f}", subset=["net_area_sqm", clbl, "Gross_sqm"]),
-                         use_container_width=True)
+                         width="stretch")
 
             # ── 2. Adjacency Matrix (Plotly Interactive Heatmap) ──
             st.markdown("---")
@@ -431,7 +431,7 @@ with tab2:
                 ),
                 margin=dict(l=100, r=40, t=60, b=80),
             )
-            st.plotly_chart(fig_h, use_container_width=True)
+            st.plotly_chart(fig_h, width="stretch")
 
             # ── 3. Relationship Network Graph ──────────────────
             st.markdown("---")
@@ -484,7 +484,7 @@ with tab2:
                     xanchor="center",x=0.5,font=dict(size=11,color="#A0B8D8"),
                     bgcolor="#141C2E",bordercolor="#1E2E4A"),
             )
-            st.plotly_chart(fig_n, use_container_width=True)
+            st.plotly_chart(fig_n, width="stretch")
 
             # ════════════════════════════════════════════════════════
             # 4. Schematic Packed Block Plan (Plotly Interactive)
@@ -760,7 +760,7 @@ with tab2:
                 dragmode="pan",
             )
             # Default to pan mode with scroll zoom enabled
-            st.plotly_chart(fig_bp, use_container_width=True, config={
+            st.plotly_chart(fig_bp, width="stretch", config={
                 "scrollZoom": True,
                 "displayModeBar": True,
                 "modeBarButtonsToAdd": ["zoom2d", "pan2d", "resetScale2d"],
@@ -957,15 +957,15 @@ with tab2:
                             font=dict(size=13, color="#C8DCFF", family=THAI_FONT), x=0.5),
                         dragmode="pan",
                     )
-                    st.plotly_chart(fig_of, use_container_width=True, config={"scrollZoom":True})
+                    st.plotly_chart(fig_of, width="stretch", config={"scrollZoom":True})
 
                     # ── Show data tables ──
                     if openings:
                         st.markdown("#### 🚪 Openings Table")
-                        st.dataframe(pd.DataFrame(openings), use_container_width=True)
+                        st.dataframe(pd.DataFrame(openings), width="stretch")
                     if furniture:
                         st.markdown("#### 🪑 Furniture Table")
-                        st.dataframe(pd.DataFrame(furniture), use_container_width=True)
+                        st.dataframe(pd.DataFrame(furniture), width="stretch")
 
                     # ══════════════════════════════════════════════════
                     # 8. Validation Checks
