@@ -7,50 +7,13 @@ import math
 import networkx as nx
 
 # ══════════════════════════════════════════
-# ⚙️  Page Config + Mock Data
+# ⚙️  Page Config + Session State
 # ══════════════════════════════════════════
 st.set_page_config(page_title="AI Architecture Pipeline", layout="wide", page_icon="🏛️")
 
-MOCK_A = """{
-    "Space_Requirement": [
-        {"room": "Kitchen",      "net_area_sqm": 6.0},
-        {"room": "Dining",       "net_area_sqm": 6.0},
-        {"room": "Bathroom",     "net_area_sqm": 3.0},
-        {"room": "Closet",       "net_area_sqm": 3.0},
-        {"room": "Bedroom",      "net_area_sqm": 7.0},
-        {"room": "Living Area",  "net_area_sqm": 7.0}
-    ],
-    "Adjacency": [
-        {"room1": "Kitchen",     "room2": "Dining",   "score":  3, "reason": "Serve food"},
-        {"room1": "Bathroom",    "room2": "Closet",   "score":  3, "reason": "Dressing area"},
-        {"room1": "Bedroom",     "room2": "Living Area","score": 2, "reason": "Private connection"},
-        {"room1": "Living Area", "room2": "Dining",   "score":  2, "reason": "Open plan connection"},
-        {"room1": "Bedroom",     "room2": "Bathroom", "score":  2, "reason": "Convenience"},
-        {"room1": "Kitchen",     "room2": "Bedroom",  "score": -1, "reason": "Odor & Noise"}
-    ],
-    "Design_Concept": "Packed layout fitting exactly 8x4 meters site boundary. Front zone for Public/Service and Rear for Private rooms."
-}"""
-
-MOCK_B = json.dumps({
-    "Openings": [
-        {"id":"D1","room":"Bedroom","wall":"south","offset_m":0.5,"width_m":0.9,"height_m":2.1,"sill_height_m":0.0,"type":"door"},
-        {"id":"W1","room":"Kitchen","wall":"north","offset_m":1.0,"width_m":1.2,"height_m":1.2,"sill_height_m":0.9,"type":"window"},
-    ],
-    "Furniture": [
-        {"id":"F1","room":"Living Area","type":"table","w_m":1.0,"d_m":0.6,"h_m":0.75,"x_m":0.3,"y_m":0.3,"orientation_deg":0,"clearance_m":0.6,"placement_mode":"free"},
-    ],
-    "Checks": {"overlaps":[],"clearance_violations":[],"door_swing_conflicts":[]},
-}, ensure_ascii=False, indent=2)
-
-# ══════════════════════════════════════════
-# 💾  Unified Session State Initialization
-# ══════════════════════════════════════════
 if "site_width"  not in st.session_state: st.session_state.site_width  = 8.0
 if "site_length" not in st.session_state: st.session_state.site_length = 4.0
 if "plan_generated" not in st.session_state: st.session_state.plan_generated = False 
-if "circ_pct" not in st.session_state: st.session_state.circ_pct = 0
-if "prompt_a_json" not in st.session_state: st.session_state.prompt_a_json = MOCK_A
-if "prompt_b_json" not in st.session_state: st.session_state.prompt_b_json = MOCK_B
 
 # ── Global CSS ────────────────────────────────────────────────
 st.markdown("""
@@ -121,46 +84,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════
-# 🗄️  Sidebar: Workspace I/O (Import/Export)
-# ══════════════════════════════════════════
-with st.sidebar:
-    st.header("💾 Workspace I/O")
-    
-    # 1. Export System
-    export_data = {
-        "site_width": st.session_state.site_width,
-        "site_length": st.session_state.site_length,
-        "plan_generated": st.session_state.plan_generated,
-        "circ_pct": st.session_state.circ_pct,
-        "prompt_a_json": st.session_state.prompt_a_json,
-        "prompt_b_json": st.session_state.prompt_b_json
-    }
-    st.download_button(
-        label="📥 Export Project (.archproj)",
-        data=json.dumps(export_data, ensure_ascii=False, indent=2),
-        file_name="workspace.archproj",
-        mime="application/json",
-        use_container_width=True
-    )
-    
-    st.markdown("---")
-    
-    # 2. Import System
-    uploaded_file = st.file_uploader("📤 Import Project", type=["archproj", "json"])
-    if uploaded_file is not None:
-        if st.button("Load Workspace", use_container_width=True, type="primary"):
-            try:
-                loaded_data = json.load(uploaded_file)
-                # Hydrate session state
-                for k, v in loaded_data.items():
-                    if k in st.session_state:
-                        st.session_state[k] = v
-                st.success("✅ โหลดโปรเจกต์สำเร็จ!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ ไฟล์ไม่ถูกต้อง: {e}")
-
 st.markdown("""
 <div class="hero">
   <h1>🏛️ AI Architecture: Schematic Design Pipeline</h1>
@@ -178,15 +101,20 @@ ROOM_PALETTE = {
 }
 FALLBACK = ["#4E79A7","#E15759","#F28E2B","#59A14F",
             "#76B7B2","#B07AA1","#EDC948","#FF9DA7","#BAB0AC","#D37295"]
+
+ZONE_MAP = {
+    "Living Area":"Public","Dining":"Public",
+    "Kitchen":"Service","Laundry":"Service","Balcony":"Semi-Public",
+    "Bedroom":"Private","Bathroom":"Private","Closet":"Private",
+}
+ZONE_DARK   = {"Public":"#1B3A5C","Service":"#1B4030","Private":"#4A1B1B","Semi-Public":"#3A3000"}
+ZONE_ACCENT = {"Public":"#4A9EE0","Service":"#3CC470","Private":"#E05C5C","Semi-Public":"#E0C040"}
+
+# ── Thai font family for Plotly (browser-safe + Thai support) ──
 THAI_FONT = "Tahoma, Segoe UI, sans-serif"
 
-# ══════════════════════════════════════════
-# 🧠  Core Cached Algorithms (Performance)
-# ══════════════════════════════════════════
-@st.cache_data
-def generate_treemap_cached(items_tuple, x, y, w, h):
-    """Cached wrapper for Treemap packing. Input must be immutable (tuple)."""
-    items = list(items_tuple)
+# ── Slice and Dice Algorithm (Treemap Packing) ────────────────
+def generate_treemap(items, x, y, w, h):
     if not items: return []
     if len(items) == 1: return [{'room': items[0][0], 'x': x, 'y': y, 'w': w, 'h': h}]
     
@@ -206,28 +134,33 @@ def generate_treemap_cached(items_tuple, x, y, w, h):
     
     if w >= h:
         w1 = w * (area1 / tot_area)
-        r1 = generate_treemap_cached(tuple(items1), x, y, w1, h)
-        r2 = generate_treemap_cached(tuple(items2), x + w1, y, w - w1, h)
+        r1 = generate_treemap(items1, x, y, w1, h)
+        r2 = generate_treemap(items2, x + w1, y, w - w1, h)
     else:
         h1 = h * (area1 / tot_area)
-        r1 = generate_treemap_cached(tuple(items1), x, y, w, h1)
-        r2 = generate_treemap_cached(tuple(items2), x, y + h1, w, h - h1)
+        r1 = generate_treemap(items1, x, y, w, h1)
+        r2 = generate_treemap(items2, x, y + h1, w, h - h1)
     return r1 + r2
 
-@st.cache_data
-def compute_spring_layout(rooms_tuple, adjacency_str):
-    """Calculates NetworkX layout once and caches it."""
-    adjacency_list = json.loads(adjacency_str)
-    G = nx.Graph()
-    for r in rooms_tuple: G.add_node(r)
-    WM = {3:4.0, 2:2.5, 1:1.0, -1:0.02}
-    for adj in adjacency_list:
-        r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
-        if r1 in rooms_tuple and r2 in rooms_tuple:
-            G.add_edge(r1, r2, weight=WM.get(sc, 1.0))
-    sp = nx.spring_layout(G, weight="weight", seed=42)
-    sorted_rooms = sorted(list(rooms_tuple), key=lambda r: sp[r][1], reverse=True)
-    return sp, sorted_rooms
+# ── Bezier Curve Generator for Premium UI ────────────────────
+def get_bezier_curve(p0, p2, offset_ratio=0.15, num_points=30):
+    p0 = np.array(p0)
+    p2 = np.array(p2)
+    dist = np.linalg.norm(p2 - p0)
+    if dist == 0: return [p0[0]], [p0[1]]
+    
+    mid = (p0 + p2) / 2.0
+    d = p2 - p0
+    normal = np.array([-d[1], d[0]])
+    normal = normal / np.linalg.norm(normal)
+    
+    # สลับทิศทางความโค้งตามผลรวมของพิกัด เพื่อให้เส้นไขว้กันดูมีมิติ
+    direction = 1 if (p0[0] + p0[1]) % 2 > 1 else -1
+    p1 = mid + normal * (dist * offset_ratio * direction)
+    
+    t = np.linspace(0, 1, num_points)
+    curve = np.outer((1-t)**2, p0) + np.outer(2*(1-t)*t, p1) + np.outer(t**2, p2)
+    return curve[:, 0], curve[:, 1]
 
 
 # ══════════════════════════════════════════
@@ -249,8 +182,10 @@ with tab1:
     c1, c2 = st.columns(2)
     with c1:
         project_type = st.text_input("Project Type", value="บ้านเช่า (Rental House)")
-        width  = st.number_input("ความกว้าง Site (ม.)", value=st.session_state.site_width, step=0.5, min_value=1.0, key="site_width")
-        length = st.number_input("ความยาว Site (ม.)",  value=st.session_state.site_length, step=0.5, min_value=1.0, key="site_length")
+        width  = st.number_input("ความกว้าง Site (ม.)",  value=st.session_state.site_width,
+                                  step=0.5, min_value=1.0, key="site_width")
+        length = st.number_input("ความยาว Site (ม.)",   value=st.session_state.site_length,
+                                  step=0.5, min_value=1.0, key="site_length")
         st.info(f"📐 พื้นที่ Site รวม: **{width * length:.1f} ตร.ม.** ({width:.1f} × {length:.1f} ม.)")
     with c2:
         rooms = st.multiselect(
@@ -305,7 +240,8 @@ with tab1:
                 },
                 "required_output_schema": {
                     "Space_Requirement": [{"room":"string","net_area_sqm":"float"}],
-                    "Adjacency": [{"room1":"string","room2":"string","score":"int (3=ติดกัน,2=ใกล้,1=เฉยๆ,-1=แยก)","reason":"string"}],
+                    "Adjacency": [{"room1":"string","room2":"string",
+                        "score":"int (3=ติดกัน,2=ใกล้,1=เฉยๆ,-1=แยก)","reason":"string"}],
                     "Design_Concept": "string",
                 },
             }
@@ -314,43 +250,64 @@ with tab1:
 
 
 # ════════════════════════════════════════════════════════════════
-# 📥  TAB 2
+# รับ Input พื้นฐานสำหรับ Tab 2
 # ════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("⚙️ Circulation Factor")
     cc1, cc2 = st.columns([1, 3])
     with cc1:
-        circ_pct = st.number_input("Circulation (% Net Area)", min_value=0, max_value=100, step=5, key="circ_pct", help="แนะนำให้ปรับเป็น 0% หากต้องการให้ Site คุมสัดส่วนพื้นที่เอง")
+        circ_pct = st.number_input("Circulation (% Net Area)", min_value=0, max_value=100,
+            value=0, step=5, help="แนะนำให้ปรับเป็น 0% หากต้องการให้ Site คุมสัดส่วนพื้นที่เอง")
     with cc2:
         st.info("💡 เนื่องจากใช้วิธี Pack Area พอดี Site ระบบจะแปลง Circulation เป็นตัวคูณ (Scaling Factor) เพื่อปรับสัดส่วนรวมให้พอดี")
     circ_factor = circ_pct / 100.0
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # JSON Input
+    MOCK = """{
+    "Space_Requirement": [
+        {"room": "Kitchen",      "net_area_sqm": 6.0},
+        {"room": "Dining",       "net_area_sqm": 6.0},
+        {"room": "Bathroom",     "net_area_sqm": 3.0},
+        {"room": "Closet",       "net_area_sqm": 3.0},
+        {"room": "Bedroom",      "net_area_sqm": 7.0},
+        {"room": "Living Area",  "net_area_sqm": 7.0}
+    ],
+    "Adjacency": [
+        {"room1": "Kitchen",     "room2": "Dining",   "score":  3, "reason": "Serve food"},
+        {"room1": "Bathroom",    "room2": "Closet",   "score":  3, "reason": "Dressing area"},
+        {"room1": "Bedroom",     "room2": "Living Area","score": 2, "reason": "Private connection"},
+        {"room1": "Living Area", "room2": "Dining",   "score":  2, "reason": "Open plan connection"},
+        {"room1": "Bedroom",     "room2": "Bathroom", "score":  2, "reason": "Convenience"},
+        {"room1": "Kitchen",     "room2": "Bedroom",  "score": -1, "reason": "Odor & Noise"}
+    ],
+    "Design_Concept": "Packed layout fitting exactly 8x4 meters site boundary. Front zone for Public/Service and Rear for Private rooms."
+}"""
+
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("📋 วาง AI Result JSON (Prompt A)")
-    user_json = st.text_area("⬇️ JSON output from Claude / ChatGPT", height=220, key="prompt_a_json")
+    user_json = st.text_area("⬇️ JSON output from Claude / ChatGPT", value=MOCK, height=220)
     st.markdown('</div>', unsafe_allow_html=True)
 
     if st.button("✨ Generate Schematic Packed Plan", type="primary"):
         st.session_state.plan_generated = True
 
 # ════════════════════════════════════════════════════════════════
-# ประมวลผลและ Render Graphic (รันร่วม Tab 2 และ Tab 3)
+# ระบบประมวลผลข้อมูลร่วมสำหรับ Tab 2 และ Tab 3
 # ════════════════════════════════════════════════════════════════
-if st.session_state.plan_generated:
+if st.session_state.get("plan_generated", False):
     try:
-        data = json.loads(st.session_state.prompt_a_json)
+        data      = json.loads(user_json)
         if "Space_Requirement" not in data:
-            st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Space_Requirement' ใน JSON ที่คุณวาง")
+            st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Space_Requirement' ใน JSON ที่คุณวาง\n\n💡 ดูเหมือนว่าคุณกำลังนำ JSON ผลลัพธ์ของ Openings + Furniture มาวางผิดที่ กรุณาไปที่ Tab 3 แทนครับ")
             st.stop()
             
-        df = pd.DataFrame(data["Space_Requirement"])
-        clbl = f"Circulation_{circ_pct}%"
-        df[clbl] = df["net_area_sqm"] * circ_factor
-        df["Gross_sqm"] = df["net_area_sqm"] + df[clbl]
-        rooms_list = df["room"].tolist()
-        rooms_tuple = tuple(rooms_list) # For caching
+        df        = pd.DataFrame(data["Space_Requirement"])
+        clbl      = f"Circulation_{circ_pct}%"
+        df[clbl]          = df["net_area_sqm"] * circ_factor
+        df["Gross_sqm"]   = df["net_area_sqm"] + df[clbl]
+        rooms_list        = df["room"].tolist()
 
         pal = {}; fi = 0
         for r in rooms_list:
@@ -360,20 +317,28 @@ if st.session_state.plan_generated:
         t_net   = df["net_area_sqm"].sum()
         t_gross = df["Gross_sqm"].sum()
         
-        SITE_W = st.session_state.site_width
-        SITE_L = st.session_state.site_length
+        SITE_W = st.session_state.get("site_width",  8.0)
+        SITE_L = st.session_state.get("site_length", 4.0)
         SITE_AREA = SITE_W * SITE_L
         scale_ratio = SITE_AREA / t_gross if t_gross > 0 else 1
 
-        # Calculate Layout via Caching Functions
-        adj_str = json.dumps(data.get("Adjacency", []))
-        sp, sorted_rooms = compute_spring_layout(rooms_tuple, adj_str)
-        
-        items_to_pack = tuple((r, df.loc[df["room"]==r, "Gross_sqm"].values[0] * scale_ratio) for r in sorted_rooms)
-        layout_rects = generate_treemap_cached(items_to_pack, 0, 0, SITE_W, SITE_L)
+        # Calculate Layout Rectangles
+        G = nx.Graph()
+        for r in rooms_list: G.add_node(r)
+        WM = {3:4.0, 2:2.5, 1:1.0, -1:0.02}
+        for adj in data["Adjacency"]:
+            r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
+            if r1 in rooms_list and r2 in rooms_list:
+                G.add_edge(r1, r2, weight=WM.get(sc, 1.0))
+        sp = nx.spring_layout(G, weight="weight", seed=42)
+        sorted_rooms = sorted(rooms_list, key=lambda r: sp[r][1], reverse=True)
+        items_to_pack = [(r, df.loc[df["room"]==r, "Gross_sqm"].values[0] * scale_ratio) for r in sorted_rooms]
+        layout_rects = generate_treemap(items_to_pack, 0, 0, SITE_W, SITE_L)
 
         # Build room lookup
-        room_lookup = {rd["room"]: rd for rd in layout_rects}
+        room_lookup = {}
+        for rd in layout_rects:
+            room_lookup[rd["room"]] = rd
 
         # ── Render TAB 2 ──
         with tab2:
@@ -384,13 +349,14 @@ if st.session_state.plan_generated:
             m2.metric("🏗️ Gross Area", f"{t_gross:.2f} ตร.ม.")
             m3.metric("🟩 Site Box", f"{SITE_AREA:.2f} ตร.ม.")
             m4.metric("⚖️ Scaling Factor", f"x {scale_ratio:.2f}", help="สัดส่วนที่นำไปคูณเพื่อให้เต็มกรอบ Site พอดีเป๊ะ")
+
             st.dataframe(df.style.format("{:.2f}", subset=["net_area_sqm", clbl, "Gross_sqm"]), width="stretch")
 
             # 2. Adjacency Matrix
             st.markdown("---")
             st.markdown("### 🧮 2. Adjacency Matrix")
             mat = pd.DataFrame(0, index=rooms_list, columns=rooms_list)
-            for adj in data.get("Adjacency", []):
+            for adj in data["Adjacency"]:
                 r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
                 if r1 in rooms_list and r2 in rooms_list:
                     mat.at[r1, r2] = sc; mat.at[r2, r1] = sc
@@ -403,7 +369,7 @@ if st.session_state.plan_generated:
                     score = int(mat_values[i][j])
                     label = {3:"ต้องติดกัน", 2:"ควรใกล้กัน", 1:"เฉยๆ", -1:"ควรแยก"}.get(score, "ไม่มีความสัมพันธ์")
                     reason = ""
-                    for a in data.get("Adjacency", []):
+                    for a in data["Adjacency"]:
                         if (a["room1"] == r_row and a["room2"] == r_col) or (a["room1"] == r_col and a["room2"] == r_row):
                             reason = a.get("reason", "")
                             break
@@ -416,7 +382,10 @@ if st.session_state.plan_generated:
                     val = int(mat_values[i][j])
                     annotations.append(dict(x=r_col, y=r_row, text=str(val), font=dict(color="white" if abs(val) >= 2 else "#C8DCFF", size=13, family=THAI_FONT), showarrow=False))
 
-            fig_h = go.Figure(data=go.Heatmap(z=mat_values, x=rooms_list, y=rooms_list, colorscale="RdYlGn", zmin=-1, zmax=3, zmid=0, hovertext=hover_text, hoverinfo="text", colorbar=dict(thickness=15, len=0.8), xgap=2, ygap=2))
+            fig_h = go.Figure(data=go.Heatmap(
+                z=mat_values, x=rooms_list, y=rooms_list, colorscale="RdYlGn", zmin=-1, zmax=3, zmid=0,
+                hovertext=hover_text, hoverinfo="text", colorbar=dict(thickness=15, len=0.8), xgap=2, ygap=2
+            ))
             fig_h.update_layout(title=dict(text="Adjacency Matrix", font=dict(size=14, color="#C8DCFF", family=THAI_FONT), x=0.5), annotations=annotations, height=500, plot_bgcolor="#0F1624", paper_bgcolor="#0F1624")
             st.plotly_chart(fig_h, width="stretch")
 
@@ -432,76 +401,181 @@ if st.session_state.plan_generated:
                 -1: dict(c="#888888",w=1.5,d="dash", l="Score -1 — keep apart"),
             }
             fig_n = go.Figure(); dl = set()
-            for adj in data.get("Adjacency", []):
+            for adj in data["Adjacency"]:
                 r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
                 if r1 not in pn or r2 not in pn: continue
-                s=ES.get(sc,ES[1]); x0,y0=pn[r1]; x1,y1=pn[r2]
+                s=ES.get(sc,ES[1]); x0,y0=pn[r1]; x1,y1=pn[r2]; mx,my=(x0+x1)/2,(y0+y1)/2
                 show=s["l"] not in dl; dl.add(s["l"])
-                fig_n.add_trace(go.Scatter(x=[x0,x1,None],y=[y0,y1,None],mode="lines",line=dict(color=s["c"],width=s["w"],dash=s["d"]), name=s["l"],legendgroup=s["l"],showlegend=show,hoverinfo="skip"))
+                fig_n.add_trace(go.Scatter(x=[x0,x1,None],y=[y0,y1,None],mode="lines",
+                    line=dict(color=s["c"],width=s["w"],dash=s["d"]), name=s["l"],legendgroup=s["l"],showlegend=show,hoverinfo="skip"))
             
             na=[df.loc[df["room"]==r,"net_area_sqm"].values[0] for r in rooms_list]
-            fig_n.add_trace(go.Scatter(x=[pn[r][0] for r in rooms_list], y=[pn[r][1] for r in rooms_list], mode="markers+text", marker=dict(size=[max(44,a*7) for a in na],color=[pal[r] for r in rooms_list],line=dict(color="white",width=2.5)), text=rooms_list,textfont=dict(size=10,color="white",family="Arial Black"), hoverinfo="text",showlegend=False))
+            fig_n.add_trace(go.Scatter(x=[pn[r][0] for r in rooms_list], y=[pn[r][1] for r in rooms_list],
+                mode="markers+text", marker=dict(size=[max(44,a*7) for a in na],color=[pal[r] for r in rooms_list],line=dict(color="white",width=2.5)),
+                text=rooms_list,textfont=dict(size=10,color="white",family="Arial Black"), hoverinfo="text",showlegend=False))
             fig_n.update_layout(height=520, plot_bgcolor="#0F1624", paper_bgcolor="#0F1624", xaxis=dict(visible=False), yaxis=dict(visible=False))
             st.plotly_chart(fig_n, width="stretch")
 
-            # 4. Schematic Packed Block Plan
+            # 4. Schematic Packed Block Plan (Commercial Grade)
             st.markdown("---")
-            st.markdown("### 🟩 4. Schematic Packed Floor Plan  (100% Site Fit)")
+            st.markdown("### 🟩 4. Schematic Packed Floor Plan (Commercial Grade)")
+            
+            show_adj_overlay = st.toggle("✨ Premium Adjacency Overlay", value=True, help="แสดงความสัมพันธ์ด้วยเส้นโค้ง Bezier และเอฟเฟกต์ Neon Glow")
 
             BG = "#0F1624"; ANNO_CLR = "#FFD700"; OUTER_PAD = max(SITE_W, SITE_L) * 0.15
             fig_bp = go.Figure()
+            pos_packed = {}
             
             pad = 0.04
+            room_opacity = 0.35 if show_adj_overlay else 0.92 
+            
+            # --- LAYER 1: ฐานของห้อง (Rectangles) ---
             for r_data in layout_rects:
                 room, rx, ry, rw, rh = r_data['room'], r_data['x'], r_data['y'], r_data['w'], r_data['h']
                 cx, cy = rx + rw/2.0, ry + rh/2.0
-                fig_bp.add_shape(type="rect", x0=rx+pad, y0=ry+pad, x1=rx+rw-pad, y1=ry+rh-pad, fillcolor=pal[room], opacity=0.92, line=dict(color="#FFFFFF", width=2))
-                fig_bp.add_trace(go.Scatter(x=[cx], y=[cy+rh*0.08], mode="text", text=[room], textfont=dict(size=12, color="white", family="Arial Black"), showlegend=False, hoverinfo="skip"))
+                pos_packed[room] = [cx, cy]
+                color = pal[room]
+                
+                # วาดพื้นหลังห้อง
+                fig_bp.add_shape(type="rect", x0=rx+pad, y0=ry+pad, x1=rx+rw-pad, y1=ry+rh-pad, 
+                                 fillcolor=color, opacity=room_opacity, line=dict(color="#FFFFFF", width=1.5), layer="below")
 
-            fig_bp.add_shape(type="rect", x0=0, y0=0, x1=SITE_W, y1=SITE_L, line=dict(color=ANNO_CLR, width=4), fillcolor="rgba(0,0,0,0)")
+            # --- LAYER 2: เส้นความสัมพันธ์ (Bezier Curves) ---
+            met_rules = []
+            broken_rules = []
+
+            def check_adjacency(r1_name, r2_name, tol=0.1):
+                r1 = room_lookup.get(r1_name); r2 = room_lookup.get(r2_name)
+                if not r1 or not r2: return False
+                return not (r1['x'] > r2['x'] + r2['w'] + tol or r1['x'] + r1['w'] < r2['x'] - tol or
+                            r1['y'] > r2['y'] + r2['h'] + tol or r1['y'] + r1['h'] < r2['y'] - tol)
+
+            if show_adj_overlay:
+                for adj in data.get("Adjacency", []):
+                    r1, r2, sc = adj.get("room1"), adj.get("room2"), adj.get("score", 0)
+                    reason = adj.get("reason", "")
+                    
+                    if r1 in pos_packed and r2 in pos_packed and sc >= 2:
+                        is_adj = check_adjacency(r1, r2)
+                        status_text = "✅ (ติดกันตามแผน)" if is_adj else "⚠️ (ถูกแยกด้วย Treemap)"
+                        
+                        if is_adj: met_rules.append(f"**{r1} ↔ {r2}** (Score {sc}): {reason}")
+                        else: broken_rules.append(f"**{r1} ↔ {r2}** (Score {sc}): {reason}")
+                        
+                        x0, y0 = pos_packed[r1]
+                        x1, y1 = pos_packed[r2]
+                        
+                        line_color = "#FF4D4D" if sc == 3 else "#FFD700"
+                        hover_text = f"<b>{r1} ↔ {r2}</b><br>Score: {sc}<br>Reason: {reason}<br>Status: {status_text}"
+                        
+                        # สร้างเส้นโค้ง Bezier
+                        bx, by = get_bezier_curve([x0, y0], [x1, y1], offset_ratio=0.12)
+                        
+                        # กวาดเส้นเงาสีดำหนาๆ (Outer Glow / Shadow) ลงในเลเยอร์ล่าง
+                        fig_bp.add_trace(go.Scatter(
+                            x=bx, y=by, mode="lines",
+                            line=dict(color="#0F1624", width=8), 
+                            hoverinfo="skip", showlegend=False
+                        ))
+                        # วาดเส้นเรืองแสงตรงกลาง (Core Line)
+                        fig_bp.add_trace(go.Scatter(
+                            x=bx, y=by, mode="lines",
+                            line=dict(color=line_color, width=3.5 if sc==3 else 2.5, dash="solid" if sc==3 else "dot"),
+                            hoverinfo="text", hovertext=hover_text, showlegend=False
+                        ))
+
+            # --- LAYER 3: จุดเชื่อมต่อ (Nodes) ---
+            if show_adj_overlay:
+                node_x = [pos_packed[r][0] for r in pos_packed]
+                node_y = [pos_packed[r][1] for r in pos_packed]
+                # วาด Node วงกลมสมบูรณ์แบบ ทับเส้นทั้งหมด
+                fig_bp.add_trace(go.Scatter(
+                    x=node_x, y=node_y, mode="markers",
+                    marker=dict(size=14, color="#0F1624", line=dict(color="#FFFFFF", width=2.5)),
+                    hoverinfo="skip", showlegend=False
+                ))
+
+            # --- LAYER 4: ข้อความ (Text Labels) ---
+            for r_data in layout_rects:
+                room, cx, cy, rh = r_data['room'], r_data['x']+r_data['w']/2.0, r_data['y']+r_data['h']/2.0, r_data['h']
+                fig_bp.add_trace(go.Scatter(
+                    x=[cx], y=[cy+rh*0.14], mode="text", text=[room], 
+                    textfont=dict(size=13, color="white", family="Arial Black"), 
+                    showlegend=False, hoverinfo="skip"
+                ))
+
+            # ตีกรอบเหลืองรอบ Site
+            fig_bp.add_shape(type="rect", x0=0, y0=0, x1=SITE_W, y1=SITE_L, line=dict(color=ANNO_CLR, width=3), fillcolor="rgba(0,0,0,0)", layer="above")
+            
             fig_bp.update_layout(height=max(500, int(500*(SITE_L+2*OUTER_PAD)/(SITE_W+2*OUTER_PAD))), plot_bgcolor=BG, paper_bgcolor=BG, xaxis=dict(visible=False, scaleanchor="y", scaleratio=1), yaxis=dict(visible=False), margin=dict(l=20, r=20, t=40, b=20))
             st.plotly_chart(fig_bp, width="stretch", config={"scrollZoom": True})
 
+            if met_rules or broken_rules:
+                c1, c2 = st.columns(2)
+                with c1: st.success("**✅ ความสัมพันธ์ที่จัดได้สำเร็จ:**\n" + ("\n".join([f"- {m}" for m in met_rules]) if met_rules else "\n- ไม่มี"))
+                with c2: st.warning("**⚠️ ความสัมพันธ์ที่ถูกบีบให้แยกกัน:**\n" + ("\n".join([f"- {b}" for b in broken_rules]) if broken_rules else "\n- ไม่มี"))
+
+            # 5. Design Concept
             st.markdown("---")
             st.markdown("### 🧠 5. AI Design Concept")
             st.info(f"💡 {data.get('Design_Concept', '')}")
+
             st.success("✅ **สร้าง Packed Plan สำเร็จ!** ไปที่แท็บ **'🪑 3. PROMPT B & FINAL PRODUCT'** เพื่อใส่ประตู หน้าต่าง และเฟอร์นิเจอร์ต่อได้เลยครับ")
+
 
         # ── Render TAB 3 ──
         with tab3:
             st.markdown("### 🚪 6. AI Prompt — Openings + Furniture")
             st.markdown('<div class="note"><b>💡 Two-Stage AI Flow:</b> คัดลอก Prompt ด้านล่างไปส่งให้ AI อีกรอบ เพื่อได้ช่องเปิด + เฟอร์นิเจอร์ที่ลงตัวตามพิกัดห้อง</div>', unsafe_allow_html=True)
 
-            packed_plan_for_prompt = [{"room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3), "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0} for rd in layout_rects]
+            packed_plan_for_prompt = []
+            for rd in layout_rects:
+                packed_plan_for_prompt.append({
+                    "room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3),
+                    "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0,
+                })
             auto_prompt_b = {
                 "system_prompt": "คุณคือสถาปนิกระดับ Senior และผู้เชี่ยวชาญด้าน Space Planning ที่แม่นยำทางคณิตศาสตร์ — ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกกรอบ JSON",
                 "user_prompt": "รับข้อมูล 'Packed_Plan' (สี่เหลี่ยมจัดสรรพื้นที่) — คืนค่า Openings (ประตู/หน้าต่าง) และ Furniture placement โดยต้องทำตามกฎพิกัด Local Coordinates และ Mathematical Bounding อย่างเคร่งครัด",
                 "strict_mathematical_rules": {
-                    "1_coordinate_system": {"type": "Local / Relative Coordinates", "rule": "พิกัด x_m และ y_m ของเฟอร์นิเจอร์ต้องเริ่มที่ (0,0) ซึ่งหมายถึง 'มุมซ้ายล่างของห้องนั้นๆ' เสมอ"},
-                    "2_furniture_bounding_box": {"rule": "เฟอร์นิเจอร์ต้องไม่ล้นออกนอกขอบเขตห้อง", "x_axis_clamp": "0 <= x_m <= (Room_w - Furniture_w)", "y_axis_clamp": "0 <= y_m <= (Room_h - Furniture_d)"},
-                    "3_openings_bounding": {"rule": "ตำแหน่ง offset_m ต้องไม่เกินความกว้างหรือยาวของกำแพงห้อง"},
-                    "4_clearance_overlap": {"rule": "ตรวจสอบ clearance_m ของเฟอร์นิเจอร์ไม่ให้ทับซ้อน (Overlap) กับระยะเดินหรือสวิงประตูภายใน Local Room"}
+                    "1_coordinate_system": {"type": "Local / Relative Coordinates", "rule": "พิกัด x_m และ y_m ของเฟอร์นิเจอร์ทุกชิ้น จะต้องเริ่มต้นที่ (0,0) ซึ่งหมายถึง 'มุมซ้ายล่างของห้องนั้นๆ' เสมอ (ห้ามใช้พิกัด Absolute ของทั้งไซต์งาน)"},
+                    "2_furniture_bounding_box": {"rule": "เฟอร์นิเจอร์ต้องไม่ล้นออกนอกขอบเขตห้อง (Slice and Dice Bounding) โดยต้องเป็นไปตามสมการนี้:", "x_axis_clamp": "0 <= x_m <= (Room_w - Furniture_w)", "y_axis_clamp": "0 <= y_m <= (Room_h - Furniture_d)"},
+                    "3_openings_bounding": {"rule": "ตำแหน่ง offset_m ของประตูและหน้าต่างต้องไม่เกินความกว้างหรือยาวของกำแพงห้อง", "north_south_walls": "0 <= offset_m <= (Room_w - Opening_width)", "east_west_walls": "0 <= offset_m <= (Room_h - Opening_width)"},
+                    "4_clearance_overlap": {"rule": "ตรวจสอบ clearance_m ของเฟอร์นิเจอร์แต่ละชิ้น ไม่ให้ทับซ้อน (Overlap) กับระยะเดินหรือสวิงประตู (Door Swing) ภายใน Local Room นั้นๆ"}
                 },
                 "constraints_data": {"walkway_clearance_m": 0.6, "seating_clearance_m": 0.8, "bed_clearance_m": 0.5, "door_min_width_m": 0.8, "window_min_width_m": 0.6},
                 "Packed_Plan": packed_plan_for_prompt,
                 "metadata": {"site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4)},
                 "required_output_schema": {
                     "Openings": [{"id": "string", "room": "string", "wall": "string (north|south|east|west)", "offset_m": "float (relative to wall start)", "width_m": "float", "height_m": "float", "sill_height_m": "float", "type": "string (window|door|sliding|fixed)"}],
-                    "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "h_m": "float", "x_m": "float (Local X)", "y_m": "float (Local Y)", "orientation_deg": "float (0, 90, 180, 270)", "clearance_m": "float", "placement_mode": "string (wall-mounted|free|corner|island)"}],
+                    "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "h_m": "float", "x_m": "float (Local coordinate X)", "y_m": "float (Local coordinate Y)", "orientation_deg": "float (0, 90, 180, 270)", "clearance_m": "float", "placement_mode": "string (wall-mounted|free|corner|island)"}],
                     "Checks": {"overlaps": ["array of structural violations"], "clearance_violations": ["array of clearance issues"], "door_swing_conflicts": ["array of swing issues"]}
                 }
             }
             st.code(json.dumps(auto_prompt_b, ensure_ascii=False, indent=4), language="json")
 
+            # 7. Import Openings + Furniture JSON
             st.markdown("---")
             st.markdown("### 🪑 7. Import Openings + Furniture (AI Result)")
-            of_json = st.text_area("⬇️ วาง Openings + Furniture JSON จาก AI (Prompt B)", height=200, key="prompt_b_json")
+
+            MOCK_OF = json.dumps({
+                "Openings": [
+                    {"id":"D1","room":layout_rects[0]["room"],"wall":"south","offset_m":0.5,"width_m":0.9,"height_m":2.1,"sill_height_m":0.0,"type":"door"},
+                    {"id":"W1","room":layout_rects[-1]["room"],"wall":"north","offset_m":1.0,"width_m":1.2,"height_m":1.2,"sill_height_m":0.9,"type":"window"},
+                ],
+                "Furniture": [
+                    {"id":"F1","room":layout_rects[0]["room"],"type":"table","w_m":1.0,"d_m":0.6,"h_m":0.75,"x_m":0.3,"y_m":0.3,"orientation_deg":0,"clearance_m":0.6,"placement_mode":"free"},
+                ],
+                "Checks": {"overlaps":[],"clearance_violations":[],"door_swing_conflicts":[]},
+            }, ensure_ascii=False, indent=2)
+
+            of_json = st.text_area("⬇️ วาง Openings + Furniture JSON จาก AI (Prompt B)", value=MOCK_OF, height=200, key="of_json")
 
             if st.button("🪑 Visualize Openings + Furniture", type="primary"):
                 try:
-                    of_data = json.loads(st.session_state.prompt_b_json)
+                    of_data = json.loads(of_json)
                     if "Openings" not in of_data and "Furniture" not in of_data:
-                        st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Openings' หรือ 'Furniture'")
+                        st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Openings' หรือ 'Furniture' กรุณาตรวจสอบว่าไม่ได้นำ JSON ของ Space Requirement มาวางผิดช่อง")
                         st.stop()
                         
                     openings  = of_data.get("Openings", [])
@@ -583,6 +657,14 @@ if st.session_state.plan_generated:
 
                     if not overlaps and not cl_violations and not swing_conf and not auto_warnings:
                         st.success("✅ All checks passed — สมบูรณ์แบบ! ไม่พบ overlap หรือจุดบกพร่อง")
+
+                    st.markdown("---")
+                    st.markdown("### 📦 Final AI Result JSON (Complete)")
+                    final_json = {
+                        "Packed_Plan": packed_plan_for_prompt, "Openings": openings, "Furniture": furniture, "Checks": checks,
+                        "metadata": {"site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4), "total_net_sqm": round(t_net, 2), "total_gross_sqm": round(t_gross, 2)},
+                    }
+                    st.code(json.dumps(final_json, ensure_ascii=False, indent=2), language="json")
 
                 except Exception as e2:
                     st.error(f"❌ Openings/Furniture JSON ไม่ถูกต้อง: {e2}")
