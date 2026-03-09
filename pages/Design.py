@@ -13,6 +13,7 @@ st.set_page_config(page_title="AI Architecture Pipeline", layout="wide", page_ic
 
 if "site_width"  not in st.session_state: st.session_state.site_width  = 8.0
 if "site_length" not in st.session_state: st.session_state.site_length = 4.0
+if "plan_generated" not in st.session_state: st.session_state.plan_generated = False # เพิ่ม Session State สำหรับจำสถานะปุ่ม
 
 # ── Global CSS ────────────────────────────────────────────────
 st.markdown("""
@@ -297,7 +298,12 @@ with tab2:
     user_json = st.text_area("⬇️ JSON output from Claude / ChatGPT", value=MOCK, height=220)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # เมื่อกดปุ่มนี้ ให้บันทึกสถานะว่ากดแล้วลงใน Session State
     if st.button("✨ Generate Schematic Packed Plan", type="primary"):
+        st.session_state.plan_generated = True
+
+    # ใช้ if เพื่อแสดงผลลัพธ์ถ้า plan ถูก generate แล้ว
+    if st.session_state.get("plan_generated", False):
         try:
             data      = json.loads(user_json)
             if "Space_Requirement" not in data:
