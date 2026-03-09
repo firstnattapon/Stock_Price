@@ -110,6 +110,7 @@ ZONE_MAP = {
 ZONE_DARK   = {"Public":"#1B3A5C","Service":"#1B4030","Private":"#4A1B1B","Semi-Public":"#3A3000"}
 ZONE_ACCENT = {"Public":"#4A9EE0","Service":"#3CC470","Private":"#E05C5C","Semi-Public":"#E0C040"}
 
+# ── Thai font family for Plotly (browser-safe + Thai support) ──
 THAI_FONT = "Tahoma, Segoe UI, sans-serif"
 
 # ── Slice and Dice Algorithm (Treemap Packing) ────────────────
@@ -226,6 +227,7 @@ with tab1:
             st.success("✅ **Prompt A — Packed Plan**: คัดลอกข้อความด้านล่างนี้ไปวางใน Claude / ChatGPT เพื่อรับข้อมูลการจัดโซนห้อง (สำหรับใช้งานใน Tab 2)")
             st.code(json.dumps(prompt, ensure_ascii=False, indent=4), language="json")
 
+
 # ════════════════════════════════════════════════════════════════
 # รับ Input พื้นฐานสำหรับ Tab 2
 # ════════════════════════════════════════════════════════════════
@@ -299,6 +301,7 @@ if st.session_state.get("plan_generated", False):
         SITE_AREA = SITE_W * SITE_L
         scale_ratio = SITE_AREA / t_gross if t_gross > 0 else 1
 
+        # Calculate Layout Rectangles
         G = nx.Graph()
         for r in rooms_list: G.add_node(r)
         WM = {3:4.0, 2:2.5, 1:1.0, -1:0.02}
@@ -311,6 +314,7 @@ if st.session_state.get("plan_generated", False):
         items_to_pack = [(r, df.loc[df["room"]==r, "Gross_sqm"].values[0] * scale_ratio) for r in sorted_rooms]
         layout_rects = generate_treemap(items_to_pack, 0, 0, SITE_W, SITE_L)
 
+        # Build room lookup
         room_lookup = {}
         for rd in layout_rects:
             room_lookup[rd["room"]] = rd
@@ -391,25 +395,32 @@ if st.session_state.get("plan_generated", False):
             fig_n.update_layout(height=520, plot_bgcolor="#0F1624", paper_bgcolor="#0F1624", xaxis=dict(visible=False), yaxis=dict(visible=False))
             st.plotly_chart(fig_n, width="stretch")
 
-            # 4. Schematic Packed Block Plan
+            # 4. Schematic Packed Block Plan (อัปเดตใหม่เพื่อแก้ปัญหา Visual Spaghetti)
             st.markdown("---")
-            st.markdown("### 🟩 4. Schematic Packed Floor Plan  (100% Site Fit)")
+            st.markdown("### 🟩 4. Schematic Packed Floor Plan (100% Site Fit)")
             
-            show_adj_overlay = st.toggle("🔍 แสดงเส้นความสัมพันธ์ (Adjacency Overlay)", value=True, help="แสดงเส้นเชื่อมระหว่างห้องที่มี Score ความสัมพันธ์ระดับ 2 และ 3")
+            show_adj_overlay = st.toggle("🔍 แสดงเส้นความสัมพันธ์ (Adjacency Overlay)", value=True, help="ลดความสว่างของห้องและแสดงเส้นเชื่อมความสัมพันธ์")
 
             BG = "#0F1624"; ANNO_CLR = "#FFD700"; OUTER_PAD = max(SITE_W, SITE_L) * 0.15
             fig_bp = go.Figure()
             pos_packed = {}
             
             pad = 0.04
+            # Dynamic Opacity: ดรอปความเข้มของห้องเมื่อเปิดโหมด Overlay เพื่อให้เส้นลอยเด่นขึ้น
+            room_opacity = 0.4 if show_adj_overlay else 0.92 
+            
             for r_data in layout_rects:
                 room, rx, ry, rw, rh = r_data['room'], r_data['x'], r_data['y'], r_data['w'], r_data['h']
                 cx, cy = rx + rw/2.0, ry + rh/2.0
                 pos_packed[room] = [cx, cy]
                 color = pal[room]
                 
-                fig_bp.add_shape(type="rect", x0=rx+pad, y0=ry+pad, x1=rx+rw-pad, y1=ry+rh-pad, fillcolor=color, opacity=0.92, line=dict(color="#FFFFFF", width=2))
-                fig_bp.add_trace(go.Scatter(x=[cx], y=[cy+rh*0.08], mode="text", text=[room], textfont=dict(size=12, color="white", family="Arial Black"), showlegend=False, hoverinfo="skip"))
+                fig_bp.add_shape(type="rect", x0=rx+pad, y0=ry+pad, x1=rx+rw-pad, y1=ry+rh-pad, 
+                                 fillcolor=color, opacity=room_opacity, line=dict(color="#FFFFFF", width=2))
+                
+                fig_bp.add_trace(go.Scatter(x=[cx], y=[cy+rh*0.12], mode="text", text=[room], 
+                                            textfont=dict(size=13, color="white", family="Arial Black"), 
+                                            showlegend=False, hoverinfo="skip"))
 
             # --- Overlay Adjacency Graph ---
             met_rules = []
@@ -419,11 +430,20 @@ if st.session_state.get("plan_generated", False):
                 r1 = room_lookup.get(r1_name)
                 r2 = room_lookup.get(r2_name)
                 if not r1 or not r2: return False
-                # Check for rectangle intersection / touching boundaries
                 return not (r1['x'] > r2['x'] + r2['w'] + tol or
                             r1['x'] + r1['w'] < r2['x'] - tol or
                             r1['y'] > r2['y'] + r2['h'] + tol or
                             r1['y'] + r1['h'] < r2['y'] - tol)
+
+            if show_adj_overlay:
+                # Node Markers: เพิ่มจุดวงกลมกึ่งกลางห้องเป็น Anchor
+                node_x = [pos_packed[r][0] for r in pos_packed]
+                node_y = [pos_packed[r][1] for r in pos_packed]
+                fig_bp.add_trace(go.Scatter(
+                    x=node_x, y=node_y, mode="markers",
+                    marker=dict(size=14, color="white", line=dict(color="#0F1624", width=3)),
+                    hoverinfo="skip", showlegend=False
+                ))
 
             for adj in data.get("Adjacency", []):
                 r1, r2, sc = adj.get("room1"), adj.get("room2"), adj.get("score", 0)
@@ -443,18 +463,22 @@ if st.session_state.get("plan_generated", False):
                         x1, y1 = pos_packed[r2]
                         
                         line_color = "#FF4D4D" if sc == 3 else "#FFD700"
-                        line_width = 4.5 if sc == 3 else 2.5
+                        line_width = 4.5 if sc == 3 else 3.0
                         line_dash = "solid" if sc == 3 else "dash"
                         
                         hover_text = f"<b>{r1} ↔ {r2}</b><br>Score: {sc}<br>Reason: {reason}<br>Status: {status_text}"
                         
+                        # High-Contrast Stroke: วาดเงาสีดำรองพื้นเพื่อให้เส้นโดดเด่นไม่กลืนกับสีพื้นหลัง
                         fig_bp.add_trace(go.Scatter(
-                            x=[x0, x1], y=[y0, y1],
-                            mode="lines",
+                            x=[x0, x1], y=[y0, y1], mode="lines",
+                            line=dict(color="#0F1624", width=line_width + 4), 
+                            hoverinfo="skip", showlegend=False
+                        ))
+                        # Main Line: วาดเส้นสีจริงทับ
+                        fig_bp.add_trace(go.Scatter(
+                            x=[x0, x1], y=[y0, y1], mode="lines",
                             line=dict(color=line_color, width=line_width, dash=line_dash),
-                            hoverinfo="text",
-                            hovertext=hover_text,
-                            showlegend=False
+                            hoverinfo="text", hovertext=hover_text, showlegend=False
                         ))
 
             fig_bp.add_shape(type="rect", x0=0, y0=0, x1=SITE_W, y1=SITE_L, line=dict(color=ANNO_CLR, width=4), fillcolor="rgba(0,0,0,0)")
@@ -469,6 +493,7 @@ if st.session_state.get("plan_generated", False):
                     st.success("**✅ ความสัมพันธ์ที่จัดได้สำเร็จ:**\n" + ("\n".join([f"- {m}" for m in met_rules]) if met_rules else "\n- ไม่มี"))
                 with c2:
                     st.warning("**⚠️ ความสัมพันธ์ที่ถูกบีบให้แยกกัน (ข้อจำกัดพื้นที่):**\n" + ("\n".join([f"- {b}" for b in broken_rules]) if broken_rules else "\n- ไม่มี"))
+
 
             # 5. Design Concept
             st.markdown("---")
@@ -586,8 +611,8 @@ if st.session_state.get("plan_generated", False):
 
                     vc1, vc2, vc3 = st.columns(3)
                     vc1.metric("🔴 Overlaps", len(overlaps), delta="⚠️ Found!" if overlaps else "✅ None", delta_color="inverse" if overlaps else "normal")
-                    vc2.metric("🟡 Clearance", len(cl_violations), len(cl_violations), delta="⚠️ Found!" if cl_violations else "✅ None", delta_color="inverse" if cl_violations else "normal")
-                    vc3.metric("🟠 Door Swing", len(swing_conf), len(swing_conf), delta="⚠️ Found!" if swing_conf else "✅ None", delta_color="inverse" if swing_conf else "normal")
+                    vc2.metric("🟡 Clearance", len(cl_violations), delta="⚠️ Found!" if cl_violations else "✅ None", delta_color="inverse" if cl_violations else "normal")
+                    vc3.metric("🟠 Door Swing", len(swing_conf), delta="⚠️ Found!" if swing_conf else "✅ None", delta_color="inverse" if swing_conf else "normal")
 
                     auto_warnings = []
                     for fi in furniture:
