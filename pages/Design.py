@@ -408,6 +408,7 @@ with tab2:
                 labels=labels,
                 parents=parents,
                 values=values,
+                sort=False,              # ✅ KEY FIX: ต้องอยู่ระดับ Treemap trace ไม่ใช่ใน tiling
                 marker=dict(colors=colors),
                 customdata=customdata,
                 hovertemplate=(
@@ -418,8 +419,7 @@ with tab2:
                 textinfo="label+value",
                 textfont=dict(size=14),
                 tiling=dict(
-                    sort=False,          # ✅ KEY FIX: ไม่ sort → รักษาลำดับ JSON
-                    packing="squarify",  # อัลกอริทึม layout มาตรฐาน
+                    packing="squarify",
                 ),
             ))
 
