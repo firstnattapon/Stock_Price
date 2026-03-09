@@ -300,6 +300,9 @@ with tab2:
     if st.button("✨ Generate Schematic Packed Plan", type="primary"):
         try:
             data      = json.loads(user_json)
+            if "Space_Requirement" not in data:
+                st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Space_Requirement' ใน JSON ที่คุณวาง\n\n💡 ดูเหมือนว่าคุณกำลังนำ **JSON ผลลัพธ์ของ Openings + Furniture** (ผลลัพธ์จาก Prompt B) มาวางในช่องนี้ ซึ่งช่องนี้มีไว้สำหรับ **Space Requirement** (ผลลัพธ์จาก Prompt A)\n\nกรุณาเลื่อนลงไปวาง JSON นั้นในช่อง **'⬇️ วาง Openings + Furniture JSON จาก AI'** ที่อยู่ด้านล่างสุดของหน้าจอแทนครับ")
+                st.stop()
             df        = pd.DataFrame(data["Space_Requirement"])
             clbl      = f"Circulation_{circ_pct}%"
             df[clbl]          = df["net_area_sqm"] * circ_factor
@@ -842,6 +845,9 @@ with tab2:
             if st.button("🪑 Visualize Openings + Furniture", type="primary"):
                 try:
                     of_data = json.loads(of_json)
+                    if "Openings" not in of_data and "Furniture" not in of_data:
+                        st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Openings' หรือ 'Furniture' ใน JSON\n\n💡 กรุณาตรวจสอบว่าไม่ได้นำ JSON ของ Space Requirement (ผลลัพธ์จาก Prompt A) มาวางผิดช่อง")
+                        st.stop()
                     openings  = of_data.get("Openings", [])
                     furniture = of_data.get("Furniture", [])
                     checks    = of_data.get("Checks", {})
