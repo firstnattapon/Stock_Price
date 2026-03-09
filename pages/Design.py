@@ -12,6 +12,13 @@ import math
 import networkx as nx
 
 # ══════════════════════════════════════════
+# 🇹🇭 ตั้งค่าฟอนต์ภาษาไทยสำหรับ Matplotlib
+# ══════════════════════════════════════════
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Tahoma', 'TH Sarabun New', 'Loma', 'Garuda', 'Arial Unicode MS', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False  # ป้องกันปัญหาเครื่องหมายลบแสดงเป็นสี่เหลี่ยม
+
+# ══════════════════════════════════════════
 # ⚙️  Page Config + Session State
 # ══════════════════════════════════════════
 st.set_page_config(page_title="AI Architecture Pipeline", layout="wide", page_icon="🏛️")
