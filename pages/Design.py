@@ -362,19 +362,18 @@ with tab2:
             st.plotly_chart(fig_n, use_container_width=True)
 
             # ════════════════════════════════════════════════════════
-            # 4. Schematic Block Plan — Site-Bounded
+            # 4. Schematic Block Plan — Site-Bounded (TRUE SCALE)
             # ════════════════════════════════════════════════════════
             st.markdown("---")
-            st.markdown("### 🟩 4. Schematic Block Plan  (Site-Bounded · Adjacency-Informed)")
+            st.markdown("### 🟩 4. Schematic Block Plan  (Adjacency-Informed · True Scale)")
 
             # Read site from session state
             SITE_W = st.session_state.get("site_width",  8.0)
             SITE_L = st.session_state.get("site_length", 4.0)
 
             st.markdown(
-                f"บล็อกถูกจัดวางภายใน **กรอบ Site {SITE_W:.1f} × {SITE_L:.1f} ม.** "
-                f"ตำแหน่งจาก Network Graph + Adjacency Matrix · "
-                f"ขนาดสัดส่วนตาม Gross Area · ไม่ทับกัน"
+                f"บล็อกถูกจัดวางกึ่งกลางภายใน **กรอบ Site {SITE_W:.1f} × {SITE_L:.1f} ม.** "
+                f"ด้วยสัดส่วนตามแกนเมตรจริง (True Scale) "
             )
 
             gross_map = {r: df.loc[df["room"]==r,"Gross_sqm"].values[0] for r in rooms_list}
@@ -392,15 +391,16 @@ with tab2:
                 if r not in conn and r != rooms_list[0]:
                     G.add_edge(rooms_list[0], r, weight=0.15)
 
-            # 4.2 Spring layout (high spread)
+            # 4.2 Spring layout
             sp = nx.spring_layout(G, weight="weight",
                 k=5.0/math.sqrt(max(len(rooms_list),1)),
                 iterations=800, seed=7)
 
-            # 4.3 Initial block sizes (arbitrary units)
-            sc0  = 1.0 / math.sqrt(max(gross_map.values()))
-            half = {r: math.sqrt(gross_map[r])*sc0 for r in rooms_list}
-            pos  = {r: [sp[r][0]*4, sp[r][1]*4] for r in rooms_list}
+            # 4.3 Initial block sizes (TRUE SCALE)
+            # Area = W x L -> ถือว่าเป็นสี่เหลี่ยมจัตุรัส -> Area = (2*half)^2
+            # ดังนั้น half = sqrt(Area) / 2
+            half = {r: math.sqrt(gross_map[r]) / 2.0 for r in rooms_list}
+            pos  = {r: [sp[r][0]*SITE_W*0.3, sp[r][1]*SITE_L*0.3] for r in rooms_list}
 
             # 4.4 Non-overlapping push-apart
             GAP = 0.25
@@ -422,21 +422,18 @@ with tab2:
                             moved=True
                 if not moved: break
 
-            # 4.5 Scale to fit inside site boundary (with margin)
-            MARGIN = 0.35  # meters
+            # 4.5 Center cluster within the site (No scaling of block sizes)
             bb_xmin = min(pos[r][0]-half[r] for r in rooms_list)
             bb_xmax = max(pos[r][0]+half[r] for r in rooms_list)
             bb_ymin = min(pos[r][1]-half[r] for r in rooms_list)
             bb_ymax = max(pos[r][1]+half[r] for r in rooms_list)
-            sc_fit  = min(
-                (SITE_W - 2*MARGIN) / (bb_xmax - bb_xmin),
-                (SITE_L - 2*MARGIN) / (bb_ymax - bb_ymin),
-            )
-            cx0 = (bb_xmin+bb_xmax)/2;  cy0 = (bb_ymin+bb_ymax)/2
+            
+            cx0 = (bb_xmin+bb_xmax)/2
+            cy0 = (bb_ymin+bb_ymax)/2
+            
             for r in rooms_list:
-                pos[r][0]  = (pos[r][0]-cx0)*sc_fit + SITE_W/2
-                pos[r][1]  = (pos[r][1]-cy0)*sc_fit + SITE_L/2
-                half[r]   *= sc_fit
+                pos[r][0]  = (pos[r][0]-cx0) + SITE_W/2
+                pos[r][1]  = (pos[r][1]-cy0) + SITE_L/2
 
             # 4.6 Draw figure
             BG        = "#0F1624"
@@ -589,7 +586,7 @@ with tab2:
             ax.set_aspect("equal"); ax.axis("off")
             ax.set_title(
                 f"Schematic Block Plan  —  Site {SITE_W:.1f} × {SITE_L:.1f} ม."
-                f"  ·  Adjacency-Informed · Scale to Site",
+                f"  ·  Adjacency-Informed · True Scale",
                 fontsize=13, color="#C8DCFF", fontweight="bold", pad=16)
             plt.tight_layout(pad=0.8)
             st.pyplot(fig_bp, use_container_width=True)
@@ -599,10 +596,9 @@ with tab2:
 <b>📐 หลักการ Block Plan:</b><br>
 <b>① ตำแหน่ง</b> — Spring Layout (NetworkX) ใช้ Adjacency Score เป็น spring weight
 (Score 3 = ดึงชิด · Score -1 = ผลักออก)<br>
-<b>② Non-Overlap</b> — Iterative push-apart algorithm (2000 รอบ) ดันบล็อกที่ทับกันออก<br>
-<b>③ Scale to Site</b> — Uniform scale ทุกบล็อกให้พอดีกับกรอบ {SITE_W:.1f} × {SITE_L:.1f} ม.
-(margin {MARGIN:.2f} ม. รอบขอบ)<br>
-<b>④ ขนาดบล็อก</b> — สัดส่วนตาม √(Gross Area) ซึ่ง = Net + Circulation {circ_pct}%<br>
+<b>② Non-Overlap</b> — Iterative push-apart algorithm ดันบล็อกที่ทับกันออก<br>
+<b>③ True Scale & Centering</b> — ขนาดบล็อกสเกลจริง 1:1 จัดกึ่งกลางลงในขอบเขต {SITE_W:.1f} × {SITE_L:.1f} ม.<br>
+<b>④ ขนาดบล็อก</b> — สัดส่วนสเกลจริงตาม Gross Area (ตร.ม.) ซึ่ง = Net + Circulation {circ_pct}%<br>
 <b>⑤ Zone</b> — Public · Service · Private แสดงด้วยสีพื้นหลัง halo
 </div>
 """, unsafe_allow_html=True)
@@ -619,4 +615,4 @@ with tab2:
 """, unsafe_allow_html=True)
 
         except Exception as e:
-            st.error(f"❌ JSON ไม่ถูกต้อง: {e}")
+            st.error(f"❌ JSON ไม่ถูกต้อง หรือเกิดข้อผิดพลาด: {e}")
