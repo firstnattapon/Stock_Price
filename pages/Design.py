@@ -1,112 +1,191 @@
 import streamlit as st
 import json
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch
+from matplotlib.patches import FancyBboxPatch, Rectangle
+import matplotlib.patheffects as pe
 import seaborn as sns
 import numpy as np
 import math
 import networkx as nx
 
-# ==========================================
-# ⚙️ Page Setup
-# ==========================================
+# ══════════════════════════════════════════
+# ⚙️  Page Config + Session State
+# ══════════════════════════════════════════
 st.set_page_config(page_title="AI Architecture Pipeline", layout="wide", page_icon="🏛️")
-st.title("🏛️ AI Architecture: Schematic Design Pipeline")
-st.markdown("ระบบแปลงข้อมูล (Program) → AI Prompt → Visualized Schematic Design")
 
-# ==========================================
-# 🗂️ Tabs Layout
-# ==========================================
-tab1, tab2 = st.tabs(["📤 1. USER INPUT & EXPORT PROMPT", "📥 2. IMPORT JSON & FINAL PRODUCT"])
+if "site_width"  not in st.session_state: st.session_state.site_width  = 8.0
+if "site_length" not in st.session_state: st.session_state.site_length = 4.0
 
-# ==========================================
-# 📤 TAB 1: User Input & Export JSON
-# ==========================================
+# ── Global CSS ────────────────────────────────────────────────
+st.markdown("""
+<style>
+  [data-testid="stAppViewContainer"] { background: #0F1624; }
+  [data-testid="stHeader"]           { background: transparent; }
+
+  .hero {
+    background: linear-gradient(135deg,#0D1B35 0%,#1A2E55 55%,#0F3460 100%);
+    border: 1px solid #1E3A6E;
+    border-radius: 18px;
+    padding: 30px 40px 26px 40px;
+    margin-bottom: 28px;
+  }
+  .hero h1 { color:#E8F0FF !important; margin:0 0 8px 0; font-size:2rem; }
+  .hero p  { color:#7090C0; margin:0; font-size:0.93rem; }
+
+  .card {
+    background: #141C2E;
+    border: 1px solid #1E2E4A;
+    border-radius: 14px;
+    padding: 22px 26px;
+    margin-bottom: 18px;
+  }
+
+  [data-testid="metric-container"] {
+    background: #1A2540;
+    border: 1px solid #243358;
+    border-left: 4px solid #3B82F6;
+    border-radius: 12px;
+    padding: 14px 18px;
+  }
+  [data-testid="metric-container"] label                          { color:#7090C0 !important; }
+  [data-testid="metric-container"] [data-testid="stMetricValue"] { color:#E8F0FF !important; }
+
+  [data-baseweb="tab-list"] { gap:6px; background:transparent !important; }
+  [data-baseweb="tab"] {
+    background:#141C2E !important; border:1px solid #1E2E4A !important;
+    border-radius:10px 10px 0 0 !important; padding:10px 24px !important;
+    color:#7090C0 !important; font-weight:600 !important;
+  }
+  [aria-selected="true"] {
+    background:#1A2540 !important;
+    border-bottom-color:#3B82F6 !important;
+    color:#60A5FA !important;
+  }
+
+  [data-testid="stTextInput"] input,
+  [data-testid="stNumberInput"] input {
+    background:#1A2540 !important; border:1px solid #243358 !important;
+    color:#E8F0FF !important; border-radius:8px !important;
+  }
+  [data-testid="stTextArea"] textarea {
+    background:#1A2540 !important; border:1px solid #243358 !important;
+    color:#E8F0FF !important; font-size:0.82rem !important;
+  }
+
+  label, .stMarkdown p { color:#A0B8D8 !important; }
+  h1,h2,h3             { color:#C8DCFF !important; }
+  hr                   { border-color:#1E2E4A !important; margin:24px 0 !important; }
+
+  .note {
+    background:#0D1E3A; border-left:4px solid #3B82F6;
+    border-radius:8px; padding:14px 18px;
+    font-size:0.87rem; color:#90B4D8; margin:14px 0; line-height:1.7;
+  }
+  [data-testid="stDataFrame"] { border-radius:10px; overflow:hidden; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="hero">
+  <h1>🏛️ AI Architecture: Schematic Design Pipeline</h1>
+  <p>Program Definition &rarr; AI Prompt &rarr; Adjacency Analysis &rarr; Site-Bound Schematic Block Plan</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════
+# 🎨  Design Tokens
+# ══════════════════════════════════════════
+ROOM_PALETTE = {
+    "Living Area":"#4E79A7","Bedroom":"#E15759","Dining":"#F28E2B",
+    "Kitchen":"#59A14F","Bathroom":"#76B7B2","Closet":"#B07AA1",
+    "Balcony":"#EDC948","Laundry":"#FF9DA7",
+}
+FALLBACK = ["#4E79A7","#E15759","#F28E2B","#59A14F",
+            "#76B7B2","#B07AA1","#EDC948","#FF9DA7","#BAB0AC","#D37295"]
+
+ZONE_MAP = {
+    "Living Area":"Public","Dining":"Public",
+    "Kitchen":"Service","Laundry":"Service","Balcony":"Semi-Public",
+    "Bedroom":"Private","Bathroom":"Private","Closet":"Private",
+}
+ZONE_DARK   = {"Public":"#1B3A5C","Service":"#1B4030","Private":"#4A1B1B","Semi-Public":"#3A3000"}
+ZONE_ACCENT = {"Public":"#4A9EE0","Service":"#3CC470","Private":"#E05C5C","Semi-Public":"#E0C040"}
+
+# ══════════════════════════════════════════
+# 🗂️  Tabs
+# ══════════════════════════════════════════
+tab1, tab2 = st.tabs([
+    "📤  USER INPUT  &  EXPORT PROMPT",
+    "📥  IMPORT JSON  &  FINAL PRODUCT",
+])
+
+# ════════════════════════════════════════════════════════════════
+# 📤  TAB 1
+# ════════════════════════════════════════════════════════════════
 with tab1:
-    st.header("1. Program Definition & Site")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("🏗️ Program Definition & Site")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        project_type = st.text_input("ประเภทโครงการ (Project Type)", value="บ้านเช่า (Rental House)")
-        width = st.number_input("ความกว้าง Site (ม.)", value=8.0, step=0.5)
-        length = st.number_input("ความยาว Site (ม.)", value=4.0, step=0.5)
-
-    with col2:
+    c1, c2 = st.columns(2)
+    with c1:
+        project_type = st.text_input("Project Type", value="บ้านเช่า (Rental House)")
+        width  = st.number_input("ความกว้าง Site (ม.)",  value=st.session_state.site_width,
+                                  step=0.5, min_value=1.0, key="site_width")
+        length = st.number_input("ความยาว Site (ม.)",   value=st.session_state.site_length,
+                                  step=0.5, min_value=1.0, key="site_length")
+        st.info(f"📐 พื้นที่ Site รวม: **{width * length:.1f} ตร.ม.** ({width:.1f} × {length:.1f} ม.)")
+    with c2:
         rooms = st.multiselect(
-            "พื้นที่ใช้สอยที่ต้องการ (Required Rooms)",
-            ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry", "Closet"],
-            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Closet"],
+            "พื้นที่ใช้สอยที่ต้องการ",
+            ["Bedroom","Living Area","Kitchen","Dining","Bathroom","Balcony","Laundry","Closet"],
+            default=["Bedroom","Living Area","Kitchen","Dining","Bathroom","Closet"],
         )
-        mode = st.radio(
-            "รูปแบบการคำนวณพื้นที่ (Sizing Mode)",
-            ["Auto (คำนวณตามมาตรฐานขั้นต่ำกฎหมาย/Neufert)", "Manual (ผู้ใช้กำหนดเอง)"],
-        )
+        mode = st.radio("Sizing Mode", [
+            "Auto (Neufert / Thai Building Code)",
+            "Manual (ผู้ใช้กำหนดเอง)",
+        ])
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ==========================================
-    # ✏️ MANUAL MODE — inputs per room
-    # ==========================================
-    manual_areas = {}
     DEFAULT_AREAS = {
-        "Bedroom": 9.0,
-        "Living Area": 8.0,
-        "Kitchen": 4.5,
-        "Dining": 4.0,
-        "Bathroom": 3.0,
-        "Balcony": 2.5,
-        "Laundry": 2.0,
-        "Closet": 3.0,
+        "Bedroom":9.0,"Living Area":8.0,"Kitchen":4.5,"Dining":4.0,
+        "Bathroom":3.0,"Balcony":2.5,"Laundry":2.0,"Closet":3.0,
     }
+    manual_areas = {}
 
-    if mode == "Manual (ผู้ใช้กำหนดเอง)":
-        if rooms:
-            st.divider()
-            st.subheader("📐 กำหนดพื้นที่แต่ละห้องด้วยตนเอง")
-            cols = st.columns(min(len(rooms), 4))
-            for i, room in enumerate(rooms):
-                with cols[i % 4]:
-                    manual_areas[room] = st.number_input(
-                        f"**{room}** (ตร.ม.)",
-                        value=DEFAULT_AREAS.get(room, 4.0),
-                        min_value=1.0,
-                        max_value=100.0,
-                        step=0.5,
-                        key=f"manual_{room}",
-                    )
-            total_manual = sum(manual_areas.values())
-            site_area = width * length
-            pct = (total_manual / site_area * 100) if site_area > 0 else 0
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("📐 Total Net Area", f"{total_manual:.1f} ตร.ม.")
-            col_b.metric("🏗️ Site Area", f"{site_area:.1f} ตร.ม.")
-            col_c.metric(
-                "📊 Coverage",
-                f"{pct:.0f}%",
-                delta="⚠️ เกิน Site!" if pct > 100 else "✅ OK",
-                delta_color="inverse" if pct > 100 else "normal",
-            )
-        else:
-            st.warning("กรุณาเลือกห้องก่อน")
+    if mode == "Manual (ผู้ใช้กำหนดเอง)" and rooms:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("📐 กำหนดพื้นที่แต่ละห้อง")
+        cols = st.columns(min(len(rooms), 4))
+        for i, room in enumerate(rooms):
+            with cols[i % 4]:
+                manual_areas[room] = st.number_input(
+                    f"{room} (ตร.ม.)", value=DEFAULT_AREAS.get(room, 4.0),
+                    min_value=1.0, max_value=100.0, step=0.5, key=f"m_{room}",
+                )
+        total_m = sum(manual_areas.values())
+        site_a  = width * length
+        pct     = (total_m / site_a * 100) if site_a > 0 else 0
+        ca, cb, cc = st.columns(3)
+        ca.metric("📐 Total Net",  f"{total_m:.1f} ตร.ม.")
+        cb.metric("🏗️ Site Area",  f"{site_a:.1f} ตร.ม.")
+        cc.metric("📊 Coverage",   f"{pct:.0f}%",
+            delta="⚠️ เกิน Site!" if pct > 100 else "✅ OK",
+            delta_color="inverse" if pct > 100 else "normal")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # ==========================================
-    # 🚀 Generate Prompt
-    # ==========================================
-    if st.button("Generate Prompt for AI", type="primary"):
+    if st.button("🚀 Generate AI Prompt", type="primary"):
         if not rooms:
             st.error("กรุณาเลือกห้องอย่างน้อย 1 ห้อง")
         else:
-            if mode == "Manual (ผู้ใช้กำหนดเอง)":
-                space_areas_payload = [
-                    {"room": r, "net_area_sqm": manual_areas.get(r, DEFAULT_AREAS.get(r, 4.0))}
-                    for r in rooms
-                ]
-            else:
-                space_areas_payload = "Auto-calculate based on Neufert standards and Thai Building Code"
-
-            ai_prompt = {
+            payload = (
+                [{"room":r,"net_area_sqm":manual_areas.get(r,DEFAULT_AREAS.get(r,4.0))} for r in rooms]
+                if mode == "Manual (ผู้ใช้กำหนดเอง)"
+                else "Auto-calculate based on Neufert standards and Thai Building Code"
+            )
+            prompt = {
                 "system_prompt": (
                     "คุณคือสถาปนิกระดับ Senior หน้าที่ของคุณคือวิเคราะห์ Program Definition "
                     "และส่งข้อมูลกลับมาเป็น JSON ตามโครงสร้างที่กำหนดเท่านั้น "
@@ -114,475 +193,430 @@ with tab1:
                 ),
                 "user_input": {
                     "project": project_type,
-                    "site_dimension": f"{width} x {length} m (Total {width * length} sqm)",
-                    "required_spaces": rooms,
-                    "sizing_mode": mode,
-                    "space_areas": space_areas_payload,
+                    "site_dimension": f"{width} x {length} m (Total {width*length} sqm)",
+                    "required_spaces": rooms, "sizing_mode": mode, "space_areas": payload,
                 },
                 "required_output_schema": {
-                    "Space_Requirement": [
-                        {"room": "string (ชื่อห้อง)", "net_area_sqm": "float (พื้นที่สุทธิ ตร.ม.)"}
-                    ],
-                    "Adjacency": [
-                        {
-                            "room1": "string",
-                            "room2": "string",
-                            "score": "int (3=ติดกัน/สำคัญมาก, 2=ใกล้กัน, 1=เฉยๆ, -1=ควรอยู่ห่างกัน)",
-                            "reason": "string (เหตุผลสั้นๆ)",
-                        }
-                    ],
-                    "Design_Concept": "string (อธิบายแนวความคิดการจัดวางแบบมืออาชีพ)",
+                    "Space_Requirement": [{"room":"string","net_area_sqm":"float"}],
+                    "Adjacency": [{"room1":"string","room2":"string",
+                        "score":"int (3=ติดกัน,2=ใกล้,1=เฉยๆ,-1=แยก)","reason":"string"}],
+                    "Design_Concept": "string",
                 },
             }
+            st.success("✅ คัดลอกข้อความด้านล่างนี้ไปวางใน Claude / ChatGPT")
+            st.code(json.dumps(prompt, ensure_ascii=False, indent=4), language="json")
 
-            st.success("✅ คัดลอกข้อความด้านล่างนี้ไปวางใน Claude หรือ ChatGPT ได้เลย")
-            st.code(json.dumps(ai_prompt, ensure_ascii=False, indent=4), language="json")
 
-
-# ==========================================
-# 📥 TAB 2: Import JSON & Visualize
-# ==========================================
+# ════════════════════════════════════════════════════════════════
+# 📥  TAB 2
+# ════════════════════════════════════════════════════════════════
 with tab2:
-    st.header("2. Import AI Result & Generate Final Product")
-    st.markdown("นำ JSON ที่ AI ประมวลผลเสร็จแล้วมาวางที่นี่ ระบบจะวาดแปลนและตารางให้อัตโนมัติ")
 
-    # ──────────────────────────────────────────
-    # 🔧 Circulation % — user-adjustable
-    # ──────────────────────────────────────────
-    st.markdown("### ⚙️ ตั้งค่า Circulation Factor")
-    circ_col1, circ_col2 = st.columns([1, 3])
-    with circ_col1:
-        circulation_pct = st.number_input(
-            "Circulation (% ของ Net Area)",
-            min_value=0,
-            max_value=100,
-            value=30,
-            step=5,
-            help="มาตรฐานทั่วไป: 20–30% สำหรับที่พักอาศัย, 30–40% สำหรับอาคารสาธารณะ",
-        )
-    with circ_col2:
-        if circulation_pct < 20:
-            st.info(f"ℹ️ {circulation_pct}% — น้อยกว่ามาตรฐาน (อาจแออัด)")
-        elif circulation_pct <= 35:
-            st.success(f"✅ {circulation_pct}% — อยู่ในช่วงมาตรฐานที่พักอาศัย (20–35%)")
-        elif circulation_pct <= 50:
-            st.warning(f"⚠️ {circulation_pct}% — สูงกว่าปกติ เหมาะอาคารสาธารณะ/เชิงพาณิชย์")
-        else:
-            st.error(f"🔴 {circulation_pct}% — สูงมาก ควรตรวจสอบอีกครั้ง")
+    # Circulation
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("⚙️ Circulation Factor")
+    cc1, cc2 = st.columns([1, 3])
+    with cc1:
+        circ_pct = st.number_input("Circulation (% Net Area)", min_value=0, max_value=100,
+            value=30, step=5, help="20–30% ที่พักอาศัย | 30–40% อาคารสาธารณะ")
+    with cc2:
+        if   circ_pct < 20:  st.info(   f"ℹ️ {circ_pct}% — น้อยกว่ามาตรฐาน")
+        elif circ_pct <= 35: st.success( f"✅ {circ_pct}% — มาตรฐานที่พักอาศัย (20–35%)")
+        elif circ_pct <= 50: st.warning( f"⚠️ {circ_pct}% — สูงกว่าปกติ")
+        else:                st.error(   f"🔴 {circ_pct}% — สูงมาก")
+    circ_factor = circ_pct / 100.0
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    circ_factor = circulation_pct / 100.0
-
-    st.divider()
-
-    mock_json = """{
+    # JSON Input
+    MOCK = """{
     "Space_Requirement": [
-        {"room": "Living Area", "net_area_sqm": 8.0},
-        {"room": "Bedroom", "net_area_sqm": 9.0},
-        {"room": "Dining", "net_area_sqm": 4.0},
-        {"room": "Kitchen", "net_area_sqm": 4.5},
-        {"room": "Bathroom", "net_area_sqm": 3.0}
+        {"room": "Bedroom",      "net_area_sqm": 7.0},
+        {"room": "Living Area",  "net_area_sqm": 7.0},
+        {"room": "Kitchen",      "net_area_sqm": 6.0},
+        {"room": "Dining",       "net_area_sqm": 6.0},
+        {"room": "Bathroom",     "net_area_sqm": 3.0},
+        {"room": "Closet",       "net_area_sqm": 3.0}
     ],
     "Adjacency": [
-        {"room1": "Living Area", "room2": "Dining", "score": 3, "reason": "ใช้งานต่อเนื่องกัน เปิดโล่งได้"},
-        {"room1": "Dining", "room2": "Kitchen", "score": 3, "reason": "เสิร์ฟอาหารสะดวก"},
-        {"room1": "Living Area", "room2": "Bedroom", "score": 1, "reason": "ต้องการความเป็นส่วนตัว"},
-        {"room1": "Bedroom", "room2": "Bathroom", "score": 2, "reason": "ใช้งานสะดวกตอนกลางคืน"},
-        {"room1": "Kitchen", "room2": "Bedroom", "score": -1, "reason": "ป้องกันกลิ่นและเสียงรบกวน"}
+        {"room1": "Living Area", "room2": "Dining",   "score":  3, "reason": "Open plan connection"},
+        {"room1": "Dining",      "room2": "Kitchen",  "score":  3, "reason": "Serve food efficiently"},
+        {"room1": "Bedroom",     "room2": "Closet",   "score":  3, "reason": "Direct wardrobe access"},
+        {"room1": "Bedroom",     "room2": "Bathroom", "score":  2, "reason": "Night-time convenience"},
+        {"room1": "Bathroom",    "room2": "Closet",   "score":  2, "reason": "Private zone cluster"},
+        {"room1": "Living Area", "room2": "Bedroom",  "score":  1, "reason": "Privacy transition"},
+        {"room1": "Kitchen",     "room2": "Bedroom",  "score": -1, "reason": "Prevent odor & noise"}
     ],
-    "Design_Concept": "แบ่งพื้นที่ตามลำดับความเป็นส่วนตัว (Public to Private) โดยวาง Living และ Dining ไว้ด้านหน้าเชื่อมต่อกันเพื่อความโปร่ง และแยก Bedroom ไว้ด้านหลังสุดโดยมี Bathroom คั่นกลาง"
+    "Design_Concept": "Zone layout: Public (Living+Dining) at front open-plan, Service (Kitchen) adjacent to Dining, Private cluster (Bedroom+Closet+Bathroom) at rear — maximum separation from Kitchen."
 }"""
 
-    user_json_input = st.text_area("⬇️ วาง JSON ตรงนี้", value=mock_json, height=250)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("📋 วาง AI Result JSON")
+    user_json = st.text_area("⬇️ JSON output from Claude / ChatGPT", value=MOCK, height=220)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    if st.button("Generate Final Product", type="primary"):
+    if st.button("✨ Generate Schematic Design", type="primary"):
         try:
-            data = json.loads(user_json_input)
+            data      = json.loads(user_json)
+            df        = pd.DataFrame(data["Space_Requirement"])
+            clbl      = f"Circulation_{circ_pct}%"
+            df[clbl]          = df["net_area_sqm"] * circ_factor
+            df["Gross_sqm"]   = df["net_area_sqm"] + df[clbl]
+            rooms_list        = df["room"].tolist()
 
-            # --- 1. Space Requirement (+ user-defined Circulation %) ---
-            st.subheader("📊 1. Space Requirement (รายการพื้นที่ใช้สอย)")
-            df_space = pd.DataFrame(data["Space_Requirement"])
-            circ_col_label = f"Circulation_{circulation_pct}%"
-            df_space[circ_col_label] = df_space["net_area_sqm"] * circ_factor
-            df_space["Gross_Area_sqm"] = df_space["net_area_sqm"] + df_space[circ_col_label]
+            # Palette
+            pal = {}; fi = 0
+            for r in rooms_list:
+                pal[r] = ROOM_PALETTE.get(r, FALLBACK[fi % len(FALLBACK)])
+                if r not in ROOM_PALETTE: fi += 1
 
+            # ── 1. Space Table ─────────────────────────────────
+            st.markdown("---")
+            st.markdown("### 📊 1. Space Requirement")
+            t_net   = df["net_area_sqm"].sum()
+            t_gross = df["Gross_sqm"].sum()
+            m1,m2,m3 = st.columns(3)
+            m1.metric("📐 Net Area",                    f"{t_net:.2f} ตร.ม.")
+            m2.metric(f"🚶 Circulation ({circ_pct}%)", f"{(t_gross-t_net):.2f} ตร.ม.")
+            m3.metric("🏗️ Gross Area",                  f"{t_gross:.2f} ตร.ม.")
             st.dataframe(
-                df_space.style.format(
-                    "{:.2f}", subset=["net_area_sqm", circ_col_label, "Gross_Area_sqm"]
-                ),
+                df.style
+                    .format("{:.2f}", subset=["net_area_sqm", clbl, "Gross_sqm"])
+                    .background_gradient(subset=["Gross_sqm"], cmap="Blues"),
                 use_container_width=True,
             )
 
-            total_net = df_space["net_area_sqm"].sum()
-            total_gross = df_space["Gross_Area_sqm"].sum()
-            m1, m2, m3 = st.columns(3)
-            m1.metric("📐 Total Net Area", f"{total_net:.2f} ตร.ม.")
-            m2.metric(f"🚶 Circulation ({circulation_pct}%)", f"{(total_gross - total_net):.2f} ตร.ม.")
-            m3.metric("🏗️ Total Gross Area", f"{total_gross:.2f} ตร.ม.")
-
-            st.divider()
-
-            # --- 2. Adjacency Matrix ---
-            st.subheader("🧮 2. Adjacency Matrix (ตารางความสัมพันธ์)")
-            rooms_list = df_space["room"].tolist()
-            matrix = pd.DataFrame(0, index=rooms_list, columns=rooms_list)
-
+            # ── 2. Adjacency Matrix ────────────────────────────
+            st.markdown("---")
+            st.markdown("### 🧮 2. Adjacency Matrix")
+            mat = pd.DataFrame(0, index=rooms_list, columns=rooms_list)
             for adj in data["Adjacency"]:
-                r1, r2, score = adj["room1"], adj["room2"], adj["score"]
+                r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
                 if r1 in rooms_list and r2 in rooms_list:
-                    matrix.at[r1, r2] = score
-                    matrix.at[r2, r1] = score
+                    mat.at[r1,r2] = sc; mat.at[r2,r1] = sc
 
-            fig_heat, ax = plt.subplots(figsize=(8, 6))
-            sns.heatmap(
-                matrix.astype(float),
-                annot=True,
-                fmt=".0f",
-                cmap="RdYlGn",
-                center=0,
-                vmin=-1,
-                vmax=3,
-                linewidths=0.5,
-                linecolor="#e0e0e0",
-                cbar_kws={"label": "Relationship Score"},
-                ax=ax,
-            )
-            ax.set_title(
-                "Adjacency Matrix  (3 = ต้องติดกัน  |  -1 = ควรแยกออก)", fontsize=13, pad=12
-            )
+            fig_h, ax_h = plt.subplots(figsize=(8, 5.5))
+            fig_h.patch.set_facecolor("#0F1624")
+            ax_h.set_facecolor("#0F1624")
+            sns.heatmap(mat.astype(float), annot=True, fmt=".0f",
+                cmap="RdYlGn", center=0, vmin=-1, vmax=3,
+                linewidths=0.6, linecolor="#1E2E4A",
+                cbar_kws={"label":"Adj. Score","shrink":0.8}, ax=ax_h)
+            ax_h.set_title("Adjacency Matrix   (3 = ต้องติดกัน  ·  -1 = ควรแยก)",
+                fontsize=12, pad=14, color="#C8DCFF", fontweight="bold")
+            ax_h.tick_params(colors="#A0B8D8", labelsize=9)
+            plt.setp(ax_h.get_xticklabels(), rotation=30)
+            plt.setp(ax_h.get_yticklabels(), rotation=0)
             plt.tight_layout()
-            st.pyplot(fig_heat)
+            st.pyplot(fig_h, use_container_width=True)
 
-            st.divider()
-
-            # --- 3. Relationship Diagram (Plotly Network) ---
-            st.subheader("🕸️ 3. Relationship Diagram (Network Graph)")
-
-            n = len(rooms_list)
-            angles = [2 * math.pi * i / n for i in range(n)]
-            pos = {room: (math.cos(a), math.sin(a)) for room, a in zip(rooms_list, angles)}
-
-            EDGE_STYLES = {
-                3:  {"color": "#E03434", "width": 5,   "dash": "solid", "label": "Strong (3)"},
-                2:  {"color": "#F5A623", "width": 3,   "dash": "solid", "label": "Medium (2)"},
-                1:  {"color": "#4A90D9", "width": 1.5, "dash": "dot",   "label": "Weak (1)"},
-                -1: {"color": "#888888", "width": 1.5, "dash": "dash",  "label": "Avoid (−1)"},
+            # ── 3. Network Graph ───────────────────────────────
+            st.markdown("---")
+            st.markdown("### 🕸️ 3. Relationship Network Graph")
+            n       = len(rooms_list)
+            angles  = [2*math.pi*i/n for i in range(n)]
+            pn      = {r:(math.cos(a),math.sin(a)) for r,a in zip(rooms_list,angles)}
+            ES = {
+                 3: dict(c="#FF4D4D",w=5,  d="solid",l="Score 3 — must adjacent"),
+                 2: dict(c="#FFD700",w=3,  d="solid",l="Score 2 — should be near"),
+                 1: dict(c="#4CAF50",w=1.5,d="dot",  l="Score 1 — neutral"),
+                -1: dict(c="#888888",w=1.5,d="dash", l="Score -1 — keep apart"),
             }
-
-            fig_net = go.Figure()
-            drawn_labels = set()
-
+            fig_n = go.Figure(); dl = set()
             for adj in data["Adjacency"]:
-                r1, r2, score = adj["room1"], adj["room2"], adj["score"]
-                if r1 not in pos or r2 not in pos:
-                    continue
-                style = EDGE_STYLES.get(score, EDGE_STYLES[1])
-                x0, y0 = pos[r1]
-                x1, y1 = pos[r2]
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-
-                show_legend = style["label"] not in drawn_labels
-                drawn_labels.add(style["label"])
-
-                fig_net.add_trace(
-                    go.Scatter(
-                        x=[mx],
-                        y=[my],
-                        mode="markers",
-                        marker=dict(size=10, color=style["color"], opacity=0),
-                        hovertext=f"<b>{r1} ↔ {r2}</b><br>Score: {score}<br>{adj.get('reason', '')}",
-                        hoverinfo="text",
-                        showlegend=False,
-                    )
-                )
-
-                fig_net.add_trace(
-                    go.Scatter(
-                        x=[x0, x1, None],
-                        y=[y0, y1, None],
-                        mode="lines",
-                        line=dict(color=style["color"], width=style["width"], dash=style["dash"]),
-                        name=style["label"],
-                        legendgroup=style["label"],
-                        showlegend=show_legend,
-                        hoverinfo="skip",
-                    )
-                )
-
-            node_x = [pos[r][0] for r in rooms_list]
-            node_y = [pos[r][1] for r in rooms_list]
-            node_areas = [
-                df_space.loc[df_space["room"] == r, "net_area_sqm"].values[0] for r in rooms_list
-            ]
-            node_sizes = [max(40, a * 6) for a in node_areas]
-
-            PALETTE = [
-                "#4E79A7", "#F28E2B", "#59A14F", "#E15759",
-                "#76B7B2", "#EDC948", "#B07AA1", "#FF9DA7",
-            ]
-
-            fig_net.add_trace(
-                go.Scatter(
-                    x=node_x,
-                    y=node_y,
-                    mode="markers+text",
-                    marker=dict(
-                        size=node_sizes,
-                        color=PALETTE[: len(rooms_list)],
-                        line=dict(color="white", width=2),
-                        opacity=0.92,
-                    ),
-                    text=rooms_list,
-                    textposition="middle center",
-                    textfont=dict(size=11, color="white", family="Arial Black"),
-                    hovertext=[
-                        f"<b>{r}</b><br>Net Area: {a:.1f} ตร.ม."
-                        for r, a in zip(rooms_list, node_areas)
-                    ],
-                    hoverinfo="text",
-                    showlegend=False,
-                )
+                r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
+                if r1 not in pn or r2 not in pn: continue
+                s=ES.get(sc,ES[1]); x0,y0=pn[r1]; x1,y1=pn[r2]; mx,my=(x0+x1)/2,(y0+y1)/2
+                show=s["l"] not in dl; dl.add(s["l"])
+                fig_n.add_trace(go.Scatter(x=[mx],y=[my],mode="markers",
+                    marker=dict(size=10,color=s["c"],opacity=0),
+                    hovertext=f"<b>{r1} ↔ {r2}</b><br>Score: {sc}<br>{adj.get('reason','')}",
+                    hoverinfo="text",showlegend=False))
+                fig_n.add_trace(go.Scatter(x=[x0,x1,None],y=[y0,y1,None],mode="lines",
+                    line=dict(color=s["c"],width=s["w"],dash=s["d"]),
+                    name=s["l"],legendgroup=s["l"],showlegend=show,hoverinfo="skip"))
+            na=[df.loc[df["room"]==r,"net_area_sqm"].values[0] for r in rooms_list]
+            fig_n.add_trace(go.Scatter(
+                x=[pn[r][0] for r in rooms_list], y=[pn[r][1] for r in rooms_list],
+                mode="markers+text",
+                marker=dict(size=[max(44,a*7) for a in na],color=[pal[r] for r in rooms_list],
+                    line=dict(color="white",width=2.5),opacity=0.92),
+                text=rooms_list,textposition="middle center",
+                textfont=dict(size=10,color="white",family="Arial Black"),
+                hovertext=[f"<b>{r}</b><br>Net: {a:.1f} ตร.ม." for r,a in zip(rooms_list,na)],
+                hoverinfo="text",showlegend=False,
+            ))
+            for r,a,(px_,py_) in zip(rooms_list,na,[pn[r] for r in rooms_list]):
+                fig_n.add_annotation(x=px_,y=py_-0.19,text=f"{a:.0f} sqm",
+                    showarrow=False,font=dict(size=8.5,color="#90B4D8"))
+            fig_n.update_layout(
+                height=520, plot_bgcolor="#0F1624", paper_bgcolor="#0F1624",
+                margin=dict(l=20,r=20,t=50,b=20),
+                xaxis=dict(visible=False,range=[-1.7,1.7]),
+                yaxis=dict(visible=False,range=[-1.7,1.7],scaleanchor="x"),
+                title=dict(text="Room Relationship Network  ·  hover edges for details",
+                    font=dict(size=14,color="#C8DCFF"),x=0.5),
+                legend=dict(title="Edge Type",orientation="h",yanchor="bottom",y=-0.07,
+                    xanchor="center",x=0.5,font=dict(size=11,color="#A0B8D8"),
+                    bgcolor="#141C2E",bordercolor="#1E2E4A"),
             )
+            st.plotly_chart(fig_n, use_container_width=True)
 
-            for r, a, x, y in zip(rooms_list, node_areas, node_x, node_y):
-                fig_net.add_annotation(
-                    x=x,
-                    y=y - 0.18,
-                    text=f"{a:.0f} ตร.ม.",
-                    showarrow=False,
-                    font=dict(size=9, color="#555"),
-                )
+            # ════════════════════════════════════════════════════════
+            # 4. Schematic Block Plan — Site-Bounded
+            # ════════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("### 🟩 4. Schematic Block Plan  (Site-Bounded · Adjacency-Informed)")
 
-            fig_net.update_layout(
-                height=520,
-                margin=dict(l=20, r=20, t=40, b=20),
-                plot_bgcolor="#F8F9FA",
-                paper_bgcolor="#F8F9FA",
-                xaxis=dict(visible=False, range=[-1.6, 1.6]),
-                yaxis=dict(visible=False, range=[-1.6, 1.6], scaleanchor="x"),
-                title=dict(
-                    text="Room Relationship Network  •  hover เส้นเพื่อดูเหตุผล",
-                    font=dict(size=14),
-                    x=0.5,
-                ),
-                legend=dict(
-                    title="Edge Type",
-                    orientation="h",
-                    yanchor="bottom",
-                    y=-0.05,
-                    xanchor="center",
-                    x=0.5,
-                    font=dict(size=11),
-                ),
-            )
+            # Read site from session state
+            SITE_W = st.session_state.get("site_width",  8.0)
+            SITE_L = st.session_state.get("site_length", 4.0)
 
-            st.plotly_chart(fig_net, use_container_width=True)
-
-            leg_col1, leg_col2, leg_col3, leg_col4 = st.columns(4)
-            leg_col1.markdown("🔴 **เส้นแดงหนา** = ต้องติดกัน (3)")
-            leg_col2.markdown("🟠 **เส้นส้ม** = ควรอยู่ใกล้ (2)")
-            leg_col3.markdown("🔵 **เส้นน้ำเงินจุด** = เฉยๆ (1)")
-            leg_col4.markdown("⚫ **เส้นเทาขีด** = ควรแยก (−1)")
-
-            st.divider()
-
-            # ══════════════════════════════════════════════════════════════════
-            # --- 4. Schematic Block Plan (Adjacency-Informed Network Layout) ---
-            # ══════════════════════════════════════════════════════════════════
-            st.subheader("🟩 4. Schematic Block Plan (Adjacency-Informed Layout)")
             st.markdown(
-                """
-                ตำแหน่งบล็อกคำนวณจาก **Network Graph + Adjacency Matrix** โดยตรง
-                (Spring Layout: Score 3 = ดึงชิด · Score -1 = ผลัก) ·
-                **ขนาดบล็อกสัดส่วนตาม Gross Area จริง**
-                """
+                f"บล็อกถูกจัดวางภายใน **กรอบ Site {SITE_W:.1f} × {SITE_L:.1f} ม.** "
+                f"ตำแหน่งจาก Network Graph + Adjacency Matrix · "
+                f"ขนาดสัดส่วนตาม Gross Area · ไม่ทับกัน"
             )
 
-            # ── 4.1 สร้าง NetworkX Graph จาก Adjacency ──
+            gross_map = {r: df.loc[df["room"]==r,"Gross_sqm"].values[0] for r in rooms_list}
+
+            # 4.1 Build NetworkX graph
             G = nx.Graph()
-            for room in rooms_list:
-                G.add_node(room)
-
+            for r in rooms_list: G.add_node(r)
+            WM = {3:4.0, 2:2.5, 1:1.0, -1:0.02}
             for adj in data["Adjacency"]:
-                r1, r2, score = adj["room1"], adj["room2"], adj["score"]
+                r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
                 if r1 in rooms_list and r2 in rooms_list:
-                    # Spring layout: weight สูง = สปริงสั้น = ดึงเข้าหากัน
-                    # score  3 → weight 3.0  (ดึงแรงมาก)
-                    # score  2 → weight 2.0
-                    # score  1 → weight 0.8
-                    # score -1 → weight 0.1  (แทบไม่ดึง = ผลัก/ห่าง)
-                    weight_map = {3: 3.0, 2: 2.0, 1: 0.8, -1: 0.1}
-                    G.add_edge(r1, r2, weight=weight_map.get(score, 0.8), score=score)
+                    G.add_edge(r1, r2, weight=WM.get(sc, 1.0))
+            conn = {n for e in G.edges() for n in e}
+            for r in rooms_list:
+                if r not in conn and r != rooms_list[0]:
+                    G.add_edge(rooms_list[0], r, weight=0.15)
 
-            # Isolated nodes (ไม่มี edge เลย) → เพิ่ม weak edge ไปยัง node แรกเพื่อไม่ให้ลอย
-            connected = set(n for e in G.edges() for n in e)
-            for room in rooms_list:
-                if room not in connected and rooms_list[0] != room:
-                    G.add_edge(rooms_list[0], room, weight=0.3, score=0)
+            # 4.2 Spring layout (high spread)
+            sp = nx.spring_layout(G, weight="weight",
+                k=5.0/math.sqrt(max(len(rooms_list),1)),
+                iterations=800, seed=7)
 
-            # ── 4.2 Spring Layout (k = ระยะห่างธรรมชาติ) ──
-            spring_pos = nx.spring_layout(
-                G,
-                weight="weight",
-                k=2.5 / math.sqrt(max(len(rooms_list), 1)),
-                iterations=300,
-                seed=42,
+            # 4.3 Initial block sizes (arbitrary units)
+            sc0  = 1.0 / math.sqrt(max(gross_map.values()))
+            half = {r: math.sqrt(gross_map[r])*sc0 for r in rooms_list}
+            pos  = {r: [sp[r][0]*4, sp[r][1]*4] for r in rooms_list}
+
+            # 4.4 Non-overlapping push-apart
+            GAP = 0.25
+            for _it in range(2000):
+                moved = False
+                for i,r1 in enumerate(rooms_list):
+                    for j,r2 in enumerate(rooms_list):
+                        if j <= i: continue
+                        x1,y1=pos[r1]; x2,y2=pos[r2]; h1,h2=half[r1],half[r2]
+                        mind=h1+h2+GAP; dx=x2-x1; dy=y2-y1
+                        ox=mind-abs(dx); oy=mind-abs(dy)
+                        if ox>0 and oy>0:
+                            if ox<=oy:
+                                push=ox/2+0.01; s=1 if dx>=0 else -1
+                                pos[r1][0]-=s*push; pos[r2][0]+=s*push
+                            else:
+                                push=oy/2+0.01; s=1 if dy>=0 else -1
+                                pos[r1][1]-=s*push; pos[r2][1]+=s*push
+                            moved=True
+                if not moved: break
+
+            # 4.5 Scale to fit inside site boundary (with margin)
+            MARGIN = 0.35  # meters
+            bb_xmin = min(pos[r][0]-half[r] for r in rooms_list)
+            bb_xmax = max(pos[r][0]+half[r] for r in rooms_list)
+            bb_ymin = min(pos[r][1]-half[r] for r in rooms_list)
+            bb_ymax = max(pos[r][1]+half[r] for r in rooms_list)
+            sc_fit  = min(
+                (SITE_W - 2*MARGIN) / (bb_xmax - bb_xmin),
+                (SITE_L - 2*MARGIN) / (bb_ymax - bb_ymin),
             )
+            cx0 = (bb_xmin+bb_xmax)/2;  cy0 = (bb_ymin+bb_ymax)/2
+            for r in rooms_list:
+                pos[r][0]  = (pos[r][0]-cx0)*sc_fit + SITE_W/2
+                pos[r][1]  = (pos[r][1]-cy0)*sc_fit + SITE_L/2
+                half[r]   *= sc_fit
 
-            # ── 4.3 คำนวณขนาดบล็อกจาก Gross Area ──
-            gross_areas = {
-                r: df_space.loc[df_space["room"] == r, "Gross_Area_sqm"].values[0]
-                for r in rooms_list
+            # 4.6 Draw figure
+            BG        = "#0F1624"
+            ANNO_CLR  = "#FFD700"
+            OUTER_PAD = max(SITE_W, SITE_L) * 0.18  # axis padding outside site
+
+            # Figure proportional to site + outer pad
+            FIG_W_IN = 14
+            FIG_H_IN = FIG_W_IN * (SITE_L + 2*OUTER_PAD) / (SITE_W + 2*OUTER_PAD) + 0.5
+            fig_bp, ax = plt.subplots(figsize=(FIG_W_IN, FIG_H_IN))
+            fig_bp.patch.set_facecolor(BG)
+            ax.set_facecolor(BG)
+
+            # ── Meter grid (inside site only) ──
+            for gx in np.arange(0, SITE_W+0.01, 1.0):
+                ax.axvline(gx, color="#1E2E44", lw=0.7, zorder=0)
+            for gy in np.arange(0, SITE_L+0.01, 1.0):
+                ax.axhline(gy, color="#1E2E44", lw=0.7, zorder=0)
+
+            # ── Site fill + boundary ──
+            ax.add_patch(Rectangle((0,0), SITE_W, SITE_L,
+                linewidth=0, facecolor="#151F34", zorder=1))
+            ax.add_patch(Rectangle((0,0), SITE_W, SITE_L,
+                linewidth=3.5, edgecolor=ANNO_CLR, facecolor="none", zorder=9))
+
+            # ── Dimension arrows ──
+            ax.annotate("", xy=(SITE_W, -OUTER_PAD*0.38), xytext=(0, -OUTER_PAD*0.38),
+                arrowprops=dict(arrowstyle="<->", color=ANNO_CLR, lw=2.0))
+            ax.text(SITE_W/2, -OUTER_PAD*0.55,
+                f"{SITE_W:.1f} ม.",
+                ha="center", va="top", fontsize=12, fontweight="bold", color=ANNO_CLR)
+
+            ax.annotate("", xy=(-OUTER_PAD*0.38, SITE_L), xytext=(-OUTER_PAD*0.38, 0),
+                arrowprops=dict(arrowstyle="<->", color=ANNO_CLR, lw=2.0))
+            ax.text(-OUTER_PAD*0.58, SITE_L/2,
+                f"{SITE_L:.1f} ม.",
+                ha="right", va="center", fontsize=12, fontweight="bold",
+                color=ANNO_CLR, rotation=90)
+
+            # ── Meter tick labels ──
+            for gx in range(0, int(SITE_W)+1):
+                ax.text(gx, SITE_L+OUTER_PAD*0.12, f"{gx}",
+                    ha="center", va="bottom", fontsize=7, color="#556688")
+            for gy in range(0, int(SITE_L)+1):
+                ax.text(SITE_W+OUTER_PAD*0.10, gy, f"{gy}",
+                    ha="left", va="center", fontsize=7, color="#556688")
+            ax.text(SITE_W/2, SITE_L+OUTER_PAD*0.32, "เมตร",
+                ha="center", va="bottom", fontsize=7.5, color="#445577", style="italic")
+
+            # ── Zone halos ──
+            for room in rooms_list:
+                cx,cy=pos[room]; h=half[room]; zone=ZONE_MAP.get(room,"Private"); pad=0.04
+                ax.add_patch(FancyBboxPatch(
+                    (cx-h-pad,cy-h-pad),(h+pad)*2,(h+pad)*2,
+                    boxstyle="round,pad=0.04",
+                    facecolor=ZONE_DARK.get(zone,"#222"),
+                    edgecolor=ZONE_ACCENT.get(zone,"#555"),
+                    lw=0.8,ls="--",alpha=0.50,zorder=2))
+
+            # ── Zone labels ──
+            zone_groups = {}
+            for r in rooms_list:
+                zone_groups.setdefault(ZONE_MAP.get(r,"Private"),[]).append(r)
+            for zone, zr in zone_groups.items():
+                zxs=[pos[r][0] for r in zr]; zys=[pos[r][1] for r in zr]; zh=[half[r] for r in zr]
+                top=max(y+h for y,h in zip(zys,zh))+0.10
+                cx_z=sum(zxs)/len(zxs)
+                # clamp label inside site
+                top  = min(top, SITE_L - 0.08)
+                cx_z = max(0.1, min(cx_z, SITE_W - 0.1))
+                ax.text(cx_z, top, f"[ {zone} ]",
+                    ha="center", va="bottom", fontsize=7.5,
+                    color=ZONE_ACCENT.get(zone,"#888"), alpha=0.80,
+                    style="italic", fontweight="bold", zorder=3,
+                    path_effects=[pe.withStroke(linewidth=2, foreground=BG)])
+
+            # ── Adjacency edges ──
+            ADJ_S = {
+                 3: dict(c="#FF4D4D",lw=2.5,ls="-", a=0.88,lbl="Score 3  must-adjacent"),
+                 2: dict(c="#FFD700",lw=1.8,ls="-", a=0.75,lbl="Score 2  should-be-near"),
+                 1: dict(c="#4CAF50",lw=1.0,ls=":", a=0.55,lbl="Score 1  neutral"),
+                -1: dict(c="#666666",lw=1.0,ls="--",a=0.40,lbl="Score -1  keep-apart"),
             }
-            # ปรับ scale ให้บล็อกใหญ่สุดกว้างราว 2.0 หน่วย canvas
-            max_gross = max(gross_areas.values())
-            scale = 2.0 / math.sqrt(max_gross)
-
-            room_sizes = {r: math.sqrt(gross_areas[r]) * scale for r in rooms_list}  # side length
-
-            # ── 4.4 สี palette ──
-            palette_map = {room: PALETTE[i % len(PALETTE)] for i, room in enumerate(rooms_list)}
-
-            # ── 4.5 วาด Block Plan ──
-            fig_block, ax_block = plt.subplots(figsize=(12, 9))
-            fig_block.patch.set_facecolor("#F0F2F6")
-            ax_block.set_facecolor("#F0F2F6")
-
-            # วาดเส้น Adjacency ก่อน (z-order ต่ำ)
+            drawn_e = set()
             for adj in data["Adjacency"]:
-                r1, r2, score = adj["room1"], adj["room2"], adj["score"]
-                if r1 not in spring_pos or r2 not in spring_pos:
-                    continue
+                r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
+                if r1 not in pos or r2 not in pos: continue
+                s=ADJ_S.get(sc,ADJ_S[1])
+                x1_,y1_=pos[r1]; x2_,y2_=pos[r2]
+                lbl=s["lbl"] if s["lbl"] not in drawn_e else "_"; drawn_e.add(s["lbl"])
+                ax.plot([x1_,x2_],[y1_,y2_], color=s["c"], lw=s["lw"],
+                    ls=s["ls"], alpha=s["a"], zorder=4, label=lbl,
+                    solid_capstyle="round")
+                mx_,my_=(x1_+x2_)/2,(y1_+y2_)/2
+                ax.text(mx_,my_,str(sc),ha="center",va="center",fontsize=7,
+                    color=s["c"],fontweight="bold",zorder=5,
+                    bbox=dict(boxstyle="circle,pad=0.22",fc=BG,ec=s["c"],lw=0.7,alpha=0.88))
 
-                cx1, cy1 = spring_pos[r1]
-                cx2, cy2 = spring_pos[r2]
-
-                edge_styles_mpl = {
-                    3:  dict(color="#E03434", lw=3.0, ls="-",  alpha=0.7),
-                    2:  dict(color="#F5A623", lw=2.0, ls="-",  alpha=0.6),
-                    1:  dict(color="#4A90D9", lw=1.2, ls=":",  alpha=0.5),
-                    -1: dict(color="#AAAAAA", lw=1.2, ls="--", alpha=0.4),
-                }
-                es = edge_styles_mpl.get(score, edge_styles_mpl[1])
-                ax_block.plot(
-                    [cx1, cx2], [cy1, cy2],
-                    color=es["color"], linewidth=es["lw"],
-                    linestyle=es["ls"], alpha=es["alpha"], zorder=1,
-                )
-
-                # Label กลางเส้น
-                mx, my = (cx1 + cx2) / 2, (cy1 + cy2) / 2
-                score_labels = {3: "●●●", 2: "●●", 1: "●", -1: "✕"}
-                ax_block.text(
-                    mx, my, score_labels.get(score, ""),
-                    ha="center", va="center",
-                    fontsize=7, color=es["color"], alpha=0.8,
-                    bbox=dict(boxstyle="round,pad=0.1", fc="#F0F2F6", ec="none"),
-                    zorder=2,
-                )
-
-            # วาด Block แต่ละห้อง
+            # ── Room blocks ──
             for room in rooms_list:
-                cx, cy = spring_pos[room]
-                side = room_sizes[room]
-                half = side / 2
-                color = palette_map[room]
-                gross = gross_areas[room]
-                net = df_space.loc[df_space["room"] == room, "net_area_sqm"].values[0]
+                cx,cy=pos[room]; h=half[room]
+                color=pal[room]
+                net_=df.loc[df["room"]==room,"net_area_sqm"].values[0]
+                gross_=gross_map[room]; zone=ZONE_MAP.get(room,"Private")
+                # Glow
+                for sh,av in [(0.06,0.08),(0.03,0.13)]:
+                    ax.add_patch(FancyBboxPatch((cx-h-sh,cy-h-sh),(h+sh)*2,(h+sh)*2,
+                        boxstyle="round,pad=0.06",facecolor=color,edgecolor="none",alpha=av,zorder=5))
+                # Body
+                ax.add_patch(FancyBboxPatch((cx-h,cy-h),h*2,h*2,
+                    boxstyle="round,pad=0.06",facecolor=color,edgecolor="white",
+                    lw=1.8,alpha=0.94,zorder=6))
+                # Top stripe
+                stripe_h=h*0.28
+                ax.add_patch(Rectangle((cx-h,cy+h-stripe_h),h*2,stripe_h,
+                    facecolor=ZONE_ACCENT.get(zone,"#555"),edgecolor="none",alpha=0.30,zorder=7))
+                # Room name
+                fs = 8 if h<0.25 else (9 if h<0.35 else (10 if h<0.50 else 11))
+                ax.text(cx,cy+h*0.10,room,ha="center",va="center",
+                    fontsize=fs,fontweight="bold",color="white",
+                    path_effects=[pe.withStroke(linewidth=2.5,foreground="#00000099")],zorder=8)
+                # Area
+                ax.text(cx,cy-h*0.30,f"Net {net_:.1f} | Gross {gross_:.1f}",
+                    ha="center",va="center",fontsize=6.5,color="white",alpha=0.78,zorder=8)
+                # Zone tag
+                ax.text(cx,cy+h*0.70,zone,ha="center",va="center",
+                    fontsize=5.5,color="white",alpha=0.55,style="italic",zorder=8)
 
-                # เงาบล็อก
-                shadow = FancyBboxPatch(
-                    (cx - half + 0.03, cy - half - 0.03),
-                    side, side,
-                    boxstyle="round,pad=0.08",
-                    linewidth=0,
-                    facecolor="#00000022",
-                    zorder=3,
-                )
-                ax_block.add_patch(shadow)
+            # ── Site label (top-right inside) ──
+            ax.text(SITE_W-0.10, SITE_L-0.10,
+                f"Site:  {SITE_W:.1f} × {SITE_L:.1f} ม.  =  {SITE_W*SITE_L:.0f} ตร.ม.",
+                ha="right",va="top",fontsize=9,color=ANNO_CLR,fontweight="bold",zorder=10,
+                bbox=dict(boxstyle="round,pad=0.3",fc="#0A1020",ec=ANNO_CLR,lw=1.0,alpha=0.88))
 
-                # ตัวบล็อกหลัก
-                rect = FancyBboxPatch(
-                    (cx - half, cy - half),
-                    side, side,
-                    boxstyle="round,pad=0.08",
-                    linewidth=2.0,
-                    edgecolor="white",
-                    facecolor=color,
-                    alpha=0.88,
-                    zorder=4,
-                )
-                ax_block.add_patch(rect)
+            # ── Legends ──
+            lp=[mpatches.Patch(color=v["c"],label=v["lbl"]) for v in ADJ_S.values()]
+            al=ax.legend(handles=lp,loc="lower right",fontsize=8,framealpha=0.90,
+                facecolor="#0A1020",edgecolor="#243358",labelcolor="white",
+                title="Adjacency Score",title_fontsize=9)
+            plt.setp(al.get_title(),color="#90B4E0")
+            zp=[mpatches.Patch(facecolor=ZONE_ACCENT[z],label=z,alpha=0.85) for z in ZONE_ACCENT]
+            zl=ax.legend(handles=zp,loc="upper right",fontsize=8,framealpha=0.90,
+                facecolor="#0A1020",edgecolor="#243358",labelcolor="white",
+                title="Spatial Zone",title_fontsize=9)
+            plt.setp(zl.get_title(),color="#90B4E0")
+            ax.add_artist(al)
 
-                # ชื่อห้อง (บน)
-                ax_block.text(
-                    cx, cy + half * 0.22,
-                    room,
-                    ha="center", va="center",
-                    fontsize=10, fontweight="bold", color="white",
-                    zorder=5,
-                )
-                # พื้นที่ (ล่าง)
-                ax_block.text(
-                    cx, cy - half * 0.30,
-                    f"Net {net:.1f}  |  Gross {gross:.1f} ตร.ม.",
-                    ha="center", va="center",
-                    fontsize=7.5, color="white",
-                    alpha=0.90,
-                    zorder=5,
-                )
+            ax.set_xlim(-OUTER_PAD, SITE_W+OUTER_PAD)
+            ax.set_ylim(-OUTER_PAD, SITE_L+OUTER_PAD)
+            ax.set_aspect("equal"); ax.axis("off")
+            ax.set_title(
+                f"Schematic Block Plan  —  Site {SITE_W:.1f} × {SITE_L:.1f} ม."
+                f"  ·  Adjacency-Informed · Scale to Site",
+                fontsize=13, color="#C8DCFF", fontweight="bold", pad=16)
+            plt.tight_layout(pad=0.8)
+            st.pyplot(fig_bp, use_container_width=True)
 
-            # ── 4.6 Legend ──
-            legend_items = [
-                mpatches.Patch(color="#E03434", label="Score 3 — ต้องติดกัน"),
-                mpatches.Patch(color="#F5A623", label="Score 2 — ควรอยู่ใกล้"),
-                mpatches.Patch(color="#4A90D9", label="Score 1 — เฉยๆ"),
-                mpatches.Patch(color="#AAAAAA", label="Score -1 — ควรแยกออก"),
-            ]
-            ax_block.legend(
-                handles=legend_items,
-                loc="lower right",
-                fontsize=9,
-                framealpha=0.85,
-                edgecolor="#cccccc",
-                title="Adjacency Score",
-                title_fontsize=9,
-            )
+            st.markdown(f"""
+<div class="note">
+<b>📐 หลักการ Block Plan:</b><br>
+<b>① ตำแหน่ง</b> — Spring Layout (NetworkX) ใช้ Adjacency Score เป็น spring weight
+(Score 3 = ดึงชิด · Score -1 = ผลักออก)<br>
+<b>② Non-Overlap</b> — Iterative push-apart algorithm (2000 รอบ) ดันบล็อกที่ทับกันออก<br>
+<b>③ Scale to Site</b> — Uniform scale ทุกบล็อกให้พอดีกับกรอบ {SITE_W:.1f} × {SITE_L:.1f} ม.
+(margin {MARGIN:.2f} ม. รอบขอบ)<br>
+<b>④ ขนาดบล็อก</b> — สัดส่วนตาม √(Gross Area) ซึ่ง = Net + Circulation {circ_pct}%<br>
+<b>⑤ Zone</b> — Public · Service · Private แสดงด้วยสีพื้นหลัง halo
+</div>
+""", unsafe_allow_html=True)
 
-            ax_block.set_title(
-                "Schematic Block Plan  —  Adjacency-Informed Spring Layout\n"
-                "ตำแหน่งบล็อกอ้างอิงจาก Network Graph + Adjacency Matrix  ·  ขนาดสัดส่วนตาม Gross Area จริง",
-                fontsize=12, pad=14,
-            )
-
-            # ปรับ axis ให้ครอบคลุมทุกบล็อก
-            all_x = [v[0] for v in spring_pos.values()]
-            all_y = [v[1] for v in spring_pos.values()]
-            max_side = max(room_sizes.values())
-            margin = max_side * 0.9
-            ax_block.set_xlim(min(all_x) - margin, max(all_x) + margin)
-            ax_block.set_ylim(min(all_y) - margin, max(all_y) + margin)
-            ax_block.set_aspect("equal")
-            ax_block.axis("off")
-
-            plt.tight_layout()
-            st.pyplot(fig_block)
-
-            # ── 4.7 หมายเหตุอธิบายหลักการ ──
-            st.info(
-                "**📐 หลักการจัดวาง Block Plan นี้:**\n\n"
-                "- ตำแหน่งบล็อกคำนวณด้วย **Spring Layout Algorithm** (NetworkX) "
-                "โดยใช้ Adjacency Score เป็น Spring Weight โดยตรง\n"
-                "- **Score 3** → Spring สั้น (ดึงชิด) = บล็อกอยู่ใกล้กัน\n"
-                "- **Score -1** → Spring อ่อน (ผลัก) = บล็อกอยู่ห่างกัน\n"
-                "- **ขนาดบล็อก** สัดส่วนตาม √(Gross Area) จริง ไม่ใช่แค่แผนภาพ Treemap\n"
-                "- เส้นเชื่อมแสดง Adjacency Relationship เดียวกับ Network Graph (Section 3)"
-            )
-
-            st.divider()
-
-            # --- 5. Design Logic ---
-            st.subheader("🧠 5. AI Design Logic (แนวคิดการออกแบบ)")
-            st.success(data["Design_Concept"])
+            # ── 5. Design Concept ──────────────────────────────
+            st.markdown("---")
+            st.markdown("### 🧠 5. AI Design Concept")
+            st.markdown(f"""
+<div style="background:linear-gradient(135deg,#0D1B35,#1A2E55);
+            border:1px solid #1E3A6E;border-radius:14px;
+            padding:22px 28px;color:#C0D8F0;font-size:0.97rem;line-height:1.75;">
+  💡 {data["Design_Concept"]}
+</div>
+""", unsafe_allow_html=True)
 
         except Exception as e:
-            st.error(f"❌ รูปแบบ JSON ไม่ถูกต้อง หรือมีบางอย่างผิดพลาด: {e}")
+            st.error(f"❌ JSON ไม่ถูกต้อง: {e}")
