@@ -35,8 +35,8 @@ with tab1:
     with col2:
         rooms = st.multiselect(
             "พื้นที่ใช้สอยที่ต้องการ (Required Rooms)",
-            ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry" , "Closet"],
-            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom"  , "Closet"]
+            ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry", "Closet"],
+            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Closet"]
         )
         mode = st.radio(
             "รูปแบบการคำนวณพื้นที่ (Sizing Mode)",
@@ -377,21 +377,52 @@ with tab2:
 
             st.divider()
 
-            # --- 4. Schematic Block Plan ---
+            # --- 4. Schematic Block Plan (Treemap) ---
+            # ✅ FIX: ใช้ go.Treemap แทน px.treemap เพื่อล็อกลำดับตาม JSON
+            # px.treemap จะ sort ห้องตามขนาด (area) อัตโนมัติ ทำให้ลำดับไม่ถูกต้อง
+            # go.Treemap + tiling(sort=False) จะรักษาลำดับที่กำหนดไว้ใน DataFrame
             st.subheader("🟩 4. Schematic Block Plan (Proportional Treemap)")
             st.markdown(
-                f"จำลองการจัดก้อน Mass เบื้องต้นตามสัดส่วนพื้นที่จริง (Gross Area รวม Circulation {circulation_pct}%)"
+                f"จำลองการจัดก้อน Mass เบื้องต้นตามสัดส่วนพื้นที่จริง (Gross Area รวม Circulation {circulation_pct}%) "
+                f"— **ลำดับห้องตรงตาม Sequence ใน JSON**"
             )
 
-            fig_tree = px.treemap(
-                df_space,
-                path=[px.Constant("Site Area"), "room"],
-                values="Gross_Area_sqm",
-                color="room",
-                hover_data={"net_area_sqm": True, "Gross_Area_sqm": True},
-                color_discrete_sequence=px.colors.qualitative.Pastel,
+            # สีแต่ละห้องตามลำดับ (Pastel palette เหมือนเดิม)
+            pastel_colors = px.colors.qualitative.Pastel
+            room_colors = {
+                room: pastel_colors[i % len(pastel_colors)]
+                for i, room in enumerate(rooms_list)
+            }
+
+            # สร้าง labels / parents / values ตามลำดับใน df_space (ลำดับจาก JSON)
+            labels = ["Site Area"] + rooms_list
+            parents = [""] + ["Site Area"] * len(rooms_list)
+            values = [0] + df_space["Gross_Area_sqm"].tolist()
+            colors = ["rgba(0,0,0,0)"] + [room_colors[r] for r in rooms_list]
+
+            customdata = [[None, None]] + list(
+                zip(df_space["net_area_sqm"].tolist(), df_space["Gross_Area_sqm"].tolist())
             )
-            fig_tree.update_traces(textinfo="label+value", textfont_size=14)
+
+            fig_tree = go.Figure(go.Treemap(
+                labels=labels,
+                parents=parents,
+                values=values,
+                marker=dict(colors=colors),
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "Net Area: %{customdata[0]:.1f} ตร.ม.<br>"
+                    "Gross Area: %{customdata[1]:.1f} ตร.ม.<extra></extra>"
+                ),
+                textinfo="label+value",
+                textfont=dict(size=14),
+                tiling=dict(
+                    sort=False,          # ✅ KEY FIX: ไม่ sort → รักษาลำดับ JSON
+                    packing="squarify",  # อัลกอริทึม layout มาตรฐาน
+                ),
+            ))
+
             fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10))
             st.plotly_chart(fig_tree, use_container_width=True)
 
