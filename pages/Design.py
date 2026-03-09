@@ -2,21 +2,9 @@ import streamlit as st
 import json
 import pandas as pd
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch, Rectangle
-import matplotlib.patheffects as pe
-import seaborn as sns
 import numpy as np
 import math
 import networkx as nx
-
-# ══════════════════════════════════════════
-# 🇹🇭 ตั้งค่าฟอนต์ภาษาไทยสำหรับ Matplotlib
-# ══════════════════════════════════════════
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Tahoma', 'TH Sarabun New', 'Loma', 'Garuda', 'Arial Unicode MS', 'sans-serif']
-plt.rcParams['axes.unicode_minus'] = False  # ป้องกันปัญหาเครื่องหมายลบแสดงเป็นสี่เหลี่ยม
 
 # ══════════════════════════════════════════
 # ⚙️  Page Config + Session State
@@ -120,6 +108,9 @@ ZONE_MAP = {
 }
 ZONE_DARK   = {"Public":"#1B3A5C","Service":"#1B4030","Private":"#4A1B1B","Semi-Public":"#3A3000"}
 ZONE_ACCENT = {"Public":"#4A9EE0","Service":"#3CC470","Private":"#E05C5C","Semi-Public":"#E0C040"}
+
+# ── Thai font family for Plotly (browser-safe + Thai support) ──
+THAI_FONT = "Tahoma, Segoe UI, sans-serif"
 
 # ── Slice and Dice Algorithm (Treemap Packing) ────────────────
 def generate_treemap(items, x, y, w, h):
@@ -312,33 +303,104 @@ with tab2:
             m4.metric("⚖️ Scaling Factor", f"x {scale_ratio:.2f}", 
                       help="สัดส่วนที่นำไปคูณเพื่อให้เต็มกรอบ Site พอดีเป๊ะ")
 
-            st.dataframe(df.style.format("{:.2f}", subset=["net_area_sqm", clbl, "Gross_sqm"])
-                         .background_gradient(subset=["Gross_sqm"], cmap="Blues"), 
+            st.dataframe(df.style.format("{:.2f}", subset=["net_area_sqm", clbl, "Gross_sqm"]),
                          use_container_width=True)
 
-            # ── 2. Adjacency Matrix ────────────────────────────
+            # ── 2. Adjacency Matrix (Plotly Interactive Heatmap) ──
             st.markdown("---")
             st.markdown("### 🧮 2. Adjacency Matrix")
             mat = pd.DataFrame(0, index=rooms_list, columns=rooms_list)
             for adj in data["Adjacency"]:
-                r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
+                r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
                 if r1 in rooms_list and r2 in rooms_list:
-                    mat.at[r1,r2] = sc; mat.at[r2,r1] = sc
+                    mat.at[r1, r2] = sc; mat.at[r2, r1] = sc
 
-            fig_h, ax_h = plt.subplots(figsize=(8, 5.5))
-            fig_h.patch.set_facecolor("#0F1624")
-            ax_h.set_facecolor("#0F1624")
-            sns.heatmap(mat.astype(float), annot=True, fmt=".0f",
-                cmap="RdYlGn", center=0, vmin=-1, vmax=3,
-                linewidths=0.6, linecolor="#1E2E4A",
-                cbar_kws={"label":"Adj. Score","shrink":0.8}, ax=ax_h)
-            ax_h.set_title("Adjacency Matrix   (3 = ต้องติดกัน  ·  -1 = ควรแยก)",
-                fontsize=12, pad=14, color="#C8DCFF", fontweight="bold")
-            ax_h.tick_params(colors="#A0B8D8", labelsize=9)
-            plt.setp(ax_h.get_xticklabels(), rotation=30)
-            plt.setp(ax_h.get_yticklabels(), rotation=0)
-            plt.tight_layout()
-            st.pyplot(fig_h, use_container_width=True)
+            mat_values = mat.values.astype(float)
+            
+            # สร้าง hover text แสดงรายละเอียดคู่ห้อง
+            hover_text = []
+            for i, r_row in enumerate(rooms_list):
+                row_hover = []
+                for j, r_col in enumerate(rooms_list):
+                    score = int(mat_values[i][j])
+                    if score == 3:
+                        label = "ต้องติดกัน (Must Adjacent)"
+                    elif score == 2:
+                        label = "ควรใกล้กัน (Should Near)"
+                    elif score == 1:
+                        label = "เฉยๆ (Neutral)"
+                    elif score == -1:
+                        label = "ควรแยก (Keep Apart)"
+                    else:
+                        label = "ไม่มีความสัมพันธ์"
+                    # หา reason ถ้ามี
+                    reason = ""
+                    for a in data["Adjacency"]:
+                        if (a["room1"] == r_row and a["room2"] == r_col) or \
+                           (a["room1"] == r_col and a["room2"] == r_row):
+                            reason = a.get("reason", "")
+                            break
+                    hover_str = (
+                        f"<b>{r_row} ↔ {r_col}</b><br>"
+                        f"Score: {score}<br>"
+                        f"{label}"
+                    )
+                    if reason:
+                        hover_str += f"<br>Reason: {reason}"
+                    row_hover.append(hover_str)
+                hover_text.append(row_hover)
+
+            # สร้าง annotation text (ตัวเลข score)
+            annotations = []
+            for i, r_row in enumerate(rooms_list):
+                for j, r_col in enumerate(rooms_list):
+                    val = int(mat_values[i][j])
+                    annotations.append(dict(
+                        x=r_col, y=r_row,
+                        text=str(val),
+                        font=dict(color="white" if abs(val) >= 2 else "#C8DCFF", size=13, family=THAI_FONT),
+                        showarrow=False,
+                    ))
+
+            # Plotly Heatmap — RdYlGn colorscale, center=0
+            fig_h = go.Figure(data=go.Heatmap(
+                z=mat_values,
+                x=rooms_list,
+                y=rooms_list,
+                colorscale="RdYlGn",
+                zmin=-1, zmax=3, zmid=0,
+                hovertext=hover_text,
+                hoverinfo="text",
+                colorbar=dict(
+                    title=dict(text="Adj. Score", font=dict(color="#A0B8D8", family=THAI_FONT)),
+                    tickfont=dict(color="#A0B8D8"),
+                    thickness=15,
+                    len=0.8,
+                ),
+                xgap=2, ygap=2,
+            ))
+            fig_h.update_layout(
+                title=dict(
+                    text="Adjacency Matrix   (3 = ต้องติดกัน  ·  -1 = ควรแยก)",
+                    font=dict(size=14, color="#C8DCFF", family=THAI_FONT),
+                    x=0.5,
+                ),
+                annotations=annotations,
+                height=500,
+                plot_bgcolor="#0F1624",
+                paper_bgcolor="#0F1624",
+                xaxis=dict(
+                    tickfont=dict(color="#A0B8D8", size=11, family=THAI_FONT),
+                    side="bottom",
+                    tickangle=-30,
+                ),
+                yaxis=dict(
+                    tickfont=dict(color="#A0B8D8", size=11, family=THAI_FONT),
+                    autorange="reversed",
+                ),
+                margin=dict(l=100, r=40, t=60, b=80),
+            )
+            st.plotly_chart(fig_h, use_container_width=True)
 
             # ── 3. Relationship Network Graph ──────────────────
             st.markdown("---")
@@ -394,7 +456,7 @@ with tab2:
             st.plotly_chart(fig_n, use_container_width=True)
 
             # ════════════════════════════════════════════════════════
-            # 4. Schematic Packed Block Plan
+            # 4. Schematic Packed Block Plan (Plotly Interactive)
             # ════════════════════════════════════════════════════════
             st.markdown("---")
             st.markdown("### 🟩 4. Schematic Packed Floor Plan  (100% Site Fit)")
@@ -420,31 +482,29 @@ with tab2:
             # เรียกใช้ Algorithm ผ่าพื้นที่
             layout_rects = generate_treemap(items_to_pack, 0, 0, SITE_W, SITE_L)
 
-            # ── Draw figure ──
+            # ── Draw with Plotly ──
             BG        = "#0F1624"
             ANNO_CLR  = "#FFD700"
-            OUTER_PAD = max(SITE_W, SITE_L) * 0.15 
+            OUTER_PAD = max(SITE_W, SITE_L) * 0.15
 
-            FIG_W_IN = 14
-            FIG_H_IN = FIG_W_IN * (SITE_L + 2*OUTER_PAD) / (SITE_W + 2*OUTER_PAD) + 0.5
-            fig_bp, ax = plt.subplots(figsize=(FIG_W_IN, FIG_H_IN))
-            fig_bp.patch.set_facecolor(BG)
-            ax.set_facecolor(BG)
-
-            # กรอบ Site
-            ax.add_patch(Rectangle((0,0), SITE_W, SITE_L, linewidth=4.0, edgecolor=ANNO_CLR, facecolor="none", zorder=9))
-
-            # Dimension arrows 
-            ax.annotate("", xy=(SITE_W, -OUTER_PAD*0.3), xytext=(0, -OUTER_PAD*0.3), arrowprops=dict(arrowstyle="<->", color=ANNO_CLR, lw=2.0))
-            ax.text(SITE_W/2, -OUTER_PAD*0.45, f"Width: {SITE_W:.1f} ม.", ha="center", va="top", fontsize=12, fontweight="bold", color=ANNO_CLR)
-
-            ax.annotate("", xy=(-OUTER_PAD*0.3, SITE_L), xytext=(-OUTER_PAD*0.3, 0), arrowprops=dict(arrowstyle="<->", color=ANNO_CLR, lw=2.0))
-            ax.text(-OUTER_PAD*0.45, SITE_L/2, f"Length: {SITE_L:.1f} ม.", ha="right", va="center", fontsize=12, fontweight="bold", color=ANNO_CLR, rotation=90)
+            fig_bp = go.Figure()
 
             # เก็บตำแหน่งศูนย์กลางสำหรับวาดเส้นเชื่อม
             pos_packed = {}
             
-            # วาดห้อง (Room Blocks)
+            # วาดห้อง (Room Blocks) as shapes + invisible scatter for hover
+            room_hover_x = []
+            room_hover_y = []
+            room_hover_text = []
+            room_hover_colors = []
+            room_labels_x = []
+            room_labels_y = []
+            room_labels_text = []
+            room_area_x = []
+            room_area_y = []
+            room_area_text = []
+
+            pad = 0.04
             for r_data in layout_rects:
                 room = r_data['room']
                 rx, ry, rw, rh = r_data['x'], r_data['y'], r_data['w'], r_data['h']
@@ -454,59 +514,226 @@ with tab2:
                 color = pal[room]
                 zone = ZONE_MAP.get(room, "Private")
                 scaled_area = rw * rh
+                net_area = df.loc[df["room"]==room, "net_area_sqm"].values[0]
+                gross_area = df.loc[df["room"]==room, "Gross_sqm"].values[0]
                 
-                # กำแพงห้อง (เว้นขอบนิดๆ เพื่อให้เห็นเส้นแบ่ง)
-                pad = 0.04
-                ax.add_patch(Rectangle((rx+pad, ry+pad), rw-2*pad, rh-2*pad,
-                    facecolor=color, edgecolor="#FFFFFF", lw=2.0, alpha=0.95, zorder=6))
+                # Room block shape (with padding)
+                fig_bp.add_shape(
+                    type="rect",
+                    x0=rx + pad, y0=ry + pad,
+                    x1=rx + rw - pad, y1=ry + rh - pad,
+                    fillcolor=color,
+                    opacity=0.92,
+                    line=dict(color="#FFFFFF", width=2),
+                    layer="below",
+                )
                 
-                # Zone Stripe แถบสี
+                # Zone stripe
                 stripe_h = min(rh * 0.15, 0.4)
-                ax.add_patch(Rectangle((rx+pad, ry+rh-pad-stripe_h), rw-2*pad, stripe_h,
-                    facecolor=ZONE_ACCENT.get(zone, "#555"), edgecolor="none", alpha=0.40, zorder=7))
+                fig_bp.add_shape(
+                    type="rect",
+                    x0=rx + pad, y0=ry + rh - pad - stripe_h,
+                    x1=rx + rw - pad, y1=ry + rh - pad,
+                    fillcolor=ZONE_ACCENT.get(zone, "#555"),
+                    opacity=0.40,
+                    line=dict(width=0),
+                    layer="below",
+                )
                 
-                # Text
-                fs = min(rw, rh) * 6 + 4
-                fs = max(7, min(fs, 12))
-                ax.text(cx, cy + rh*0.1, room, ha="center", va="center",
-                    fontsize=fs, fontweight="bold", color="white",
-                    path_effects=[pe.withStroke(linewidth=2.5, foreground="#00000099")], zorder=8)
+                # Collect hover data
+                room_hover_x.append(cx)
+                room_hover_y.append(cy)
+                room_hover_text.append(
+                    f"<b>{room}</b><br>"
+                    f"Zone: {zone}<br>"
+                    f"Plan Area: {scaled_area:.1f} ตร.ม.<br>"
+                    f"Net Area: {net_area:.1f} ตร.ม.<br>"
+                    f"Gross Area: {gross_area:.1f} ตร.ม.<br>"
+                    f"Dimensions: {rw:.2f} × {rh:.2f} ม."
+                )
+                room_hover_colors.append(color)
                 
-                ax.text(cx, cy - rh*0.15, f"Plan Area: {scaled_area:.1f} ตร.ม.",
-                    ha="center", va="center", fontsize=fs*0.75, color="#E8F0FF", zorder=8,
-                    path_effects=[pe.withStroke(linewidth=1.5, foreground="#00000099")])
+                # Labels
+                room_labels_x.append(cx)
+                room_labels_y.append(cy + rh * 0.08)
+                room_labels_text.append(room)
+                room_area_x.append(cx)
+                room_area_y.append(cy - rh * 0.12)
+                room_area_text.append(f"Plan Area: {scaled_area:.1f} ตร.ม.")
+
+            # Invisible scatter for hover interaction on rooms
+            fig_bp.add_trace(go.Scatter(
+                x=room_hover_x, y=room_hover_y,
+                mode="markers",
+                marker=dict(size=35, color=room_hover_colors, opacity=0),
+                hovertext=room_hover_text,
+                hoverinfo="text",
+                showlegend=False,
+                name="Rooms",
+            ))
+
+            # Room name labels
+            fig_bp.add_trace(go.Scatter(
+                x=room_labels_x, y=room_labels_y,
+                mode="text",
+                text=room_labels_text,
+                textfont=dict(size=12, color="white", family="Arial Black"),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+            # Area labels
+            fig_bp.add_trace(go.Scatter(
+                x=room_area_x, y=room_area_y,
+                mode="text",
+                text=room_area_text,
+                textfont=dict(size=9, color="#E8F0FF", family=THAI_FONT),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
 
             # ── วาดเส้นความสัมพันธ์ (Adjacency overlay) ──
             ADJ_S = {
-                 3: dict(c="#FF4D4D",lw=2.8,ls="-", a=0.9),
-                 2: dict(c="#FFD700",lw=2.0,ls="-", a=0.8),
-                 1: dict(c="#4CAF50",lw=1.2,ls=":", a=0.6),
-                -1: dict(c="#000000",lw=1.5,ls="--",a=0.5),
+                 3: dict(c="#FF4D4D", w=3.0, d="solid", a=0.9),
+                 2: dict(c="#FFD700", w=2.0, d="solid", a=0.8),
+                 1: dict(c="#4CAF50", w=1.5, d="dot",   a=0.6),
+                -1: dict(c="#000000", w=2.0, d="dash",  a=0.5),
             }
             
+            legend_added = set()
             for adj in data["Adjacency"]:
                 r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
                 if r1 in pos_packed and r2 in pos_packed:
                     s = ADJ_S.get(sc, ADJ_S[1])
                     x1_, y1_ = pos_packed[r1]
                     x2_, y2_ = pos_packed[r2]
+                    mx_, my_ = (x1_ + x2_) / 2, (y1_ + y2_) / 2
                     
-                    # ลากเส้นเชื่อมศูนย์กลาง
-                    ax.plot([x1_, x2_], [y1_, y2_], color=s["c"], lw=s["lw"],
-                        ls=s["ls"], alpha=s["a"], zorder=9, solid_capstyle="round")
+                    score_label = f"Score {sc}"
+                    show_legend = score_label not in legend_added
+                    legend_added.add(score_label)
                     
-                    # ตัวเลข Score
-                    mx_, my_ = (x1_+x2_)/2, (y1_+y2_)/2
-                    ax.text(mx_, my_, str(sc), ha="center", va="center", fontsize=7.5,
-                        color=s["c"], fontweight="bold", zorder=10,
-                        bbox=dict(boxstyle="circle,pad=0.2", fc=BG, ec=s["c"], lw=1.0, alpha=0.95))
+                    # Edge line
+                    fig_bp.add_trace(go.Scatter(
+                        x=[x1_, x2_], y=[y1_, y2_],
+                        mode="lines",
+                        line=dict(color=s["c"], width=s["w"], dash=s["d"]),
+                        opacity=s["a"],
+                        name=score_label,
+                        legendgroup=score_label,
+                        showlegend=show_legend,
+                        hoverinfo="skip",
+                    ))
+                    
+                    # Score label at midpoint
+                    fig_bp.add_trace(go.Scatter(
+                        x=[mx_], y=[my_],
+                        mode="markers+text",
+                        marker=dict(size=18, color=BG, line=dict(color=s["c"], width=1.5)),
+                        text=[str(sc)],
+                        textfont=dict(size=9, color=s["c"], family="Arial Black"),
+                        textposition="middle center",
+                        hovertext=f"<b>{r1} ↔ {r2}</b><br>Score: {sc}<br>{adj.get('reason', '')}",
+                        hoverinfo="text",
+                        showlegend=False,
+                    ))
 
-            ax.set_xlim(-OUTER_PAD, SITE_W+OUTER_PAD)
-            ax.set_ylim(-OUTER_PAD, SITE_L+OUTER_PAD)
-            ax.set_aspect("equal")
-            ax.axis("off")
-            plt.tight_layout(pad=0.8)
-            st.pyplot(fig_bp, use_container_width=True)
+            # Site boundary rectangle
+            fig_bp.add_shape(
+                type="rect",
+                x0=0, y0=0, x1=SITE_W, y1=SITE_L,
+                line=dict(color=ANNO_CLR, width=4),
+                fillcolor="rgba(0,0,0,0)",
+            )
+
+            # Dimension annotations
+            # Width arrow (bottom)
+            fig_bp.add_annotation(
+                x=SITE_W / 2, y=-OUTER_PAD * 0.35,
+                text=f"Width: {SITE_W:.1f} ม.",
+                showarrow=False,
+                font=dict(size=13, color=ANNO_CLR, family=THAI_FONT),
+            )
+            fig_bp.add_shape(
+                type="line", x0=0, y0=-OUTER_PAD*0.28, x1=SITE_W, y1=-OUTER_PAD*0.28,
+                line=dict(color=ANNO_CLR, width=2),
+            )
+            # Width arrow heads
+            fig_bp.add_annotation(
+                x=0, y=-OUTER_PAD*0.28, ax=0.15, ay=-OUTER_PAD*0.28,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.5, arrowcolor=ANNO_CLR, arrowwidth=2,
+                text="",
+            )
+            fig_bp.add_annotation(
+                x=SITE_W, y=-OUTER_PAD*0.28, ax=SITE_W-0.15, ay=-OUTER_PAD*0.28,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.5, arrowcolor=ANNO_CLR, arrowwidth=2,
+                text="",
+            )
+
+            # Length arrow (left)
+            fig_bp.add_annotation(
+                x=-OUTER_PAD * 0.45, y=SITE_L / 2,
+                text=f"Length: {SITE_L:.1f} ม.",
+                showarrow=False,
+                font=dict(size=13, color=ANNO_CLR, family=THAI_FONT),
+                textangle=-90,
+            )
+            fig_bp.add_shape(
+                type="line", x0=-OUTER_PAD*0.28, y0=0, x1=-OUTER_PAD*0.28, y1=SITE_L,
+                line=dict(color=ANNO_CLR, width=2),
+            )
+            # Length arrow heads
+            fig_bp.add_annotation(
+                x=-OUTER_PAD*0.28, y=0, ax=-OUTER_PAD*0.28, ay=0.1,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.5, arrowcolor=ANNO_CLR, arrowwidth=2,
+                text="",
+            )
+            fig_bp.add_annotation(
+                x=-OUTER_PAD*0.28, y=SITE_L, ax=-OUTER_PAD*0.28, ay=SITE_L-0.1,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.5, arrowcolor=ANNO_CLR, arrowwidth=2,
+                text="",
+            )
+
+            # Layout
+            fig_bp.update_layout(
+                height=max(500, int(500 * (SITE_L + 2*OUTER_PAD) / (SITE_W + 2*OUTER_PAD))),
+                plot_bgcolor=BG,
+                paper_bgcolor=BG,
+                xaxis=dict(
+                    visible=False,
+                    range=[-OUTER_PAD, SITE_W + OUTER_PAD],
+                    scaleanchor="y",
+                    scaleratio=1,
+                ),
+                yaxis=dict(
+                    visible=False,
+                    range=[-OUTER_PAD, SITE_L + OUTER_PAD],
+                ),
+                margin=dict(l=20, r=20, t=40, b=20),
+                title=dict(
+                    text="Schematic Block Plan  ·  drag to pan / scroll to zoom / hover for details",
+                    font=dict(size=13, color="#C8DCFF", family=THAI_FONT),
+                    x=0.5,
+                ),
+                legend=dict(
+                    title="Adjacency",
+                    orientation="h", yanchor="bottom", y=-0.08,
+                    xanchor="center", x=0.5,
+                    font=dict(size=11, color="#A0B8D8"),
+                    bgcolor="#141C2E", bordercolor="#1E2E4A",
+                ),
+                dragmode="pan",
+            )
+            # Default to pan mode with scroll zoom enabled
+            st.plotly_chart(fig_bp, use_container_width=True, config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "modeBarButtonsToAdd": ["zoom2d", "pan2d", "resetScale2d"],
+            })
 
             st.markdown(f"""
 <div class="note">
