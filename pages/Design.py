@@ -142,6 +142,34 @@ with tab2:
     st.header("2. Import AI Result & Generate Final Product")
     st.markdown("นำ JSON ที่ AI ประมวลผลเสร็จแล้วมาวางที่นี่ ระบบจะวาดแปลนและตารางให้อัตโนมัติ")
 
+    # ──────────────────────────────────────────
+    # 🔧 Circulation % — user-adjustable
+    # ──────────────────────────────────────────
+    st.markdown("### ⚙️ ตั้งค่า Circulation Factor")
+    circ_col1, circ_col2 = st.columns([1, 3])
+    with circ_col1:
+        circulation_pct = st.number_input(
+            "Circulation (% ของ Net Area)",
+            min_value=0,
+            max_value=100,
+            value=30,
+            step=5,
+            help="มาตรฐานทั่วไป: 20–30% สำหรับที่พักอาศัย, 30–40% สำหรับอาคารสาธารณะ",
+        )
+    with circ_col2:
+        if circulation_pct < 20:
+            st.info(f"ℹ️ {circulation_pct}% — น้อยกว่ามาตรฐาน (อาจแออัด)")
+        elif circulation_pct <= 35:
+            st.success(f"✅ {circulation_pct}% — อยู่ในช่วงมาตรฐานที่พักอาศัย (20–35%)")
+        elif circulation_pct <= 50:
+            st.warning(f"⚠️ {circulation_pct}% — สูงกว่าปกติ เหมาะอาคารสาธารณะ/เชิงพาณิชย์")
+        else:
+            st.error(f"🔴 {circulation_pct}% — สูงมาก ควรตรวจสอบอีกครั้ง")
+
+    circ_factor = circulation_pct / 100.0
+
+    st.divider()
+
     mock_json = """{
     "Space_Requirement": [
         {"room": "Living Area", "net_area_sqm": 8.0},
@@ -166,25 +194,26 @@ with tab2:
         try:
             data = json.loads(user_json_input)
 
-            # --- 1. Space Requirement (+30% Circulation) ---
+            # --- 1. Space Requirement (+ user-defined Circulation %) ---
             st.subheader("📊 1. Space Requirement (รายการพื้นที่ใช้สอย)")
             df_space = pd.DataFrame(data["Space_Requirement"])
-            df_space["Circulation_30%"] = df_space["net_area_sqm"] * 0.3
-            df_space["Gross_Area_sqm"] = df_space["net_area_sqm"] + df_space["Circulation_30%"]
+            circ_col_label = f"Circulation_{circulation_pct}%"
+            df_space[circ_col_label] = df_space["net_area_sqm"] * circ_factor
+            df_space["Gross_Area_sqm"] = df_space["net_area_sqm"] + df_space[circ_col_label]
 
             st.dataframe(
                 df_space.style.format(
-                    "{:.2f}", subset=["net_area_sqm", "Circulation_30%", "Gross_Area_sqm"]
+                    "{:.2f}", subset=["net_area_sqm", circ_col_label, "Gross_Area_sqm"]
                 ),
                 use_container_width=True,
             )
 
             total_net = df_space["net_area_sqm"].sum()
             total_gross = df_space["Gross_Area_sqm"].sum()
-            st.info(
-                f"**Total Net Area:** {total_net:.2f} ตร.ม. | "
-                f"**Total Gross Area (รวมสัญจร 30%):** {total_gross:.2f} ตร.ม."
-            )
+            m1, m2, m3 = st.columns(3)
+            m1.metric("📐 Total Net Area", f"{total_net:.2f} ตร.ม.")
+            m2.metric(f"🚶 Circulation ({circulation_pct}%)", f"{(total_gross - total_net):.2f} ตร.ม.")
+            m3.metric("🏗️ Total Gross Area", f"{total_gross:.2f} ตร.ม.")
 
             st.divider()
 
@@ -222,23 +251,20 @@ with tab2:
             # --- 3. Relationship Diagram (Plotly Network) ---
             st.subheader("🕸️ 3. Relationship Diagram (Network Graph)")
 
-            # ── Circular node positions ──────────────────────────────────
             n = len(rooms_list)
             angles = [2 * math.pi * i / n for i in range(n)]
             pos = {room: (math.cos(a), math.sin(a)) for room, a in zip(rooms_list, angles)}
 
-            # ── Edge colour & style lookup ───────────────────────────────
             EDGE_STYLES = {
-                3:  {"color": "#E03434", "width": 5,  "dash": "solid",  "label": "Strong (3)"},
-                2:  {"color": "#F5A623", "width": 3,  "dash": "solid",  "label": "Medium (2)"},
-                1:  {"color": "#4A90D9", "width": 1.5,"dash": "dot",    "label": "Weak (1)"},
-                -1: {"color": "#888888", "width": 1.5,"dash": "dash",   "label": "Avoid (−1)"},
+                3:  {"color": "#E03434", "width": 5,   "dash": "solid", "label": "Strong (3)"},
+                2:  {"color": "#F5A623", "width": 3,   "dash": "solid", "label": "Medium (2)"},
+                1:  {"color": "#4A90D9", "width": 1.5, "dash": "dot",   "label": "Weak (1)"},
+                -1: {"color": "#888888", "width": 1.5, "dash": "dash",  "label": "Avoid (−1)"},
             }
 
             fig_net = go.Figure()
-
-            # Draw edges
             drawn_labels = set()
+
             for adj in data["Adjacency"]:
                 r1, r2, score = adj["room1"], adj["room2"], adj["score"]
                 if r1 not in pos or r2 not in pos:
@@ -246,12 +272,11 @@ with tab2:
                 style = EDGE_STYLES.get(score, EDGE_STYLES[1])
                 x0, y0 = pos[r1]
                 x1, y1 = pos[r2]
-                mx, my = (x0 + x1) / 2, (y0 + y1) / 2  # midpoint for tooltip
+                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
 
                 show_legend = style["label"] not in drawn_labels
                 drawn_labels.add(style["label"])
 
-                # Invisible midpoint marker for tooltip
                 fig_net.add_trace(
                     go.Scatter(
                         x=[mx], y=[my],
@@ -263,7 +288,6 @@ with tab2:
                     )
                 )
 
-                # Actual edge line
                 fig_net.add_trace(
                     go.Scatter(
                         x=[x0, x1, None],
@@ -277,7 +301,6 @@ with tab2:
                     )
                 )
 
-            # Draw nodes — size proportional to area
             node_x = [pos[r][0] for r in rooms_list]
             node_y = [pos[r][1] for r in rooms_list]
             node_areas = [df_space.loc[df_space["room"] == r, "net_area_sqm"].values[0] for r in rooms_list]
@@ -311,7 +334,6 @@ with tab2:
                 )
             )
 
-            # Area label below node
             for r, a, x, y in zip(rooms_list, node_areas, node_x, node_y):
                 fig_net.add_annotation(
                     x=x,
@@ -346,7 +368,6 @@ with tab2:
 
             st.plotly_chart(fig_net, use_container_width=True)
 
-            # Legend explanation
             leg_col1, leg_col2, leg_col3, leg_col4 = st.columns(4)
             leg_col1.markdown("🔴 **เส้นแดงหนา** = ต้องติดกัน (3)")
             leg_col2.markdown("🟠 **เส้นส้ม** = ควรอยู่ใกล้ (2)")
@@ -358,7 +379,7 @@ with tab2:
             # --- 4. Schematic Block Plan ---
             st.subheader("🟩 4. Schematic Block Plan (Proportional Treemap)")
             st.markdown(
-                "จำลองการจัดก้อน Mass เบื้องต้นตามสัดส่วนพื้นที่จริง (ใช้ Treemap แทน Block แปลน)"
+                f"จำลองการจัดก้อน Mass เบื้องต้นตามสัดส่วนพื้นที่จริง (Gross Area รวม Circulation {circulation_pct}%)"
             )
 
             fig_tree = px.treemap(
@@ -366,7 +387,7 @@ with tab2:
                 path=[px.Constant("Site Area"), "room"],
                 values="Gross_Area_sqm",
                 color="room",
-                hover_data=["net_area_sqm", "Gross_Area_sqm"],
+                hover_data={"net_area_sqm": True, "Gross_Area_sqm": True},
                 color_discrete_sequence=px.colors.qualitative.Pastel,
             )
             fig_tree.update_traces(textinfo="label+value", textfont_size=14)
