@@ -4,9 +4,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch
 import seaborn as sns
 import numpy as np
 import math
+import networkx as nx
 
 # ==========================================
 # ⚙️ Page Setup
@@ -36,11 +39,11 @@ with tab1:
         rooms = st.multiselect(
             "พื้นที่ใช้สอยที่ต้องการ (Required Rooms)",
             ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry", "Closet"],
-            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Closet"]
+            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Closet"],
         )
         mode = st.radio(
             "รูปแบบการคำนวณพื้นที่ (Sizing Mode)",
-            ["Auto (คำนวณตามมาตรฐานขั้นต่ำกฎหมาย/Neufert)", "Manual (ผู้ใช้กำหนดเอง)"]
+            ["Auto (คำนวณตามมาตรฐานขั้นต่ำกฎหมาย/Neufert)", "Manual (ผู้ใช้กำหนดเอง)"],
         )
 
     # ==========================================
@@ -243,7 +246,9 @@ with tab2:
                 cbar_kws={"label": "Relationship Score"},
                 ax=ax,
             )
-            ax.set_title("Adjacency Matrix  (3 = ต้องติดกัน  |  -1 = ควรแยกออก)", fontsize=13, pad=12)
+            ax.set_title(
+                "Adjacency Matrix  (3 = ต้องติดกัน  |  -1 = ควรแยกออก)", fontsize=13, pad=12
+            )
             plt.tight_layout()
             st.pyplot(fig_heat)
 
@@ -280,7 +285,8 @@ with tab2:
 
                 fig_net.add_trace(
                     go.Scatter(
-                        x=[mx], y=[my],
+                        x=[mx],
+                        y=[my],
                         mode="markers",
                         marker=dict(size=10, color=style["color"], opacity=0),
                         hovertext=f"<b>{r1} ↔ {r2}</b><br>Score: {score}<br>{adj.get('reason', '')}",
@@ -304,7 +310,9 @@ with tab2:
 
             node_x = [pos[r][0] for r in rooms_list]
             node_y = [pos[r][1] for r in rooms_list]
-            node_areas = [df_space.loc[df_space["room"] == r, "net_area_sqm"].values[0] for r in rooms_list]
+            node_areas = [
+                df_space.loc[df_space["room"] == r, "net_area_sqm"].values[0] for r in rooms_list
+            ]
             node_sizes = [max(40, a * 6) for a in node_areas]
 
             PALETTE = [
@@ -377,54 +385,198 @@ with tab2:
 
             st.divider()
 
-            # --- 4. Schematic Block Plan (Treemap) ---
-            # ✅ FIX: ใช้ go.Treemap แทน px.treemap เพื่อล็อกลำดับตาม JSON
-            # px.treemap จะ sort ห้องตามขนาด (area) อัตโนมัติ ทำให้ลำดับไม่ถูกต้อง
-            # go.Treemap + tiling(sort=False) จะรักษาลำดับที่กำหนดไว้ใน DataFrame
-            st.subheader("🟩 4. Schematic Block Plan (Proportional Treemap)")
+            # ══════════════════════════════════════════════════════════════════
+            # --- 4. Schematic Block Plan (Adjacency-Informed Network Layout) ---
+            # ══════════════════════════════════════════════════════════════════
+            st.subheader("🟩 4. Schematic Block Plan (Adjacency-Informed Layout)")
             st.markdown(
-                f"จำลองการจัดก้อน Mass เบื้องต้นตามสัดส่วนพื้นที่จริง (Gross Area รวม Circulation {circulation_pct}%) "
-                f"— **ลำดับห้องตรงตาม Sequence ใน JSON**"
+                """
+                ตำแหน่งบล็อกคำนวณจาก **Network Graph + Adjacency Matrix** โดยตรง
+                (Spring Layout: Score 3 = ดึงชิด · Score -1 = ผลัก) ·
+                **ขนาดบล็อกสัดส่วนตาม Gross Area จริง**
+                """
             )
 
-            # สีแต่ละห้องตามลำดับ (Pastel palette เหมือนเดิม)
-            pastel_colors = px.colors.qualitative.Pastel
-            room_colors = {
-                room: pastel_colors[i % len(pastel_colors)]
-                for i, room in enumerate(rooms_list)
+            # ── 4.1 สร้าง NetworkX Graph จาก Adjacency ──
+            G = nx.Graph()
+            for room in rooms_list:
+                G.add_node(room)
+
+            for adj in data["Adjacency"]:
+                r1, r2, score = adj["room1"], adj["room2"], adj["score"]
+                if r1 in rooms_list and r2 in rooms_list:
+                    # Spring layout: weight สูง = สปริงสั้น = ดึงเข้าหากัน
+                    # score  3 → weight 3.0  (ดึงแรงมาก)
+                    # score  2 → weight 2.0
+                    # score  1 → weight 0.8
+                    # score -1 → weight 0.1  (แทบไม่ดึง = ผลัก/ห่าง)
+                    weight_map = {3: 3.0, 2: 2.0, 1: 0.8, -1: 0.1}
+                    G.add_edge(r1, r2, weight=weight_map.get(score, 0.8), score=score)
+
+            # Isolated nodes (ไม่มี edge เลย) → เพิ่ม weak edge ไปยัง node แรกเพื่อไม่ให้ลอย
+            connected = set(n for e in G.edges() for n in e)
+            for room in rooms_list:
+                if room not in connected and rooms_list[0] != room:
+                    G.add_edge(rooms_list[0], room, weight=0.3, score=0)
+
+            # ── 4.2 Spring Layout (k = ระยะห่างธรรมชาติ) ──
+            spring_pos = nx.spring_layout(
+                G,
+                weight="weight",
+                k=2.5 / math.sqrt(max(len(rooms_list), 1)),
+                iterations=300,
+                seed=42,
+            )
+
+            # ── 4.3 คำนวณขนาดบล็อกจาก Gross Area ──
+            gross_areas = {
+                r: df_space.loc[df_space["room"] == r, "Gross_Area_sqm"].values[0]
+                for r in rooms_list
             }
+            # ปรับ scale ให้บล็อกใหญ่สุดกว้างราว 2.0 หน่วย canvas
+            max_gross = max(gross_areas.values())
+            scale = 2.0 / math.sqrt(max_gross)
 
-            # สร้าง labels / parents / values ตามลำดับใน df_space (ลำดับจาก JSON)
-            labels = ["Site Area"] + rooms_list
-            parents = [""] + ["Site Area"] * len(rooms_list)
-            values = [0] + df_space["Gross_Area_sqm"].tolist()
-            colors = ["rgba(0,0,0,0)"] + [room_colors[r] for r in rooms_list]
+            room_sizes = {r: math.sqrt(gross_areas[r]) * scale for r in rooms_list}  # side length
 
-            customdata = [[None, None]] + list(
-                zip(df_space["net_area_sqm"].tolist(), df_space["Gross_Area_sqm"].tolist())
+            # ── 4.4 สี palette ──
+            palette_map = {room: PALETTE[i % len(PALETTE)] for i, room in enumerate(rooms_list)}
+
+            # ── 4.5 วาด Block Plan ──
+            fig_block, ax_block = plt.subplots(figsize=(12, 9))
+            fig_block.patch.set_facecolor("#F0F2F6")
+            ax_block.set_facecolor("#F0F2F6")
+
+            # วาดเส้น Adjacency ก่อน (z-order ต่ำ)
+            for adj in data["Adjacency"]:
+                r1, r2, score = adj["room1"], adj["room2"], adj["score"]
+                if r1 not in spring_pos or r2 not in spring_pos:
+                    continue
+
+                cx1, cy1 = spring_pos[r1]
+                cx2, cy2 = spring_pos[r2]
+
+                edge_styles_mpl = {
+                    3:  dict(color="#E03434", lw=3.0, ls="-",  alpha=0.7),
+                    2:  dict(color="#F5A623", lw=2.0, ls="-",  alpha=0.6),
+                    1:  dict(color="#4A90D9", lw=1.2, ls=":",  alpha=0.5),
+                    -1: dict(color="#AAAAAA", lw=1.2, ls="--", alpha=0.4),
+                }
+                es = edge_styles_mpl.get(score, edge_styles_mpl[1])
+                ax_block.plot(
+                    [cx1, cx2], [cy1, cy2],
+                    color=es["color"], linewidth=es["lw"],
+                    linestyle=es["ls"], alpha=es["alpha"], zorder=1,
+                )
+
+                # Label กลางเส้น
+                mx, my = (cx1 + cx2) / 2, (cy1 + cy2) / 2
+                score_labels = {3: "●●●", 2: "●●", 1: "●", -1: "✕"}
+                ax_block.text(
+                    mx, my, score_labels.get(score, ""),
+                    ha="center", va="center",
+                    fontsize=7, color=es["color"], alpha=0.8,
+                    bbox=dict(boxstyle="round,pad=0.1", fc="#F0F2F6", ec="none"),
+                    zorder=2,
+                )
+
+            # วาด Block แต่ละห้อง
+            for room in rooms_list:
+                cx, cy = spring_pos[room]
+                side = room_sizes[room]
+                half = side / 2
+                color = palette_map[room]
+                gross = gross_areas[room]
+                net = df_space.loc[df_space["room"] == room, "net_area_sqm"].values[0]
+
+                # เงาบล็อก
+                shadow = FancyBboxPatch(
+                    (cx - half + 0.03, cy - half - 0.03),
+                    side, side,
+                    boxstyle="round,pad=0.08",
+                    linewidth=0,
+                    facecolor="#00000022",
+                    zorder=3,
+                )
+                ax_block.add_patch(shadow)
+
+                # ตัวบล็อกหลัก
+                rect = FancyBboxPatch(
+                    (cx - half, cy - half),
+                    side, side,
+                    boxstyle="round,pad=0.08",
+                    linewidth=2.0,
+                    edgecolor="white",
+                    facecolor=color,
+                    alpha=0.88,
+                    zorder=4,
+                )
+                ax_block.add_patch(rect)
+
+                # ชื่อห้อง (บน)
+                ax_block.text(
+                    cx, cy + half * 0.22,
+                    room,
+                    ha="center", va="center",
+                    fontsize=10, fontweight="bold", color="white",
+                    zorder=5,
+                )
+                # พื้นที่ (ล่าง)
+                ax_block.text(
+                    cx, cy - half * 0.30,
+                    f"Net {net:.1f}  |  Gross {gross:.1f} ตร.ม.",
+                    ha="center", va="center",
+                    fontsize=7.5, color="white",
+                    alpha=0.90,
+                    zorder=5,
+                )
+
+            # ── 4.6 Legend ──
+            legend_items = [
+                mpatches.Patch(color="#E03434", label="Score 3 — ต้องติดกัน"),
+                mpatches.Patch(color="#F5A623", label="Score 2 — ควรอยู่ใกล้"),
+                mpatches.Patch(color="#4A90D9", label="Score 1 — เฉยๆ"),
+                mpatches.Patch(color="#AAAAAA", label="Score -1 — ควรแยกออก"),
+            ]
+            ax_block.legend(
+                handles=legend_items,
+                loc="lower right",
+                fontsize=9,
+                framealpha=0.85,
+                edgecolor="#cccccc",
+                title="Adjacency Score",
+                title_fontsize=9,
             )
 
-            fig_tree = go.Figure(go.Treemap(
-                labels=labels,
-                parents=parents,
-                values=values,
-                sort=False,              # ✅ KEY FIX: ต้องอยู่ระดับ Treemap trace ไม่ใช่ใน tiling
-                marker=dict(colors=colors),
-                customdata=customdata,
-                hovertemplate=(
-                    "<b>%{label}</b><br>"
-                    "Net Area: %{customdata[0]:.1f} ตร.ม.<br>"
-                    "Gross Area: %{customdata[1]:.1f} ตร.ม.<extra></extra>"
-                ),
-                textinfo="label+value",
-                textfont=dict(size=14),
-                tiling=dict(
-                    packing="squarify",
-                ),
-            ))
+            ax_block.set_title(
+                "Schematic Block Plan  —  Adjacency-Informed Spring Layout\n"
+                "ตำแหน่งบล็อกอ้างอิงจาก Network Graph + Adjacency Matrix  ·  ขนาดสัดส่วนตาม Gross Area จริง",
+                fontsize=12, pad=14,
+            )
 
-            fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10))
-            st.plotly_chart(fig_tree, use_container_width=True)
+            # ปรับ axis ให้ครอบคลุมทุกบล็อก
+            all_x = [v[0] for v in spring_pos.values()]
+            all_y = [v[1] for v in spring_pos.values()]
+            max_side = max(room_sizes.values())
+            margin = max_side * 0.9
+            ax_block.set_xlim(min(all_x) - margin, max(all_x) + margin)
+            ax_block.set_ylim(min(all_y) - margin, max(all_y) + margin)
+            ax_block.set_aspect("equal")
+            ax_block.axis("off")
+
+            plt.tight_layout()
+            st.pyplot(fig_block)
+
+            # ── 4.7 หมายเหตุอธิบายหลักการ ──
+            st.info(
+                "**📐 หลักการจัดวาง Block Plan นี้:**\n\n"
+                "- ตำแหน่งบล็อกคำนวณด้วย **Spring Layout Algorithm** (NetworkX) "
+                "โดยใช้ Adjacency Score เป็น Spring Weight โดยตรง\n"
+                "- **Score 3** → Spring สั้น (ดึงชิด) = บล็อกอยู่ใกล้กัน\n"
+                "- **Score -1** → Spring อ่อน (ผลัก) = บล็อกอยู่ห่างกัน\n"
+                "- **ขนาดบล็อก** สัดส่วนตาม √(Gross Area) จริง ไม่ใช่แค่แผนภาพ Treemap\n"
+                "- เส้นเชื่อมแสดง Adjacency Relationship เดียวกับ Network Graph (Section 3)"
+            )
 
             st.divider()
 
