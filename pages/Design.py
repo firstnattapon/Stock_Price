@@ -54,8 +54,7 @@ with tab1:
         "Dining": 4.0,
         "Bathroom": 3.0,
         "Balcony": 2.5,
-        "Laundry": 2.0,
-        "closet": 3.0,
+        "closet": 2.0,
     }
 
     if mode == "Manual (ผู้ใช้กำหนดเอง)":
