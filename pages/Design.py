@@ -35,8 +35,8 @@ with tab1:
     with col2:
         rooms = st.multiselect(
             "พื้นที่ใช้สอยที่ต้องการ (Required Rooms)",
-            ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry"],
-            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom"]
+            ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry" , "Closet"],
+            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom"  , "Closet"]
         )
         mode = st.radio(
             "รูปแบบการคำนวณพื้นที่ (Sizing Mode)",
@@ -54,7 +54,8 @@ with tab1:
         "Dining": 4.0,
         "Bathroom": 3.0,
         "Balcony": 2.5,
-        "closet": 2.0,
+        "Laundry": 2.0,
+        "Closet": 3.0,
     }
 
     if mode == "Manual (ผู้ใช้กำหนดเอง)":
