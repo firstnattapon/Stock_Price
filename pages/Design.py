@@ -23,7 +23,7 @@ if "ai_parsed_rooms"   not in st.session_state: st.session_state.ai_parsed_rooms
 if "ai_parsed_space"   not in st.session_state: st.session_state.ai_parsed_space   = None
 if "ai_parsed_concept" not in st.session_state: st.session_state.ai_parsed_concept = None
 
-# State สำหรับเก็บผลลัพธ์ Graph Generation
+# State สำหรับเก็บผลลัพธ์ Graph Generation เพื่อแก้ปัญหา Nested Buttons
 if "graph_results"     not in st.session_state: st.session_state.graph_results     = None
 
 # ── Global CSS ────────────────────────────────────────────────
@@ -375,7 +375,6 @@ with tab1:
                 if mode == "Manual (ผู้ใช้กำหนดเอง)" else "Auto-calculate"
             )
 
-            # 🧮 คำนวณพื้นที่ Site และ Max Net Area เพื่อส่งให้ AI
             total_site_area = width * length
             max_net_area = total_site_area * 0.85
 
@@ -423,7 +422,6 @@ with tab1:
         '2. กด <b>Generate</b> เพื่อให้ระบบคณิตศาสตร์ในแอปสุ่มหา Graph ที่สอดคล้องกับกฎของ AI ได้แม่นยำที่สุด 100% ไร้ข้อผิดพลาดทางตรรกะ'
         '</div>', unsafe_allow_html=True)
 
-    # ── JSON Interceptor (Data Parser) ──────────────────────────
     ai_json_input = st.text_area("⬇️ วางผลลัพธ์ JSON (Prompt A) จาก AI ที่นี่ เพื่อโหลดกฎ C & W อัตโนมัติ", height=150)
     
     if st.button("📥 อัปเดตกฎ (Load AI Rules)"):
@@ -735,7 +733,7 @@ if st.session_state.get("plan_generated", False):
 
             st.markdown("### 🧠 5. AI Design Concept")
             st.info(f"💡 {data.get('Design_Concept', '')}")
-
+        
         with tab3:
             st.markdown("### 🚪 6. AI Prompt — Openings + Furniture")
             st.markdown('<div class="note"><b>💡 Two-Stage AI Flow:</b> คัดลอก Prompt ด้านล่างไปส่งให้ AI อีกรอบ เพื่อได้ช่องเปิด + เฟอร์นิเจอร์ที่ลงตัวตามพิกัดห้อง</div>', unsafe_allow_html=True)
@@ -772,11 +770,11 @@ if st.session_state.get("plan_generated", False):
 
             MOCK_OF = json.dumps({
                 "Openings": [
-                    {"id":"D1","room":layout_rects[0]["room"],"wall":"south","offset_m":0.5,"width_m":0.9,"height_m":2.1,"sill_height_m":0.0,"type":"door"},
-                    {"id":"W1","room":layout_rects[-1]["room"],"wall":"north","offset_m":1.0,"width_m":1.2,"height_m":1.2,"sill_height_m":0.9,"type":"window"},
+                    {"id":"D1","room":layout_rects[0]["room"] if layout_rects else "","wall":"south","offset_m":0.5,"width_m":0.9,"height_m":2.1,"sill_height_m":0.0,"type":"door"},
+                    {"id":"W1","room":layout_rects[-1]["room"] if layout_rects else "","wall":"north","offset_m":1.0,"width_m":1.2,"height_m":1.2,"sill_height_m":0.9,"type":"window"},
                 ],
                 "Furniture": [
-                    {"id":"F1","room":layout_rects[0]["room"],"type":"table","w_m":1.0,"d_m":0.6,"h_m":0.75,"x_m":0.3,"y_m":0.3,"orientation_deg":0,"clearance_m":0.6,"placement_mode":"free"},
+                    {"id":"F1","room":layout_rects[0]["room"] if layout_rects else "","type":"table","w_m":1.0,"d_m":0.6,"h_m":0.75,"x_m":0.3,"y_m":0.3,"orientation_deg":0,"clearance_m":0.6,"placement_mode":"free"},
                 ],
                 "Checks": {"overlaps":[],"clearance_violations":[],"door_swing_conflicts":[]},
             }, ensure_ascii=False, indent=2)
@@ -880,6 +878,6 @@ if st.session_state.get("plan_generated", False):
 
                 except Exception as e2:
                     st.error(f"❌ Openings/Furniture JSON ไม่ถูกต้อง: {e2}")
-
+            
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในระบบแสดงผล: {e}")
