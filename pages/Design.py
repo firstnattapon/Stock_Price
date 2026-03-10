@@ -23,7 +23,7 @@ if "ai_parsed_rooms"   not in st.session_state: st.session_state.ai_parsed_rooms
 if "ai_parsed_space"   not in st.session_state: st.session_state.ai_parsed_space   = None
 if "ai_parsed_concept" not in st.session_state: st.session_state.ai_parsed_concept = None
 
-# State สำหรับเก็บผลลัพธ์ Graph Generation เพื่อแก้ปัญหา Nested Buttons
+# State สำหรับเก็บผลลัพธ์ Graph Generation
 if "graph_results"     not in st.session_state: st.session_state.graph_results     = None
 
 # ── Global CSS ────────────────────────────────────────────────
@@ -370,13 +370,12 @@ with tab1:
         if not rooms:
             st.error("กรุณาเลือกห้องอย่างน้อย 1 ห้อง")
         else:
-            # แก้ไข Indentation Error บริเวณนี้
             payload = (
                 [{"room": r, "net_area_sqm": manual_areas.get(r, DEFAULT_AREAS.get(r, 4.0))} for r in rooms]
                 if mode == "Manual (ผู้ใช้กำหนดเอง)" else "Auto-calculate"
             )
 
-            # 🧮 คำนวณพื้นที่ Site และ Max Net Area เพื่อส่งให้ AI (เผื่อพื้นที่ทางเดิน 15%)
+            # 🧮 คำนวณพื้นที่ Site และ Max Net Area เพื่อส่งให้ AI
             total_site_area = width * length
             max_net_area = total_site_area * 0.85
 
@@ -736,39 +735,151 @@ if st.session_state.get("plan_generated", False):
 
             st.markdown("### 🧠 5. AI Design Concept")
             st.info(f"💡 {data.get('Design_Concept', '')}")
-        
+
         with tab3:
             st.markdown("### 🚪 6. AI Prompt — Openings + Furniture")
-            
-            packed_plan_for_prompt = [{
-                "room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3),
-                "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0
-            } for rd in layout_rects]
-            
+            st.markdown('<div class="note"><b>💡 Two-Stage AI Flow:</b> คัดลอก Prompt ด้านล่างไปส่งให้ AI อีกรอบ เพื่อได้ช่องเปิด + เฟอร์นิเจอร์ที่ลงตัวตามพิกัดห้อง</div>', unsafe_allow_html=True)
+
+            packed_plan_for_prompt = []
+            for rd in layout_rects:
+                packed_plan_for_prompt.append({
+                    "room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3),
+                    "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0,
+                })
             auto_prompt_b = {
                 "system_prompt": "คุณคือสถาปนิกระดับ Senior และผู้เชี่ยวชาญด้าน Space Planning ที่แม่นยำทางคณิตศาสตร์ — ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกกรอบ JSON",
-                "user_prompt": "รับข้อมูล 'Packed_Plan' — คืนค่า Openings และ Furniture placement โดยต้องทำตามกฎ Local Coordinates และ Mathematical Bounding อย่างเคร่งครัด",
+                "user_prompt": "รับข้อมูล 'Packed_Plan' (สี่เหลี่ยมจัดสรรพื้นที่) — คืนค่า Openings (ประตู/หน้าต่าง) และ Furniture placement โดยต้องทำตามกฎพิกัด Local Coordinates และ Mathematical Bounding อย่างเคร่งครัด",
                 "strict_mathematical_rules": {
-                    "1_coordinate_system": {"type": "Local Coordinates", "rule": "พิกัด x_m, y_m เริ่มที่ (0,0) มุมซ้ายล่างของห้องนั้นๆ"},
-                    "2_furniture_bounding": {"rule": "0 <= x_m <= (Room_w - Furniture_w) และ 0 <= y_m <= (Room_h - Furniture_d)"},
-                    "3_openings_bounding": {"rule": "ตำแหน่ง offset_m ต้องไม่เกินความกว้าง/ยาวของกำแพงห้อง"},
-                    "4_clearance": {"rule": "clearance_m ของเฟอร์นิเจอร์ต้องไม่ทับซ้อนกับระยะสวิงประตู"}
+                    "1_coordinate_system": {"type": "Local / Relative Coordinates", "rule": "พิกัด x_m และ y_m ของเฟอร์นิเจอร์ทุกชิ้น จะต้องเริ่มต้นที่ (0,0) ซึ่งหมายถึง 'มุมซ้ายล่างของห้องนั้นๆ' เสมอ (ห้ามใช้พิกัด Absolute ของทั้งไซต์งาน)"},
+                    "2_furniture_bounding_box": {"rule": "เฟอร์นิเจอร์ต้องไม่ล้นออกนอกขอบเขตห้อง (Slice and Dice Bounding) โดยต้องเป็นไปตามสมการนี้:", "x_axis_clamp": "0 <= x_m <= (Room_w - Furniture_w)", "y_axis_clamp": "0 <= y_m <= (Room_h - Furniture_d)"},
+                    "3_openings_bounding": {"rule": "ตำแหน่ง offset_m ของประตูและหน้าต่างต้องไม่เกินความกว้างหรือยาวของกำแพงห้อง", "north_south_walls": "0 <= offset_m <= (Room_w - Opening_width)", "east_west_walls": "0 <= offset_m <= (Room_h - Opening_width)"},
+                    "4_clearance_overlap": {"rule": "ตรวจสอบ clearance_m ของเฟอร์นิเจอร์แต่ละชิ้น ไม่ให้ทับซ้อน (Overlap) กับระยะเดินหรือสวิงประตู (Door Swing) ภายใน Local Room นั้นๆ"}
                 },
-                "constraints_data": {
-                    "walkway_clearance_m": 0.6, "door_min_width_m": 0.8, "window_min_width_m": 0.6
-                },
+                "constraints_data": {"walkway_clearance_m": 0.6, "seating_clearance_m": 0.8, "bed_clearance_m": 0.5, "door_min_width_m": 0.8, "window_min_width_m": 0.6},
                 "Packed_Plan": packed_plan_for_prompt,
-                "metadata": {
-                    "site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4)
-                },
+                "metadata": {"site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4)},
                 "required_output_schema": {
-                    "Openings": [{"id": "string", "room": "string", "wall": "string (north|south|east|west)", "offset_m": "float", "width_m": "float", "type": "string (window|door)"}],
-                    "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "x_m": "float (Local X)", "y_m": "float (Local Y)", "orientation_deg": "float (0|90|180|270)"}],
-                    "Checks": {"overlaps": ["string"], "clearance_violations": ["string"]}
+                    "Openings": [{"id": "string", "room": "string", "wall": "string (north|south|east|west)", "offset_m": "float (relative to wall start)", "width_m": "float", "height_m": "float", "sill_height_m": "float", "type": "string (window|door|sliding|fixed)"}],
+                    "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "h_m": "float", "x_m": "float (Local coordinate X)", "y_m": "float (Local coordinate Y)", "orientation_deg": "float (0, 90, 180, 270)", "clearance_m": "float", "placement_mode": "string (wall-mounted|free|corner|island)"}],
+                    "Checks": {"overlaps": ["array of structural violations"], "clearance_violations": ["array of clearance issues"], "door_swing_conflicts": ["array of swing issues"]}
                 }
             }
-          
             st.code(json.dumps(auto_prompt_b, ensure_ascii=False, indent=4), language="json")
-            
+
+            # 7. Import Openings + Furniture JSON
+            st.markdown("---")
+            st.markdown("### 🪑 7. Import Openings + Furniture (AI Result)")
+
+            MOCK_OF = json.dumps({
+                "Openings": [
+                    {"id":"D1","room":layout_rects[0]["room"],"wall":"south","offset_m":0.5,"width_m":0.9,"height_m":2.1,"sill_height_m":0.0,"type":"door"},
+                    {"id":"W1","room":layout_rects[-1]["room"],"wall":"north","offset_m":1.0,"width_m":1.2,"height_m":1.2,"sill_height_m":0.9,"type":"window"},
+                ],
+                "Furniture": [
+                    {"id":"F1","room":layout_rects[0]["room"],"type":"table","w_m":1.0,"d_m":0.6,"h_m":0.75,"x_m":0.3,"y_m":0.3,"orientation_deg":0,"clearance_m":0.6,"placement_mode":"free"},
+                ],
+                "Checks": {"overlaps":[],"clearance_violations":[],"door_swing_conflicts":[]},
+            }, ensure_ascii=False, indent=2)
+
+            of_json = st.text_area("⬇️ วาง Openings + Furniture JSON จาก AI (Prompt B)", value=MOCK_OF, height=200, key="of_json")
+
+            if st.button("🪑 Visualize Openings + Furniture", type="primary"):
+                try:
+                    of_data = json.loads(of_json)
+                    if "Openings" not in of_data and "Furniture" not in of_data:
+                        st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Openings' หรือ 'Furniture' กรุณาตรวจสอบว่าไม่ได้นำ JSON ของ Space Requirement มาวางผิดช่อง")
+                        st.stop()
+                        
+                    openings  = of_data.get("Openings", [])
+                    furniture = of_data.get("Furniture", [])
+                    checks    = of_data.get("Checks", {})
+
+                    fig_of = go.Figure()
+                    pad_of = 0.04
+                    for rd in layout_rects:
+                        rm, rx, ry, rw, rh = rd["room"], rd["x"], rd["y"], rd["w"], rd["h"]
+                        fig_of.add_shape(type="rect", x0=rx+pad_of, y0=ry+pad_of, x1=rx+rw-pad_of, y1=ry+rh-pad_of, fillcolor=pal.get(rm, "#4E79A7"), opacity=0.35, line=dict(color="#FFFFFF", width=1.5), layer="below")
+                        fig_of.add_annotation(x=rx+rw/2, y=ry+rh/2, text=rm, showarrow=False, font=dict(size=10, color="#C8DCFF", family="Arial Black"))
+
+                    # Draw Openings
+                    OPEN_CLR = {"door":"#FF6B6B","window":"#4ECDC4","sliding":"#FFE66D","fixed":"#95E1D3"}
+                    for op in openings:
+                        rm = op.get("room","")
+                        if rm not in room_lookup: continue
+                        rd = room_lookup[rm]; wall = op.get("wall","south"); off = op.get("offset_m", 0); ow  = op.get("width_m", 0.9)
+                        ot  = op.get("type","door"); clr = OPEN_CLR.get(ot, "#FFFFFF")
+
+                        if wall == "south": x0 = rd["x"] + off; y0 = rd["y"]; x1 = x0 + ow; y1 = y0
+                        elif wall == "north": x0 = rd["x"] + off; y0 = rd["y"] + rd["h"]; x1 = x0 + ow; y1 = y0
+                        elif wall == "west": x0 = rd["x"]; y0 = rd["y"] + off; x1 = x0; y1 = y0 + ow
+                        else: x0 = rd["x"] + rd["w"]; y0 = rd["y"] + off; x1 = x0; y1 = y0 + ow
+
+                        fig_of.add_trace(go.Scatter(x=[x0, x1], y=[y0, y1], mode="lines", line=dict(color=clr, width=6), showlegend=False))
+                        fig_of.add_annotation(x=(x0+x1)/2, y=(y0+y1)/2, text=op.get("id",""), showarrow=False, font=dict(size=8, color=clr))
+
+                    # Draw Furniture
+                    FURN_CLR = "#A78BFA"
+                    for fi in furniture:
+                        rm = fi.get("room","")
+                        if rm not in room_lookup: continue
+                        rd = room_lookup[rm]
+                        fx, fy, fw, fd = rd["x"] + fi.get("x_m", 0), rd["y"] + fi.get("y_m", 0), fi.get("w_m", 0.5), fi.get("d_m", 0.5)
+
+                        fig_of.add_shape(type="rect", x0=fx, y0=fy, x1=fx+fw, y1=fy+fd, fillcolor=FURN_CLR, opacity=0.55, line=dict(color="#FFFFFF", width=1))
+                        cl = fi.get("clearance_m", 0)
+                        if cl > 0: fig_of.add_shape(type="rect", x0=fx-cl, y0=fy-cl, x1=fx+fw+cl, y1=fy+fd+cl, fillcolor="rgba(0,0,0,0)", opacity=0.4, line=dict(color=FURN_CLR, width=1, dash="dot"))
+                        fig_of.add_annotation(x=fx+fw/2, y=fy+fd/2, text=f"{fi.get('id','')}<br>{fi.get('type','')}", showarrow=False, font=dict(size=7, color="#E8F0FF"))
+
+                    fig_of.add_shape(type="rect", x0=0, y0=0, x1=SITE_W, y1=SITE_L, line=dict(color="#FFD700", width=3), fillcolor="rgba(0,0,0,0)")
+                    fig_of.update_layout(height=max(520, int(520*(SITE_L+1.5)/(SITE_W+1.5))), plot_bgcolor=BG, paper_bgcolor=BG, xaxis=dict(visible=False, scaleanchor="y", scaleratio=1), yaxis=dict(visible=False), margin=dict(l=20,r=20,t=50,b=20))
+                    st.plotly_chart(fig_of, width="stretch", config={"scrollZoom":True})
+
+                    # 8. Validation Checks
+                    st.markdown("---")
+                    st.markdown("### ✅ 8. Validation Checks")
+                    overlaps      = checks.get("overlaps", [])
+                    cl_violations = checks.get("clearance_violations", [])
+                    swing_conf    = checks.get("door_swing_conflicts", [])
+
+                    vc1, vc2, vc3 = st.columns(3)
+                    vc1.metric("🔴 Overlaps", len(overlaps), delta="⚠️ Found!" if overlaps else "✅ None", delta_color="inverse" if overlaps else "normal")
+                    vc2.metric("🟡 Clearance", len(cl_violations), delta="⚠️ Found!" if cl_violations else "✅ None", delta_color="inverse" if cl_violations else "normal")
+                    vc3.metric("🟠 Door Swing", len(swing_conf), delta="⚠️ Found!" if swing_conf else "✅ None", delta_color="inverse" if swing_conf else "normal")
+
+                    auto_warnings = []
+                    for fi in furniture:
+                        rm = fi.get("room","")
+                        if rm not in room_lookup: continue
+                        rd = room_lookup[rm]
+                        fx, fy, fw, fd = fi.get("x_m",0), fi.get("y_m",0), fi.get("w_m",0), fi.get("d_m",0)
+                        if fx < 0 or fy < 0 or fx+fw > rd["w"]+0.01 or fy+fd > rd["h"]+0.01:
+                            auto_warnings.append(f"⚠️ {fi.get('id','')} ({fi.get('type','')}) ใน {rm} ล้นออกนอกขอบห้อง!")
+
+                    for op in openings:
+                        ow = op.get("width_m", 0)
+                        if op.get("type") == "door" and ow < 0.8: auto_warnings.append(f"⚠️ {op.get('id','')} door width {ow}m < 0.8m")
+                        if op.get("type") == "window" and ow < 0.6: auto_warnings.append(f"⚠️ {op.get('id','')} window width {ow}m < 0.6m")
+
+                    if overlaps: st.warning("**Overlap Details:**"); st.json(overlaps)
+                    if cl_violations: st.warning("**Clearance Violation Details:**"); st.json(cl_violations)
+                    if swing_conf: st.warning("**Door Swing Conflict Details:**"); st.json(swing_conf)
+                    if auto_warnings: 
+                        st.warning("**Auto-detected Warnings:**")
+                        for w in auto_warnings: st.markdown(f"- {w}")
+
+                    if not overlaps and not cl_violations and not swing_conf and not auto_warnings:
+                        st.success("✅ All checks passed — สมบูรณ์แบบ! ไม่พบ overlap หรือจุดบกพร่อง")
+
+                    st.markdown("---")
+                    st.markdown("### 📦 Final AI Result JSON (Complete)")
+                    final_json = {
+                        "Packed_Plan": packed_plan_for_prompt, "Openings": openings, "Furniture": furniture, "Checks": checks,
+                        "metadata": {"site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4), "total_net_sqm": round(t_net, 2), "total_gross_sqm": round(t_gross, 2)},
+                    }
+                    st.code(json.dumps(final_json, ensure_ascii=False, indent=2), language="json")
+
+                except Exception as e2:
+                    st.error(f"❌ Openings/Furniture JSON ไม่ถูกต้อง: {e2}")
+
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในระบบแสดงผล: {e}")
