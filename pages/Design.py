@@ -724,21 +724,40 @@ if st.session_state.get("plan_generated", False):
 
             st.markdown("### 🧠 5. AI Design Concept")
             st.info(f"💡 {data.get('Design_Concept', '')}")
-
+        
         with tab3:
             st.markdown("### 🚪 6. AI Prompt — Openings + Furniture")
-            packed_plan_for_prompt = [{"room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3), "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0} for rd in layout_rects]
             
+            # ใช้ List Comprehension แบบ V2 (โค้ดสั้นและทำงานเร็วกว่า)
+            packed_plan_for_prompt = [{
+                "room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3),
+                "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0
+            } for rd in layout_rects]
+            
+            # ใช้โครงสร้าง Prompt และ Schema แบบ V1 (แม่นยำกว่าสำหรับ AI)
             auto_prompt_b = {
-                "system_prompt": "คุณคือสถาปนิกระดับ Senior... (ตัดทอนเพื่อความกระชับ)",
+                "system_prompt": "คุณคือสถาปนิกระดับ Senior และผู้เชี่ยวชาญด้าน Space Planning ที่แม่นยำทางคณิตศาสตร์ — ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกกรอบ JSON",
+                "user_prompt": "รับข้อมูล 'Packed_Plan' — คืนค่า Openings และ Furniture placement โดยต้องทำตามกฎ Local Coordinates และ Mathematical Bounding อย่างเคร่งครัด",
+                "strict_mathematical_rules": {
+                    "1_coordinate_system": {"type": "Local Coordinates", "rule": "พิกัด x_m, y_m เริ่มที่ (0,0) มุมซ้ายล่างของห้องนั้นๆ"},
+                    "2_furniture_bounding": {"rule": "0 <= x_m <= (Room_w - Furniture_w) และ 0 <= y_m <= (Room_h - Furniture_d)"},
+                    "3_openings_bounding": {"rule": "ตำแหน่ง offset_m ต้องไม่เกินความกว้าง/ยาวของกำแพงห้อง"},
+                    "4_clearance": {"rule": "clearance_m ของเฟอร์นิเจอร์ต้องไม่ทับซ้อนกับระยะสวิงประตู"}
+                },
+                "constraints_data": {
+                    "walkway_clearance_m": 0.6, "door_min_width_m": 0.8, "window_min_width_m": 0.6
+                },
                 "Packed_Plan": packed_plan_for_prompt,
-                "metadata": {"site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4)},
+                "metadata": {
+                    "site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4)
+                },
                 "required_output_schema": {
-                    "Openings": [{"id": "string", "room": "string", "wall": "string", "offset_m": "float", "width_m": "float", "height_m": "float", "sill_height_m": "float", "type": "string"}],
-                    "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "h_m": "float", "x_m": "float", "y_m": "float", "orientation_deg": "float", "clearance_m": "float", "placement_mode": "string"}],
-                    "Checks": {"overlaps": [], "clearance_violations": [], "door_swing_conflicts": []}
+                    "Openings": [{"id": "string", "room": "string", "wall": "string (north|south|east|west)", "offset_m": "float", "width_m": "float", "type": "string (window|door)"}],
+                    "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "x_m": "float (Local X)", "y_m": "float (Local Y)", "orientation_deg": "float (0|90|180|270)"}],
+                    "Checks": {"overlaps": ["string"], "clearance_violations": ["string"]}
                 }
             }
+          
             st.code(json.dumps(auto_prompt_b, ensure_ascii=False, indent=4), language="json")
             
     except Exception as e:
