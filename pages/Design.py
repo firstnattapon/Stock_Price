@@ -23,7 +23,7 @@ if "ai_parsed_rooms"   not in st.session_state: st.session_state.ai_parsed_rooms
 if "ai_parsed_space"   not in st.session_state: st.session_state.ai_parsed_space   = None
 if "ai_parsed_concept" not in st.session_state: st.session_state.ai_parsed_concept = None
 
-# [FIX] State สำหรับเก็บผลลัพธ์ Graph Generation เพื่อแก้ปัญหา Nested Buttons
+# State สำหรับเก็บผลลัพธ์ Graph Generation เพื่อแก้ปัญหา Nested Buttons
 if "graph_results"     not in st.session_state: st.session_state.graph_results     = None
 
 # ── Global CSS ────────────────────────────────────────────────
@@ -109,12 +109,12 @@ st.markdown("""
 # 🎨  Design Tokens
 # ══════════════════════════════════════════
 ROOM_PALETTE = {
-    "Living Area":"#4E79A7","Bedroom":"#E15759","Dining":"#F28E2B",
-    "Kitchen":"#59A14F","Bathroom":"#76B7B2","Closet":"#B07AA1",
-    "Balcony":"#EDC948","Laundry":"#FF9DA7",
+    "Living Area": "#4E79A7", "Bedroom": "#E15759", "Dining": "#F28E2B",
+    "Kitchen": "#59A14F", "Bathroom": "#76B7B2", "Closet": "#B07AA1",
+    "Balcony": "#EDC948", "Laundry": "#FF9DA7",
 }
-FALLBACK = ["#4E79A7","#E15759","#F28E2B","#59A14F",
-            "#76B7B2","#B07AA1","#EDC948","#FF9DA7","#BAB0AC","#D37295"]
+FALLBACK = ["#4E79A7", "#E15759", "#F28E2B", "#59A14F",
+            "#76B7B2", "#B07AA1", "#EDC948", "#FF9DA7", "#BAB0AC", "#D37295"]
 
 THAI_FONT = "Tahoma, Segoe UI, sans-serif"
 
@@ -333,15 +333,15 @@ with tab1:
     with c2:
         rooms = st.multiselect(
             "พื้นที่ใช้สอยที่ต้องการ",
-            ["Bedroom","Living Area","Kitchen","Dining","Bathroom","Balcony","Laundry","Closet"],
-            default=["Bedroom","Living Area","Kitchen","Dining","Bathroom","Closet"],
+            ["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Balcony", "Laundry", "Closet"],
+            default=["Bedroom", "Living Area", "Kitchen", "Dining", "Bathroom", "Closet"],
         )
         mode = st.radio("Sizing Mode", ["Auto (Neufert / Thai Building Code)", "Manual (ผู้ใช้กำหนดเอง)"])
     st.markdown('</div>', unsafe_allow_html=True)
 
     DEFAULT_AREAS = {
-        "Bedroom":7.0,"Living Area":7.0,"Kitchen":6.0,"Dining":6.0,
-        "Bathroom":3.0,"Balcony":2.5,"Laundry":2.0,"Closet":3.0,
+        "Bedroom": 7.0, "Living Area": 7.0, "Kitchen": 6.0, "Dining": 6.0,
+        "Bathroom": 3.0, "Balcony": 2.5, "Laundry": 2.0, "Closet": 3.0,
     }
     manual_areas = {}
 
@@ -370,40 +370,45 @@ with tab1:
         if not rooms:
             st.error("กรุณาเลือกห้องอย่างน้อย 1 ห้อง")
         else:
-
+            # แก้ไข Indentation Error บริเวณนี้
             payload = (
-                            [{"room":r,"net_area_sqm":manual_areas.get(r,DEFAULT_AREAS.get(r,4.0))} for r in rooms]
-                            if mode == "Manual (ผู้ใช้กำหนดเอง)" else "Auto-calculate"
-                        )
-                        
-                        # 🧮 คำนวณพื้นที่ Site และ Max Net Area เพื่อส่งให้ AI (เผื่อพื้นที่ทางเดิน 15%)
-                        total_site_area = width * length
-                        max_net_area = total_site_area * 0.85
-                        
-                        prompt = {
-                            "system_prompt": "คุณคือสถาปนิกระดับ Senior หน้าที่ของคุณคือวิเคราะห์ข้อมูลและส่งกลับเป็นรูปแบบ JSON ที่ Valid เท่านั้น ห้ามมีข้อความทักทาย, Markdown (` ```json `), หรือคำอธิบายใดๆ นอกกรอบ JSON ปีกกา {} เด็ดขาด",
-                            "user_input": {
-                                "project": project_type,
-                                "site_dimension": f"{width} x {length} m (Total {total_site_area} sqm)",
-                                "required_spaces": rooms, 
-                                "sizing_mode": mode, 
-                                "space_areas": payload,
-                            },
-                            "strict_architectural_constraints": {
-                                "1_area_limit": f"ผลรวมของ 'net_area_sqm' ทุกห้องรวมกัน จะต้องไม่เกินพื้นที่ Site ({total_site_area} sqm) ลบด้วยพื้นที่ทางเดิน 15% หมายความว่า Total Net Area ต้องไม่เกิน {max_net_area:.1f} sqm เด็ดขาด",
-                                "2_code_compliance": "ห้องน้ำ (Bathroom) ต้องมีขนาดไม่ต่ำกว่ามาตรฐานกฎหมาย (1.5 sqm ขึ้นไป) และห้องอื่นๆ ต้องมีสัดส่วนสมจริงตามมาตรฐาน Neufert",
-                                "3_comprehensive_adjacency": "ใน 'Adjacency_Rules' ให้สร้างกฎสำหรับทุกคู่ห้องที่มีความสัมพันธ์ชัดเจน ต้องมีทั้งห้องที่บังคับติดกัน (C=1) และห้องที่บังคับแยกกัน (C=-1) ให้ครบถ้วน"
-                            },
-                            "required_output_schema": {
-                                "Space_Requirement": [{"room":"string","net_area_sqm":"float"}],
-                                "Adjacency_Rules": [{"room1":"string","room2":"string",
-                                    "Connectivity_C":"int (-1=ควรแยก, 0=ไม่มีผล, 1=ควรติดกัน)",
-                                    "Importance_W":"int (0=ไม่สำคัญ, 1=น้อย, 2=ปานกลาง, 3=สำคัญมาก)",
-                                    "reason":"string (อธิบายเหตุผลสั้นๆ)"}],
-                                "Design_Concept": "string (สรุปแนวคิด Space Planning 1-2 ประโยค)",
-                            },
+                [{"room": r, "net_area_sqm": manual_areas.get(r, DEFAULT_AREAS.get(r, 4.0))} for r in rooms]
+                if mode == "Manual (ผู้ใช้กำหนดเอง)" else "Auto-calculate"
+            )
+
+            # 🧮 คำนวณพื้นที่ Site และ Max Net Area เพื่อส่งให้ AI (เผื่อพื้นที่ทางเดิน 15%)
+            total_site_area = width * length
+            max_net_area = total_site_area * 0.85
+
+            prompt = {
+                "system_prompt": "คุณคือสถาปนิกระดับ Senior หน้าที่ของคุณคือวิเคราะห์ข้อมูลและส่งกลับเป็นรูปแบบ JSON ที่ Valid เท่านั้น ห้ามมีข้อความทักทาย, Markdown (` ```json `), หรือคำอธิบายใดๆ นอกกรอบ JSON ปีกกา {} เด็ดขาด",
+                "user_input": {
+                    "project": project_type,
+                    "site_dimension": f"{width} x {length} m (Total {total_site_area} sqm)",
+                    "required_spaces": rooms, 
+                    "sizing_mode": mode, 
+                    "space_areas": payload,
+                },
+                "strict_architectural_constraints": {
+                    "1_area_limit": f"ผลรวมของ 'net_area_sqm' ทุกห้องรวมกัน จะต้องไม่เกินพื้นที่ Site ({total_site_area} sqm) ลบด้วยพื้นที่ทางเดิน 15% หมายความว่า Total Net Area ต้องไม่เกิน {max_net_area:.1f} sqm เด็ดขาด",
+                    "2_code_compliance": "ห้องน้ำ (Bathroom) ต้องมีขนาดไม่ต่ำกว่ามาตรฐานกฎหมาย (1.5 sqm ขึ้นไป) และห้องอื่นๆ ต้องมีสัดส่วนสมจริงตามมาตรฐาน Neufert",
+                    "3_comprehensive_adjacency": "ใน 'Adjacency_Rules' ให้สร้างกฎสำหรับทุกคู่ห้องที่มีความสัมพันธ์ชัดเจน ต้องมีทั้งห้องที่บังคับติดกัน (C=1) และห้องที่บังคับแยกกัน (C=-1) ให้ครบถ้วน"
+                },
+                "required_output_schema": {
+                    "Space_Requirement": [{"room": "string", "net_area_sqm": "float"}],
+                    "Adjacency_Rules": [
+                        {
+                            "room1": "string",
+                            "room2": "string",
+                            "Connectivity_C": "int (-1=ควรแยก, 0=ไม่มีผล, 1=ควรติดกัน)",
+                            "Importance_W": "int (0=ไม่สำคัญ, 1=น้อย, 2=ปานกลาง, 3=สำคัญมาก)",
+                            "reason": "string (อธิบายเหตุผลสั้นๆ)"
                         }
-          
+                    ],
+                    "Design_Concept": "string (สรุปแนวคิด Space Planning 1-2 ประโยค)",
+                },
+            }
+
             st.success("✅ **Prompt A — Rules Definition**: คัดลอกข้อความด้านล่างนี้ไปวางใน Claude / ChatGPT เพื่อรับกฎความสัมพันธ์ (C & W Matrix)")
             st.code(json.dumps(prompt, ensure_ascii=False, indent=4), language="json")
 
@@ -491,7 +496,6 @@ with tab1:
     with ctrl3:
         temp   = st.slider("🌡️ Temperature (T)", min_value=0.3, max_value=1.5, value=0.7, step=0.05)
 
-    # [FIX] ขั้นตอนที่ 1: ปุ่มนี้ทำหน้าที่แค่คำนวณและบันทึก State เท่านั้น
     if st.button("🎲 3. สานกฎให้เป็นกราฟ (Execute Graph Generation)", type="primary"):
         if len(rooms) < 2:
             st.error("ต้องมีห้องอย่างน้อย 2 ห้อง")
@@ -507,7 +511,6 @@ with tab1:
             space_req = st.session_state.ai_parsed_space if st.session_state.ai_parsed_space else [{"room": r, "net_area_sqm": manual_areas.get(r, DEFAULT_AREAS.get(r, 4.0))} for r in rooms]
             base_concept = st.session_state.ai_parsed_concept if st.session_state.ai_parsed_concept else "Neuro-Symbolic Automated Pipeline"
 
-            # บันทึกข้อมูลลง State
             st.session_state.graph_results = {
                 "best": best,
                 "S_max": S_max,
@@ -518,7 +521,6 @@ with tab1:
                 "W": W_vals
             }
 
-    # [FIX] ขั้นตอนที่ 2: วนลูปวาด UI จาก State (หลุดออกจาก Scope ของปุ่ม Generate)
     if st.session_state.graph_results is not None:
         res = st.session_state.graph_results
         mc = MatrixController(res["rooms"], res["C"], res["W"]) 
@@ -553,15 +555,13 @@ with tab1:
                 concept = f"{res['base_concept']} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct:.1f}%)]"
                 graph_json = mc.to_adjacency_json(edges, res['space_req'], concept)
 
-                # [FIX] ขั้นตอนที่ 3: ปุ่มทำงานได้ปกติ และเรียกใช้ st.rerun() เพื่อบังคับ UI ไป Tab 2 ทันที
                 if st.button(f"✅ ส่ง Graph Rank #{rank+1} ไปวาดแปลน (Tab 2)", key=f"mc_use_{rank}"):
                     st.session_state.generated_adjacency_json = json.dumps(graph_json, ensure_ascii=False, indent=2)
                     st.session_state.plan_generated = True 
                     st.toast("🚀 ส่งข้อมูลสำเร็จ! ระบบได้สร้างแปลนไว้แล้ว กรุณากดที่ Tab 2 ด้านบนเพื่อดูผลลัพธ์", icon="✅")
-                    st.rerun() # <--- บังคับ Rerun เพื่อให้ State ใหม่ถูก Render ทันที
+                    st.rerun()
 
                 st.markdown("---")
-
 
 # ════════════════════════════════════════════════════════════════
 # รับ Input พื้นฐานสำหรับ Tab 2
@@ -582,14 +582,12 @@ with tab2:
         if st.button("🗑️ รีเซ็ตข้อมูล", key="mc_clear"):
             st.session_state.generated_adjacency_json = None
             st.session_state.plan_generated = False
-            st.session_state.graph_results = None # เพิ่มการรีเซ็ตผลการ Gen กราฟด้วย
+            st.session_state.graph_results = None 
             st.rerun()
 
-    # Fallback / Debug JSON Box
     with st.expander("🛠️ Debug / Manual JSON Input", expanded=False):
         user_json = st.text_area("JSON from Generator", value=st.session_state.generated_adjacency_json if st.session_state.generated_adjacency_json else "{}", height=200)
 
-    # ปุ่มนี้เก็บไว้เป็น Fallback เผื่อผู้ใช้อยากแก้ไข JSON ด้วยมือในกล่องด้านบนแล้วกด Generate ใหม่
     if st.button("✨ Generate Schematic Packed Plan (Manual Trigger)", type="primary"):
         try:
             test_data = json.loads(user_json)
@@ -605,7 +603,6 @@ with tab2:
 # ════════════════════════════════════════════════════════════════
 if st.session_state.get("plan_generated", False):
     try:
-        # ใช้ JSON จาก Text Area (ซึ่งจะถูก Sync มาจากตัวแปร State อัตโนมัติแล้ว)
         data      = json.loads(user_json)
         if "Space_Requirement" not in data or "Adjacency" not in data:
             st.error("❌ ข้อผิดพลาด: ไม่พบข้อมูลที่จำเป็น กรุณากลับไปส่งค่าจาก Tab 1 ใหม่อีกครั้ง")
@@ -632,9 +629,9 @@ if st.session_state.get("plan_generated", False):
 
         G = nx.Graph()
         for r in rooms_list: G.add_node(r)
-        WM = {3:4.0, 2:2.5, 1:1.0, -1:0.02}
+        WM = {3: 4.0, 2: 2.5, 1: 1.0, -1: 0.02}
         for adj in data["Adjacency"]:
-            r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
+            r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
             if r1 in rooms_list and r2 in rooms_list:
                 G.add_edge(r1, r2, weight=WM.get(sc, 1.0))
         sp = nx.spring_layout(G, weight="weight", seed=42)
@@ -673,26 +670,26 @@ if st.session_state.get("plan_generated", False):
             st.markdown("---")
             st.markdown("### 🕸️ 3. Relationship Network Graph")
             n = len(rooms_list); angles = [2*math.pi*i/n for i in range(n)]
-            pn = {r:(math.cos(a),math.sin(a)) for r,a in zip(rooms_list,angles)}
+            pn = {r: (math.cos(a), math.sin(a)) for r, a in zip(rooms_list, angles)}
             ES = {
-                 3: dict(c="#FF4D4D",w=5,  d="solid",l="Score 3 — must adjacent"),
-                 2: dict(c="#FFD700",w=3,  d="solid",l="Score 2 — should be near"),
-                 1: dict(c="#4CAF50",w=1.5,d="dot",  l="Score 1 — neutral"),
-                -1: dict(c="#888888",w=1.5,d="dash", l="Score -1 — keep apart"),
+                 3: dict(c="#FF4D4D", w=5,   d="solid", l="Score 3 — must adjacent"),
+                 2: dict(c="#FFD700", w=3,   d="solid", l="Score 2 — should be near"),
+                 1: dict(c="#4CAF50", w=1.5, d="dot",   l="Score 1 — neutral"),
+                -1: dict(c="#888888", w=1.5, d="dash",  l="Score -1 — keep apart"),
             }
             fig_n = go.Figure(); dl = set()
             for adj in data["Adjacency"]:
-                r1,r2,sc = adj["room1"],adj["room2"],adj["score"]
+                r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
                 if r1 not in pn or r2 not in pn: continue
-                s=ES.get(sc,ES[1]); x0,y0=pn[r1]; x1,y1=pn[r2]; mx,my=(x0+x1)/2,(y0+y1)/2
-                show=s["l"] not in dl; dl.add(s["l"])
-                fig_n.add_trace(go.Scatter(x=[x0,x1,None],y=[y0,y1,None],mode="lines",
-                    line=dict(color=s["c"],width=s["w"],dash=s["d"]), name=s["l"],legendgroup=s["l"],showlegend=show,hoverinfo="skip"))
+                s = ES.get(sc, ES[1]); x0, y0 = pn[r1]; x1, y1 = pn[r2]; mx, my = (x0+x1)/2, (y0+y1)/2
+                show = s["l"] not in dl; dl.add(s["l"])
+                fig_n.add_trace(go.Scatter(x=[x0, x1, None], y=[y0, y1, None], mode="lines",
+                    line=dict(color=s["c"], width=s["w"], dash=s["d"]), name=s["l"], legendgroup=s["l"], showlegend=show, hoverinfo="skip"))
             
-            na=[df.loc[df["room"]==r,"net_area_sqm"].values[0] for r in rooms_list]
+            na = [df.loc[df["room"]==r, "net_area_sqm"].values[0] for r in rooms_list]
             fig_n.add_trace(go.Scatter(x=[pn[r][0] for r in rooms_list], y=[pn[r][1] for r in rooms_list],
-                mode="markers+text", marker=dict(size=[max(44,a*7) for a in na],color=[pal[r] for r in rooms_list],line=dict(color="white",width=2.5)),
-                text=rooms_list,textfont=dict(size=10,color="white",family="Arial Black"), hoverinfo="text",showlegend=False))
+                mode="markers+text", marker=dict(size=[max(44, a*7) for a in na], color=[pal[r] for r in rooms_list], line=dict(color="white", width=2.5)),
+                text=rooms_list, textfont=dict(size=10, color="white", family="Arial Black"), hoverinfo="text", showlegend=False))
             fig_n.update_layout(height=520, plot_bgcolor="#0F1624", paper_bgcolor="#0F1624", xaxis=dict(visible=False), yaxis=dict(visible=False))
             st.plotly_chart(fig_n, width="stretch")
 
@@ -743,13 +740,11 @@ if st.session_state.get("plan_generated", False):
         with tab3:
             st.markdown("### 🚪 6. AI Prompt — Openings + Furniture")
             
-            # ใช้ List Comprehension แบบ V2 (โค้ดสั้นและทำงานเร็วกว่า)
             packed_plan_for_prompt = [{
                 "room": rd["room"], "x": round(rd["x"], 3), "y": round(rd["y"], 3),
                 "w": round(rd["w"], 3), "h": round(rd["h"], 3), "orientation_deg": 0.0
             } for rd in layout_rects]
             
-            # ใช้โครงสร้าง Prompt และ Schema แบบ V1 (แม่นยำกว่าสำหรับ AI)
             auto_prompt_b = {
                 "system_prompt": "คุณคือสถาปนิกระดับ Senior และผู้เชี่ยวชาญด้าน Space Planning ที่แม่นยำทางคณิตศาสตร์ — ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกกรอบ JSON",
                 "user_prompt": "รับข้อมูล 'Packed_Plan' — คืนค่า Openings และ Furniture placement โดยต้องทำตามกฎ Local Coordinates และ Mathematical Bounding อย่างเคร่งครัด",
