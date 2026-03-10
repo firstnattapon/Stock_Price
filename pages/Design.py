@@ -517,9 +517,12 @@ with tab1:
                     concept = f"{base_concept} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct:.1f}%)]"
                     graph_json = mc.to_adjacency_json(edges, space_req, concept)
 
+                    # --- 🔧 FIX: อัปเดต State และทริกเกอร์การวาดแปลนทันทีเมื่อกดปุ่ม ---
                     if st.button(f"✅ ส่ง Graph Rank #{rank+1} ไปวาดแปลน (Tab 2)", key=f"mc_use_{rank}"):
                         st.session_state.generated_adjacency_json = json.dumps(graph_json, ensure_ascii=False, indent=2)
-                        st.success("🚀 **ข้อมูลพร้อมแล้ว!** ข้ามไปที่ Tab 2 แล้วกด **✨ Generate Schematic Packed Plan** ได้เลย")
+                        st.session_state.plan_generated = True # <--- ทริกเกอร์สร้างแปลนอัตโนมัติ 
+                        st.toast("🚀 ส่งข้อมูลสำเร็จ! ระบบได้สร้างแปลนไว้แล้ว กรุณากดที่ Tab 2 ด้านบนเพื่อดูผลลัพธ์", icon="✅")
+                        st.success("🚀 **ข้อมูลพร้อมแล้วและแปลนถูกวาดแล้ว!** กรุณาคลิกที่แท็บ **📥 2. IMPORT JSON & PACKED PLAN** ด้านบนเพื่อดู Schematic Plan")
 
                     st.markdown("---")
 
@@ -539,16 +542,18 @@ with tab2:
     st.markdown('</div>', unsafe_allow_html=True)
 
     if st.session_state.generated_adjacency_json:
-        st.success("🧬 **ข้อมูลกราฟความสัมพันธ์พร้อมวาดแปลนถูกส่งมาเรียบร้อยแล้ว**")
+        st.success("🧬 **ข้อมูลกราฟถูกซิงค์เรียบร้อยแล้ว** (หากคุณกดส่งจาก Tab 1 แบบแปลนจะถูกอัปเดตอัตโนมัติ)")
         if st.button("🗑️ รีเซ็ตข้อมูล", key="mc_clear"):
             st.session_state.generated_adjacency_json = None
+            st.session_state.plan_generated = False
             st.rerun()
 
     # Fallback / Debug JSON Box
     with st.expander("🛠️ Debug / Manual JSON Input", expanded=False):
         user_json = st.text_area("JSON from Generator", value=st.session_state.generated_adjacency_json if st.session_state.generated_adjacency_json else "{}", height=200)
 
-    if st.button("✨ Generate Schematic Packed Plan", type="primary"):
+    # ปุ่มนี้เก็บไว้เป็น Fallback เผื่อผู้ใช้อยากแก้ไข JSON ด้วยมือในกล่องด้านบนแล้วกด Generate ใหม่
+    if st.button("✨ Generate Schematic Packed Plan (Manual Trigger)", type="primary"):
         try:
             test_data = json.loads(user_json)
             if "Adjacency_Rules" in test_data and "Adjacency" not in test_data:
@@ -563,6 +568,7 @@ with tab2:
 # ════════════════════════════════════════════════════════════════
 if st.session_state.get("plan_generated", False):
     try:
+        # ใช้ JSON จาก Text Area (ซึ่งจะถูก Sync มาจากตัวแปร State อัตโนมัติแล้ว)
         data      = json.loads(user_json)
         if "Space_Requirement" not in data or "Adjacency" not in data:
             st.error("❌ ข้อผิดพลาด: ไม่พบข้อมูลที่จำเป็น กรุณากลับไปส่งค่าจาก Tab 1 ใหม่อีกครั้ง")
@@ -712,7 +718,6 @@ if st.session_state.get("plan_generated", False):
                 }
             }
             st.code(json.dumps(auto_prompt_b, ensure_ascii=False, indent=4), language="json")
-            # โค้ดส่วนดึง Openings + Furniture ที่เหลือยังคงใช้โครงสร้างเดิมทั้งหมด
             
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในระบบแสดงผล: {e}")
