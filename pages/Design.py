@@ -23,6 +23,9 @@ if "ai_parsed_rooms"   not in st.session_state: st.session_state.ai_parsed_rooms
 if "ai_parsed_space"   not in st.session_state: st.session_state.ai_parsed_space   = None
 if "ai_parsed_concept" not in st.session_state: st.session_state.ai_parsed_concept = None
 
+# [FIX] State สำหรับเก็บผลลัพธ์ Graph Generation เพื่อแก้ปัญหา Nested Buttons
+if "graph_results"     not in st.session_state: st.session_state.graph_results     = None
+
 # ── Global CSS ────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -437,7 +440,6 @@ with tab1:
         if not rooms:
             st.warning("⚠️ กรุณาเลือกห้องด้านบนก่อน")
         else:
-            # ตรวจสอบว่ามีข้อมูลจาก AI ตรงกับห้องที่เลือกไว้หรือไม่
             if st.session_state.ai_parsed_rooms and set(st.session_state.ai_parsed_rooms) == set(rooms):
                 C_mapped = [[0]*len(rooms) for _ in range(len(rooms))]
                 W_mapped = [[0]*len(rooms) for _ in range(len(rooms))]
@@ -474,6 +476,7 @@ with tab1:
     with ctrl3:
         temp   = st.slider("🌡️ Temperature (T)", min_value=0.3, max_value=1.5, value=0.7, step=0.05)
 
+    # [FIX] ขั้นตอนที่ 1: ปุ่มนี้ทำหน้าที่แค่คำนวณและบันทึก State เท่านั้น
     if st.button("🎲 3. สานกฎให้เป็นกราฟ (Execute Graph Generation)", type="primary"):
         if len(rooms) < 2:
             st.error("ต้องมีห้องอย่างน้อย 2 ห้อง")
@@ -486,45 +489,63 @@ with tab1:
             with st.spinner(f"⚙️ กำลัง Generate {n_gen} graphs ด้วย Algorithm ทางคณิตศาสตร์..."):
                 best = mc.filter_best_graphs(N=int(n_gen), top_k=int(top_k), T=float(temp))
 
-            st.success(f"✅ เสร็จสิ้น! แสดง Top-{len(best)} กราฟที่แม่นยำตามกฎมากที่สุด")
-
             space_req = st.session_state.ai_parsed_space if st.session_state.ai_parsed_space else [{"room": r, "net_area_sqm": manual_areas.get(r, DEFAULT_AREAS.get(r, 4.0))} for r in rooms]
             base_concept = st.session_state.ai_parsed_concept if st.session_state.ai_parsed_concept else "Neuro-Symbolic Automated Pipeline"
 
-            for rank, (edges, score) in enumerate(best):
-                pct         = max(0, min(100, score / S_max * 100)) if S_max > 0 else 0
-                violations  = mc.get_violated_rules(edges)
-                bar_color   = "#3CC470" if pct >= 70 else ("#FFB74D" if pct >= 40 else "#E05C5C")
-                n_edges     = len(edges)
+            # บันทึกข้อมูลลง State
+            st.session_state.graph_results = {
+                "best": best,
+                "S_max": S_max,
+                "space_req": space_req,
+                "base_concept": base_concept,
+                "rooms": rooms,
+                "C": C_vals,
+                "W": W_vals
+            }
 
-                with st.container():
-                    st.markdown(
-                        f"**Rank #{rank+1}** — S\\*(G) = `{score:.1f}` / `{S_max:.1f}` &nbsp;|&nbsp; "
-                        f"Quality = **{pct:.1f}%** &nbsp;|&nbsp; Edges = {n_edges} &nbsp;|&nbsp; "
-                        f"Violations = {'🟢 None' if not violations else f'🔴 {len(violations)}'}"
-                    )
+    # [FIX] ขั้นตอนที่ 2: วนลูปวาด UI จาก State (หลุดออกจาก Scope ของปุ่ม Generate)
+    if st.session_state.graph_results is not None:
+        res = st.session_state.graph_results
+        mc = MatrixController(res["rooms"], res["C"], res["W"]) 
+        best = res["best"]
+        S_max = res["S_max"]
+        
+        st.success(f"✅ เสร็จสิ้น! แสดง Top-{len(best)} กราฟที่แม่นยำตามกฎมากที่สุด")
 
-                    st.markdown(
-                        f'<div style="background:#1A2540;border-radius:8px;padding:4px 8px;margin-bottom:4px">'
-                        f'<div style="width:{pct:.1f}%;height:10px;background:{bar_color};border-radius:5px"></div></div>',
-                        unsafe_allow_html=True
-                    )
+        for rank, (edges, score) in enumerate(best):
+            pct         = max(0, min(100, score / S_max * 100)) if S_max > 0 else 0
+            violations  = mc.get_violated_rules(edges)
+            bar_color   = "#3CC470" if pct >= 70 else ("#FFB74D" if pct >= 40 else "#E05C5C")
+            n_edges     = len(edges)
 
-                    if violations:
-                        with st.expander(f"🔍 ดู Rule Violations ({len(violations)} items)", expanded=False):
-                            for v in violations: st.markdown(f"- {v}")
+            with st.container():
+                st.markdown(
+                    f"**Rank #{rank+1}** — S\\*(G) = `{score:.1f}` / `{S_max:.1f}` &nbsp;|&nbsp; "
+                    f"Quality = **{pct:.1f}%** &nbsp;|&nbsp; Edges = {n_edges} &nbsp;|&nbsp; "
+                    f"Violations = {'🟢 None' if not violations else f'🔴 {len(violations)}'}"
+                )
 
-                    concept = f"{base_concept} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct:.1f}%)]"
-                    graph_json = mc.to_adjacency_json(edges, space_req, concept)
+                st.markdown(
+                    f'<div style="background:#1A2540;border-radius:8px;padding:4px 8px;margin-bottom:4px">'
+                    f'<div style="width:{pct:.1f}%;height:10px;background:{bar_color};border-radius:5px"></div></div>',
+                    unsafe_allow_html=True
+                )
 
-                    # --- 🔧 FIX: อัปเดต State และทริกเกอร์การวาดแปลนทันทีเมื่อกดปุ่ม ---
-                    if st.button(f"✅ ส่ง Graph Rank #{rank+1} ไปวาดแปลน (Tab 2)", key=f"mc_use_{rank}"):
-                        st.session_state.generated_adjacency_json = json.dumps(graph_json, ensure_ascii=False, indent=2)
-                        st.session_state.plan_generated = True # <--- ทริกเกอร์สร้างแปลนอัตโนมัติ 
-                        st.toast("🚀 ส่งข้อมูลสำเร็จ! ระบบได้สร้างแปลนไว้แล้ว กรุณากดที่ Tab 2 ด้านบนเพื่อดูผลลัพธ์", icon="✅")
-                        st.success("🚀 **ข้อมูลพร้อมแล้วและแปลนถูกวาดแล้ว!** กรุณาคลิกที่แท็บ **📥 2. IMPORT JSON & PACKED PLAN** ด้านบนเพื่อดู Schematic Plan")
+                if violations:
+                    with st.expander(f"🔍 ดู Rule Violations ({len(violations)} items)", expanded=False):
+                        for v in violations: st.markdown(f"- {v}")
 
-                    st.markdown("---")
+                concept = f"{res['base_concept']} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct:.1f}%)]"
+                graph_json = mc.to_adjacency_json(edges, res['space_req'], concept)
+
+                # [FIX] ขั้นตอนที่ 3: ปุ่มทำงานได้ปกติ และเรียกใช้ st.rerun() เพื่อบังคับ UI ไป Tab 2 ทันที
+                if st.button(f"✅ ส่ง Graph Rank #{rank+1} ไปวาดแปลน (Tab 2)", key=f"mc_use_{rank}"):
+                    st.session_state.generated_adjacency_json = json.dumps(graph_json, ensure_ascii=False, indent=2)
+                    st.session_state.plan_generated = True 
+                    st.toast("🚀 ส่งข้อมูลสำเร็จ! ระบบได้สร้างแปลนไว้แล้ว กรุณากดที่ Tab 2 ด้านบนเพื่อดูผลลัพธ์", icon="✅")
+                    st.rerun() # <--- บังคับ Rerun เพื่อให้ State ใหม่ถูก Render ทันที
+
+                st.markdown("---")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -546,6 +567,7 @@ with tab2:
         if st.button("🗑️ รีเซ็ตข้อมูล", key="mc_clear"):
             st.session_state.generated_adjacency_json = None
             st.session_state.plan_generated = False
+            st.session_state.graph_results = None # เพิ่มการรีเซ็ตผลการ Gen กราฟด้วย
             st.rerun()
 
     # Fallback / Debug JSON Box
