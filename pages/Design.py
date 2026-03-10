@@ -885,7 +885,7 @@ if st.session_state.get("plan_generated", False):
                 "Packed_Plan": packed_plan_for_prompt,
                 "metadata": {"site_width_m": SITE_W, "site_length_m": SITE_L, "scale_factor": round(scale_ratio, 4)},
                 "required_output_schema": {
-                    "Openings": [{"id": "string", "room": "string", "wall": "string (north|south|east|west)", "offset_m": "float", "width_m": "float", "height_m": "float", "sill_height_m": "float", "type": "string (window|door|sliding|fixed)"}],
+                    "Openings": [{"id": "string", "room": "string", "wall": "string (north|south|east|west)", "offset_m": "float (relative to wall start)", "width_m": "float", "height_m": "float", "sill_height_m": "float", "type": "string (window|door|sliding|fixed)"}],
                     "Furniture": [{"id": "string", "room": "string", "type": "string", "w_m": "float", "d_m": "float", "h_m": "float", "x_m": "float (Local coordinate X)", "y_m": "float (Local coordinate Y)", "orientation_deg": "float (0, 90, 180, 270)", "clearance_m": "float", "placement_mode": "string (wall-mounted|free|corner|island)"}],
                     "Checks": {"overlaps": ["array of structural violations"], "clearance_violations": ["array of clearance issues"], "door_swing_conflicts": ["array of swing issues"]}
                 }
