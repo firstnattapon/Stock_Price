@@ -581,7 +581,7 @@ with tab1:
         if st.button("✅ ส่ง Top-K ทั้งหมดไป Tab 2 (Navigate ด้วย ◀ / ▶)", key="send_all", type="primary"):
             all_json = []
             for rank, (edges, score) in enumerate(best):
-                concept = f"{res['base_concept']} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f}]"
+                concept = f"{res['base_concept']} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct:.1f}%)]"
                 gj = mc.to_adjacency_json(edges, res["space_req"], concept)
                 all_json.append(json.dumps(gj, ensure_ascii=False, indent=2))
             st.session_state.all_graphs_json     = all_json
@@ -605,39 +605,17 @@ with tab2:
     circ_factor = circ_pct / 100.0
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── [NEW] Multi-Rank Navigation Bar ──────────────────────────
+    # ── Sync active JSON + Reset Button (top of Tab 2) ───────────
     if st.session_state.all_graphs_json:
-        idx   = st.session_state.selected_rank_index
-        total = len(st.session_state.all_graphs_json)
-
         # sync generated_adjacency_json with current selection
-        st.session_state.generated_adjacency_json = st.session_state.all_graphs_json[idx]
-
-        # Navigation UI
-        st.markdown("---")
-        nav_l, nav_c, nav_r = st.columns([1, 4, 1])
-        with nav_l:
-            st.button("◀ Previous", on_click=go_prev, disabled=(idx == 0),
-                      use_container_width=True, key="btn_prev")
-        with nav_c:
-            # Parse score info for display from Design_Concept string
-            try:
-                _dc = json.loads(st.session_state.all_graphs_json[idx]).get("Design_Concept", "")
-            except Exception:
-                _dc = ""
-            st.markdown(
-                f"<div style='text-align:center;padding:8px 0'>"
-                f"<span style='color:#60A5FA;font-size:1.1rem;font-weight:700'>📊 Graph Rank #{idx+1} / {total}</span><br>"
-                f"<span style='color:#7090C0;font-size:0.82rem'>{_dc[:120]}{'…' if len(_dc)>120 else ''}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        with nav_r:
-            st.button("Next ▶", on_click=go_next, disabled=(idx == total - 1),
-                      use_container_width=True, key="btn_next")
-        st.markdown("---")
-
-        st.success(f"🧬 **แสดง Graph Rank #{idx+1}/{total}** — ใช้ปุ่ม ◀ / ▶ เพื่อสลับ Rank โดยไม่ต้องกลับ Tab 1")
+        st.session_state.generated_adjacency_json = st.session_state.all_graphs_json[
+            st.session_state.selected_rank_index
+        ]
+        st.success(
+            f"🧬 **ข้อมูลกราฟพร้อมแสดงผล** — "
+            f"ส่ง {len(st.session_state.all_graphs_json)} Graphs มาแล้ว | "
+            f"ใช้ปุ่ม ◀ / ▶ ใต้กราฟ Floor Plan เพื่อสลับ Rank"
+        )
         if st.button("🗑️ รีเซ็ตข้อมูลทั้งหมด", key="mc_clear"):
             st.session_state.generated_adjacency_json = None
             st.session_state.all_graphs_json          = []
@@ -843,6 +821,42 @@ if st.session_state.get("plan_generated", False):
             )
             st.plotly_chart(fig_bp, width="stretch", config={"scrollZoom": True})
 
+            # ── Navigation Bar — ใต้ Floor Plan (Visual Proximity) ───────
+            if st.session_state.all_graphs_json:
+                _nav_idx   = st.session_state.selected_rank_index
+                _nav_total = len(st.session_state.all_graphs_json)
+                try:
+                    _dc = json.loads(
+                        st.session_state.all_graphs_json[_nav_idx]
+                    ).get("Design_Concept", "")
+                except Exception:
+                    _dc = ""
+                st.markdown("---")
+                nav_l, nav_c, nav_r = st.columns([1, 4, 1])
+                with nav_l:
+                    st.button(
+                        "◀ Previous", on_click=go_prev,
+                        disabled=(_nav_idx == 0),
+                        use_container_width=True, key="btn_prev",
+                    )
+                with nav_c:
+                    st.markdown(
+                        f"<div style='text-align:center;padding:8px 0'>"
+                        f"<span style='color:#60A5FA;font-size:1.1rem;font-weight:700'>"
+                        f"📊 Graph Rank #{_nav_idx+1} / {_nav_total}</span><br>"
+                        f"<span style='color:#7090C0;font-size:0.82rem'>"
+                        f"{_dc[:120]}{'…' if len(_dc)>120 else ''}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                with nav_r:
+                    st.button(
+                        "Next ▶", on_click=go_next,
+                        disabled=(_nav_idx == _nav_total - 1),
+                        use_container_width=True, key="btn_next",
+                    )
+                st.markdown("---")
+
             st.markdown("### 🧠 5. AI Design Concept")
             st.info(f"💡 {data.get('Design_Concept', '')}")
 
@@ -862,8 +876,8 @@ if st.session_state.get("plan_generated", False):
                 "system_prompt": "คุณคือสถาปนิกระดับ Senior และผู้เชี่ยวชาญด้าน Space Planning ที่แม่นยำทางคณิตศาสตร์ — ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอกกรอบ JSON",
                 "user_prompt": "รับข้อมูล 'Packed_Plan' (สี่เหลี่ยมจัดสรรพื้นที่) — คืนค่า Openings (ประตู/หน้าต่าง) และ Furniture placement โดยต้องทำตามกฎพิกัด Local Coordinates และ Mathematical Bounding อย่างเคร่งครัด",
                 "strict_mathematical_rules": {
-                    "1_coordinate_system": {"type": "Local / Relative Coordinates", "rule": "พิกัด x_m และ y_m ของเฟอร์นิเจอร์ทุกชิ้น จะต้องเริ่มต้นที่ (0,0) ซึ่งหมายถึง 'มุมซ้ายล่างของห้องนั้นๆ' เสมอ"},
-                    "2_furniture_bounding_box": {"rule": "เฟอร์นิเจอร์ต้องไม่ล้นออกนอกขอบเขตห้อง", "x_axis_clamp": "0 <= x_m <= (Room_w - Furniture_w)", "y_axis_clamp": "0 <= y_m <= (Room_h - Furniture_d)"},
+                    "1_coordinate_system": {"type": "Local / Relative Coordinates", "rule": "พิกัด x_m และ y_m ของเฟอร์นิเจอร์ทุกชิ้น จะต้องเริ่มต้นที่ (0,0) ซึ่งหมายถึง 'มุมซ้ายล่างของห้องนั้นๆ' เสมอ (ห้ามใช้พิกัด Absolute ของทั้งไซต์งาน)"},
+                    "2_furniture_bounding_box": {"rule": "เฟอร์นิเจอร์ต้องไม่ล้นออกนอกขอบเขตห้อง (Slice and Dice Bounding) โดยต้องเป็นไปตามสมการนี้:", "x_axis_clamp": "0 <= x_m <= (Room_w - Furniture_w)", "y_axis_clamp": "0 <= y_m <= (Room_h - Furniture_d)"},
                     "3_openings_bounding": {"rule": "ตำแหน่ง offset_m ของประตูและหน้าต่างต้องไม่เกินความกว้างหรือยาวของกำแพงห้อง", "north_south_walls": "0 <= offset_m <= (Room_w - Opening_width)", "east_west_walls": "0 <= offset_m <= (Room_h - Opening_width)"},
                     "4_clearance_overlap": {"rule": "ตรวจสอบ clearance_m ของเฟอร์นิเจอร์แต่ละชิ้น ไม่ให้ทับซ้อนกับระยะเดินหรือสวิงประตูภายใน Local Room นั้นๆ"}
                 },
@@ -899,7 +913,7 @@ if st.session_state.get("plan_generated", False):
                 try:
                     of_data = json.loads(of_json)
                     if "Openings" not in of_data and "Furniture" not in of_data:
-                        st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Openings' หรือ 'Furniture'")
+                        st.error("❌ ข้อผิดพลาด: ไม่พบคีย์ 'Openings' หรือ 'Furniture' กรุณาตรวจสอบว่าไม่ได้นำ JSON ของ Space Requirement มาวางผิดช่อง")
                         st.stop()
 
                     openings  = of_data.get("Openings", [])
