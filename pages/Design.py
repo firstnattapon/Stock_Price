@@ -581,7 +581,8 @@ with tab1:
         if st.button("✅ ส่ง Top-K ทั้งหมดไป Tab 2 (Navigate ด้วย ◀ / ▶)", key="send_all", type="primary"):
             all_json = []
             for rank, (edges, score) in enumerate(best):
-                concept = f"{res['base_concept']} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct:.1f}%)]"
+                pct_rank = max(0, min(100, score / S_max * 100)) if S_max > 0 else 0
+                concept = f"{res['base_concept']} | [MatrixController Rank #{rank+1} | S*={score:.1f}/{S_max:.1f} ({pct_rank:.1f}%)]"
                 gj = mc.to_adjacency_json(edges, res["space_req"], concept)
                 all_json.append(json.dumps(gj, ensure_ascii=False, indent=2))
             st.session_state.all_graphs_json     = all_json
@@ -699,7 +700,8 @@ if st.session_state.get("plan_generated", False):
             r1, r2, sc = adj["room1"], adj["room2"], adj["score"]
             if r1 in rooms_list and r2 in rooms_list:
                 G.add_edge(r1, r2, weight=WM.get(sc, 1.0))
-        sp = nx.spring_layout(G, weight="weight", seed=42)
+        graph_hash = hash(tuple(sorted(str(e) for e in G.edges()))) % 99999
+        sp = nx.spring_layout(G, weight="weight", seed=graph_hash)
         sorted_rooms  = sorted(rooms_list, key=lambda r: sp[r][1], reverse=True)
         items_to_pack = [(r, df.loc[df["room"]==r, "Gross_sqm"].values[0] * scale_ratio) for r in sorted_rooms]
         layout_rects  = generate_treemap(items_to_pack, 0, 0, SITE_W, SITE_L)
