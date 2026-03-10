@@ -370,25 +370,40 @@ with tab1:
         if not rooms:
             st.error("กรุณาเลือกห้องอย่างน้อย 1 ห้อง")
         else:
+
             payload = (
-                [{"room":r,"net_area_sqm":manual_areas.get(r,DEFAULT_AREAS.get(r,4.0))} for r in rooms]
-                if mode == "Manual (ผู้ใช้กำหนดเอง)" else "Auto-calculate"
-            )
-            prompt = {
-                "system_prompt": "คุณคือสถาปนิกระดับ Senior หน้าที่ของคุณคือวิเคราะห์ข้อมูลและส่งกลับเป็น JSON เท่านั้น",
-                "user_input": {
-                    "project": project_type,
-                    "site_dimension": f"{width} x {length} m (Total {width*length} sqm)",
-                    "required_spaces": rooms, "sizing_mode": mode, "space_areas": payload,
-                },
-                "required_output_schema": {
-                    "Space_Requirement": [{"room":"string","net_area_sqm":"float"}],
-                    "Adjacency_Rules": [{"room1":"string","room2":"string",
-                        "Connectivity_C":"int (-1=ควรแยก, 0=ไม่มีผล, 1=ควรติดกัน)",
-                        "Importance_W":"int (0=ไม่สำคัญ, 1=น้อย, 2=ปานกลาง, 3=สำคัญมาก)","reason":"string"}],
-                    "Design_Concept": "string",
-                },
-            }
+                            [{"room":r,"net_area_sqm":manual_areas.get(r,DEFAULT_AREAS.get(r,4.0))} for r in rooms]
+                            if mode == "Manual (ผู้ใช้กำหนดเอง)" else "Auto-calculate"
+                        )
+                        
+                        # 🧮 คำนวณพื้นที่ Site และ Max Net Area เพื่อส่งให้ AI (เผื่อพื้นที่ทางเดิน 15%)
+                        total_site_area = width * length
+                        max_net_area = total_site_area * 0.85
+                        
+                        prompt = {
+                            "system_prompt": "คุณคือสถาปนิกระดับ Senior หน้าที่ของคุณคือวิเคราะห์ข้อมูลและส่งกลับเป็นรูปแบบ JSON ที่ Valid เท่านั้น ห้ามมีข้อความทักทาย, Markdown (` ```json `), หรือคำอธิบายใดๆ นอกกรอบ JSON ปีกกา {} เด็ดขาด",
+                            "user_input": {
+                                "project": project_type,
+                                "site_dimension": f"{width} x {length} m (Total {total_site_area} sqm)",
+                                "required_spaces": rooms, 
+                                "sizing_mode": mode, 
+                                "space_areas": payload,
+                            },
+                            "strict_architectural_constraints": {
+                                "1_area_limit": f"ผลรวมของ 'net_area_sqm' ทุกห้องรวมกัน จะต้องไม่เกินพื้นที่ Site ({total_site_area} sqm) ลบด้วยพื้นที่ทางเดิน 15% หมายความว่า Total Net Area ต้องไม่เกิน {max_net_area:.1f} sqm เด็ดขาด",
+                                "2_code_compliance": "ห้องน้ำ (Bathroom) ต้องมีขนาดไม่ต่ำกว่ามาตรฐานกฎหมาย (1.5 sqm ขึ้นไป) และห้องอื่นๆ ต้องมีสัดส่วนสมจริงตามมาตรฐาน Neufert",
+                                "3_comprehensive_adjacency": "ใน 'Adjacency_Rules' ให้สร้างกฎสำหรับทุกคู่ห้องที่มีความสัมพันธ์ชัดเจน ต้องมีทั้งห้องที่บังคับติดกัน (C=1) และห้องที่บังคับแยกกัน (C=-1) ให้ครบถ้วน"
+                            },
+                            "required_output_schema": {
+                                "Space_Requirement": [{"room":"string","net_area_sqm":"float"}],
+                                "Adjacency_Rules": [{"room1":"string","room2":"string",
+                                    "Connectivity_C":"int (-1=ควรแยก, 0=ไม่มีผล, 1=ควรติดกัน)",
+                                    "Importance_W":"int (0=ไม่สำคัญ, 1=น้อย, 2=ปานกลาง, 3=สำคัญมาก)",
+                                    "reason":"string (อธิบายเหตุผลสั้นๆ)"}],
+                                "Design_Concept": "string (สรุปแนวคิด Space Planning 1-2 ประโยค)",
+                            },
+                        }
+          
             st.success("✅ **Prompt A — Rules Definition**: คัดลอกข้อความด้านล่างนี้ไปวางใน Claude / ChatGPT เพื่อรับกฎความสัมพันธ์ (C & W Matrix)")
             st.code(json.dumps(prompt, ensure_ascii=False, indent=4), language="json")
 
