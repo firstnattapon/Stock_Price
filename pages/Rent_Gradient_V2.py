@@ -116,6 +116,10 @@ NETWORK_CONFIG: Dict[str, Any] = {
     "click_debounce_seconds": 0.5,
     "click_distance_threshold_meters": 10,
     "large_graph_threshold": 2000,
+    "betweenness_sample_ratio": 0.15,
+    "betweenness_sample_min_k": 50,
+    "betweenness_sample_max_k": 500,
+    "random_seed": 42,
     "golden_land_top_n": 10,
     "golden_land_weights": {
         "closeness": 0.50,
@@ -850,9 +854,23 @@ def _compute_centrality_impl(
 
     # Betweenness centrality (on undirected projection)
     G_undir = G.to_undirected()
-    betweenness_cent: Dict[Any, float] = nx.edge_betweenness_centrality(
-        G_undir, weight="length"
-    )
+    sampled_k: Optional[int] = None
+    if is_large_graph:
+        ratio = NETWORK_CONFIG["betweenness_sample_ratio"]
+        min_k = NETWORK_CONFIG["betweenness_sample_min_k"]
+        max_k = NETWORK_CONFIG["betweenness_sample_max_k"]
+        sampled_k = max(min_k, int(node_count * ratio))
+        sampled_k = min(sampled_k, max_k, max(2, node_count - 1))
+        betweenness_cent = nx.edge_betweenness_centrality(
+            G_undir,
+            k=sampled_k,
+            weight="length",
+            seed=NETWORK_CONFIG["random_seed"],
+        )
+    else:
+        betweenness_cent = nx.edge_betweenness_centrality(
+            G_undir, weight="length"
+        )
     max_bet = max(betweenness_cent.values()) if betweenness_cent else 1.0
 
     # Colour-map for betweenness
@@ -959,6 +977,7 @@ def _compute_centrality_impl(
             "nodes_count": len(G.nodes),
             "edges_count": len(G.edges),
             "used_approximation": is_large_graph,
+            "betweenness_sample_k": sampled_k,
             "was_cached": was_cached,
         },
     }
@@ -1351,7 +1370,13 @@ def _render_sidebar_network_panel() -> bool:
             st.markdown("**🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center)**")
             st.caption(f"Score: {top['score']:.4f}")
             if stats.get("used_approximation"):
-                st.caption("⚡ *ใช้ Approximation (กราฟขนาดใหญ่)*")
+                sample_k = stats.get("betweenness_sample_k")
+                if sample_k:
+                    st.caption(
+                        f"⚡ *ใช้ Approximation (กราฟขนาดใหญ่, sampled k={sample_k})*"
+                    )
+                else:
+                    st.caption("⚡ *ใช้ Approximation (กราฟขนาดใหญ่)*")
             st.code(f"{top['lat']:.5f}, {top['lon']:.5f}")
 
             if st.button(
