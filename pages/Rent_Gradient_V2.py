@@ -116,6 +116,16 @@ NETWORK_CONFIG: Dict[str, Any] = {
     "click_debounce_seconds": 0.5,
     "click_distance_threshold_meters": 10,
     "large_graph_threshold": 2000,
+    "betweenness_sample_ratio": 0.15,
+    "betweenness_sample_min_k": 50,
+    "betweenness_sample_max_k": 500,
+    "random_seed": 42,
+    "golden_land_top_n": 10,
+    "golden_land_weights": {
+        "closeness": 0.50,
+        "degree": 0.30,
+        "low_traffic_bonus": 0.20,
+    },
 }
 
 # Timeout constants (seconds)
@@ -137,7 +147,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "api_key", "map_style_name", "travel_mode", "time_intervals",
     "show_dol", "show_cityplan", "cityplan_opacity", "show_population",
     "show_traffic", "colors", "show_betweenness", "show_closeness",
-    "show_railway",
+    "show_railway", "show_golden_spots",
 ]
 
 # GitHub Cache Repository Configuration
@@ -185,6 +195,7 @@ class StateManager:
     K_SHOW_BETWEENNESS: str = "show_betweenness"
     K_SHOW_CLOSENESS: str = "show_closeness"
     K_SHOW_RAILWAY: str = "show_railway"
+    K_SHOW_GOLDEN: str = "show_golden_spots"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -211,6 +222,7 @@ class StateManager:
         K_SHOW_BETWEENNESS: False,
         K_SHOW_CLOSENESS: False,
         K_SHOW_RAILWAY: False,
+        K_SHOW_GOLDEN: True,
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -509,6 +521,71 @@ def calculate_intersection(
         return None
 
 
+def compute_golden_land_opportunities(
+    graph: nx.MultiDiGraph,
+    closeness_cent: Dict[Any, float],
+    edge_betweenness_cent: Dict[Tuple[Any, Any], float],
+    top_n: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    Rank candidate nodes for "golden land" discovery.
+
+    Principle / Equation:
+    score = 0.50*closeness_norm + 0.30*degree_norm + 0.20*(1-edge_betweenness_norm)
+    """
+    if not closeness_cent:
+        return []
+
+    weights = NETWORK_CONFIG["golden_land_weights"]
+    max_close = max(closeness_cent.values()) or 1.0
+
+    degree_dict = dict(graph.degree())
+    max_degree = max(degree_dict.values()) if degree_dict else 1
+    if max_degree <= 0:
+        max_degree = 1
+
+    max_bet = max(edge_betweenness_cent.values()) if edge_betweenness_cent else 1.0
+    if max_bet <= 0:
+        max_bet = 1.0
+
+    ranked: List[Dict[str, Any]] = []
+    for node, data in graph.nodes(data=True):
+        close_norm = closeness_cent.get(node, 0.0) / max_close
+        degree_norm = degree_dict.get(node, 0) / max_degree
+
+        adj = list(graph.edges(node))
+        if adj:
+            edge_scores = []
+            for u, v in adj:
+                edge_scores.append(
+                    edge_betweenness_cent.get(tuple(sorted((u, v))), 0.0) / max_bet
+                )
+            edge_bet_norm = sum(edge_scores) / len(edge_scores)
+        else:
+            edge_bet_norm = 0.0
+
+        low_traffic_bonus = 1.0 - edge_bet_norm
+        score = (
+            weights["closeness"] * close_norm
+            + weights["degree"] * degree_norm
+            + weights["low_traffic_bonus"] * low_traffic_bonus
+        )
+        ranked.append(
+            {
+                "node_id": int(node) if isinstance(node, int) else str(node),
+                "lat": data["y"],
+                "lon": data["x"],
+                "score": score,
+                "closeness_norm": close_norm,
+                "degree_norm": degree_norm,
+                "low_traffic_bonus": low_traffic_bonus,
+            }
+        )
+
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    return ranked[:top_n]
+
+
 # ------------------------------------------------------------------ API calls
 def safe_fetch_isochrone(
     api_key: str,
@@ -777,9 +854,23 @@ def _compute_centrality_impl(
 
     # Betweenness centrality (on undirected projection)
     G_undir = G.to_undirected()
-    betweenness_cent: Dict[Any, float] = nx.edge_betweenness_centrality(
-        G_undir, weight="length"
-    )
+    sampled_k: Optional[int] = None
+    if is_large_graph:
+        ratio = NETWORK_CONFIG["betweenness_sample_ratio"]
+        min_k = NETWORK_CONFIG["betweenness_sample_min_k"]
+        max_k = NETWORK_CONFIG["betweenness_sample_max_k"]
+        sampled_k = max(min_k, int(node_count * ratio))
+        sampled_k = min(sampled_k, max_k, max(2, node_count - 1))
+        betweenness_cent = nx.edge_betweenness_centrality(
+            G_undir,
+            k=sampled_k,
+            weight="length",
+            seed=NETWORK_CONFIG["random_seed"],
+        )
+    else:
+        betweenness_cent = nx.edge_betweenness_centrality(
+            G_undir, weight="length"
+        )
     max_bet = max(betweenness_cent.values()) if betweenness_cent else 1.0
 
     # Colour-map for betweenness
@@ -849,14 +940,44 @@ def _compute_centrality_impl(
                 }
             )
 
+    # ---- Golden land opportunity ranking ----
+    golden_spots = compute_golden_land_opportunities(
+        G,
+        closeness_cent,
+        betweenness_cent,
+        top_n=NETWORK_CONFIG["golden_land_top_n"],
+    )
+    golden_geojson_features: List[Dict[str, Any]] = []
+    for idx, spot in enumerate(golden_spots, start=1):
+        golden_geojson_features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [spot["lon"], spot["lat"]],
+                },
+                "properties": {
+                    "type": "golden_spot",
+                    "rank": idx,
+                    "score": round(spot["score"], 4),
+                },
+            }
+        )
+
     return {
         "edges": {"type": "FeatureCollection", "features": edges_geojson},
         "nodes": {"type": "FeatureCollection", "features": nodes_geojson},
+        "golden_spots": golden_spots,
+        "golden_spots_geojson": {
+            "type": "FeatureCollection",
+            "features": golden_geojson_features,
+        },
         "top_node": top_node_data if top_node_data["score"] != -1.0 else None,
         "stats": {
             "nodes_count": len(G.nodes),
             "edges_count": len(G.edges),
             "used_approximation": is_large_graph,
+            "betweenness_sample_k": sampled_k,
             "was_cached": was_cached,
         },
     }
@@ -1249,7 +1370,13 @@ def _render_sidebar_network_panel() -> bool:
             st.markdown("**🏆 จุดที่อยู่ตรงกลางที่สุด (Integration Center)**")
             st.caption(f"Score: {top['score']:.4f}")
             if stats.get("used_approximation"):
-                st.caption("⚡ *ใช้ Approximation (กราฟขนาดใหญ่)*")
+                sample_k = stats.get("betweenness_sample_k")
+                if sample_k:
+                    st.caption(
+                        f"⚡ *ใช้ Approximation (กราฟขนาดใหญ่, sampled k={sample_k})*"
+                    )
+                else:
+                    st.caption("⚡ *ใช้ Approximation (กราฟขนาดใหญ่)*")
             st.code(f"{top['lat']:.5f}, {top['lon']:.5f}")
 
             if st.button(
@@ -1262,11 +1389,40 @@ def _render_sidebar_network_panel() -> bool:
                 st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
                 st.rerun()
 
+        golden_spots = net_data.get("golden_spots") if net_data else None
+        if golden_spots:
+            st.markdown("---")
+            st.markdown("**💎 ทำเลที่ดินทอง (ก่อนคนรู้)**")
+            st.caption(
+                "สมการคะแนน: 0.50×Closeness + 0.30×Degree + 0.20×(1-Betweenness)"
+            )
+
+            preview_lines = []
+            for i, spot in enumerate(golden_spots[:5], start=1):
+                preview_lines.append(
+                    f"{i}. score={spot['score']:.4f} | "
+                    f"{spot['lat']:.5f}, {spot['lon']:.5f}"
+                )
+            st.code("\n".join(preview_lines), language="text")
+
+            best = golden_spots[0]
+            if st.button(
+                "➕ เพิ่มจุดทำเลที่ดินทองอันดับ 1",
+                use_container_width=True,
+                type="secondary",
+            ):
+                StateManager.add_marker(best["lat"], best["lon"])
+                StateManager.clear_results(["isochrone", "intersection"])
+                st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
+                st.rerun()
+
         st.markdown("##### Layer Controls")
         st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
         st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
         st.checkbox("Show Nodes (Integration)", key="show_closeness")
         st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
+        st.checkbox("Show Golden Spots", key="show_golden_spots")
+        st.caption("💎: จุดทำเลที่ดินทอง (คะแนนรวมสูง)")
 
     return do_network
 
@@ -1393,6 +1549,26 @@ def render_map() -> Optional[Dict[str, Any]]:
                 tooltip=folium.GeoJsonTooltip(
                     fields=["closeness"],
                     aliases=["Integration Score:"],
+                    localize=True,
+                ),
+            ).add_to(m)
+
+        # Golden Spots layer
+        if st.session_state.show_golden_spots and net_data.get("golden_spots_geojson"):
+            folium.GeoJson(
+                net_data["golden_spots_geojson"],
+                name="Golden Land Spots",
+                marker=folium.CircleMarker(),
+                style_function=lambda x: {
+                    "fillColor": "#FFD60A",
+                    "color": "#8C6A00",
+                    "weight": 2,
+                    "radius": max(5, 12 - x["properties"]["rank"]),
+                    "fillOpacity": 0.85,
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["rank", "score"],
+                    aliases=["Rank:", "Opportunity Score:"],
                     localize=True,
                 ),
             ).add_to(m)
@@ -1724,4 +1900,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
