@@ -1135,20 +1135,16 @@ def _render_sidebar_network_panel() -> bool:
                 f"({cache_stats['size_mb']:.1f} MB)"
             )
 
-            if st.button(
-                "📤 Export Cache (.zip)",
-                use_container_width=True,
-                key="export_cache_btn",
-            ):
-                zip_data = export_cache_as_zip()
-                if zip_data:
-                    st.download_button(
-                        "⬇ Download Ready",
-                        data=zip_data,
-                        file_name="osmnx_cache.zip",
-                        mime="application/zip",
-                        use_container_width=True,
-                    )
+            zip_data = export_cache_as_zip()
+            if zip_data:
+                st.download_button(
+                    "📤 Export Cache (.zip)",
+                    data=zip_data,
+                    file_name="osmnx_cache.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="export_cache_btn",
+                )
 
             if st.button(
                 "🗑️ ล้าง Cache",
