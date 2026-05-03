@@ -150,6 +150,11 @@ GITHUB_CACHE_CONFIG: Dict[str, str] = {
     ),
 }
 
+# Shared HTTP session (connection pooling for faster/reliable repeated requests)
+HTTP_SESSION: requests.Session = requests.Session()
+
+
+
 
 # ============================================================================
 # SECTION 2: STATE MANAGER (Centralized Session State)
@@ -246,7 +251,7 @@ class StateManager:
     def _load_remote_defaults(defaults: Dict[str, Any]) -> Optional[List[Dict]]:
         """Attempt to load initial state from the remote JSON URL."""
         try:
-            resp = requests.get(
+            resp = HTTP_SESSION.get(
                 DEFAULT_CONFIG["JSON_URL"], timeout=TIMEOUT_INIT
             )
             if resp.status_code == 200:
@@ -531,7 +536,7 @@ def safe_fetch_isochrone(
     }
 
     try:
-        response = requests.get(url, params=params, timeout=TIMEOUT_API)
+        response = HTTP_SESSION.get(url, params=params, timeout=TIMEOUT_API)
 
         if response.status_code == 200:
             data = response.json()
@@ -674,7 +679,7 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
 def _fetch_github_cache_list_impl() -> List[Dict[str, Any]]:
     """(Pure) Fetch list of ``*_cache.zip`` files from the GitHub repo."""
     try:
-        response = requests.get(
+        response = HTTP_SESSION.get(
             GITHUB_CACHE_CONFIG["api_url"], timeout=TIMEOUT_GITHUB_LIST
         )
         if response.status_code != 200:
@@ -698,7 +703,7 @@ def _fetch_github_cache_list_impl() -> List[Dict[str, Any]]:
 def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[str]]:
     """Download a cache ZIP from GitHub. Returns ``(bytes, error_msg)``."""
     try:
-        response = requests.get(download_url, timeout=TIMEOUT_GITHUB_DOWNLOAD)
+        response = HTTP_SESSION.get(download_url, timeout=TIMEOUT_GITHUB_DOWNLOAD)
         if response.status_code == 200:
             return response.content, None
         return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
