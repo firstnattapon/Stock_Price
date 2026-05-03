@@ -31,7 +31,6 @@ import os
 from pathlib import Path
 import zipfile
 import io
-import xml.etree.ElementTree as ET
 from math import radians, sin, cos, sqrt, atan2
 
 
@@ -137,7 +136,6 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "api_key", "map_style_name", "travel_mode", "time_intervals",
     "show_dol", "show_cityplan", "cityplan_opacity", "show_population",
     "show_traffic", "colors", "show_betweenness", "show_closeness",
-    "show_railway",
 ]
 
 # GitHub Cache Repository Configuration
@@ -151,6 +149,11 @@ GITHUB_CACHE_CONFIG: Dict[str, str] = {
         "Stock_Price/main/Geoapify_Map"
     ),
 }
+
+# Shared HTTP session (connection pooling for faster/reliable repeated requests)
+HTTP_SESSION: requests.Session = requests.Session()
+
+
 
 
 # ============================================================================
@@ -184,7 +187,6 @@ class StateManager:
     K_SHOW_TRAFFIC: str = "show_traffic"
     K_SHOW_BETWEENNESS: str = "show_betweenness"
     K_SHOW_CLOSENESS: str = "show_closeness"
-    K_SHOW_RAILWAY: str = "show_railway"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -210,7 +212,6 @@ class StateManager:
         K_SHOW_TRAFFIC: False,
         K_SHOW_BETWEENNESS: False,
         K_SHOW_CLOSENESS: False,
-        K_SHOW_RAILWAY: False,
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -250,7 +251,7 @@ class StateManager:
     def _load_remote_defaults(defaults: Dict[str, Any]) -> Optional[List[Dict]]:
         """Attempt to load initial state from the remote JSON URL."""
         try:
-            resp = requests.get(
+            resp = HTTP_SESSION.get(
                 DEFAULT_CONFIG["JSON_URL"], timeout=TIMEOUT_INIT
             )
             if resp.status_code == 200:
@@ -535,7 +536,7 @@ def safe_fetch_isochrone(
     }
 
     try:
-        response = requests.get(url, params=params, timeout=TIMEOUT_API)
+        response = HTTP_SESSION.get(url, params=params, timeout=TIMEOUT_API)
 
         if response.status_code == 200:
             data = response.json()
@@ -678,7 +679,7 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
 def _fetch_github_cache_list_impl() -> List[Dict[str, Any]]:
     """(Pure) Fetch list of ``*_cache.zip`` files from the GitHub repo."""
     try:
-        response = requests.get(
+        response = HTTP_SESSION.get(
             GITHUB_CACHE_CONFIG["api_url"], timeout=TIMEOUT_GITHUB_LIST
         )
         if response.status_code != 200:
@@ -702,7 +703,7 @@ def _fetch_github_cache_list_impl() -> List[Dict[str, Any]]:
 def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[str]]:
     """Download a cache ZIP from GitHub. Returns ``(bytes, error_msg)``."""
     try:
-        response = requests.get(download_url, timeout=TIMEOUT_GITHUB_DOWNLOAD)
+        response = HTTP_SESSION.get(download_url, timeout=TIMEOUT_GITHUB_DOWNLOAD)
         if response.status_code == 200:
             return response.content, None
         return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
@@ -907,85 +908,6 @@ def fetch_github_cache_list_cached() -> List[Dict[str, Any]]:
     return _fetch_github_cache_list_impl()
 
 
-# ------------------------------------------------------------ KML → GeoJSON
-
-# Path to the bundled KML file (resolved relative to this script)
-_KML_FILE_PATH: Path = (
-    Path(__file__).resolve().parent
-    / "เวนคืนรถไฟเด่นชัย - เชียงราย - เชียงของ ตอน 1-2.kml"
-)
-
-_KML_NS: Dict[str, str] = {"kml": "http://www.opengis.net/kml/2.2"}
-
-
-def _parse_coordinates(coord_text: str) -> List[List[float]]:
-    """Parse a KML <coordinates> text block into [[lon, lat], ...]."""
-    coords: List[List[float]] = []
-    for token in coord_text.strip().split():
-        parts = token.split(",")
-        if len(parts) >= 2:
-            try:
-                coords.append([float(parts[0]), float(parts[1])])
-            except ValueError:
-                continue
-    return coords
-
-
-@st.cache_data(show_spinner=False)
-def _parse_kml_to_geojson() -> Optional[Dict[str, Any]]:
-    """Parse the bundled railway KML into a GeoJSON FeatureCollection.
-
-    Uses stdlib ``xml.etree.ElementTree`` — no extra dependencies.
-    Result is cached by ``@st.cache_data`` so the 10 MB file is parsed
-    only once per Streamlit server lifetime.
-    """
-    if not _KML_FILE_PATH.exists():
-        return None
-
-    try:
-        tree = ET.parse(str(_KML_FILE_PATH))
-        root = tree.getroot()
-    except ET.ParseError:
-        return None
-
-    features: List[Dict[str, Any]] = []
-
-    # -- LineStrings --
-    for ls_el in root.iter(f"{{{_KML_NS['kml']}}}LineString"):
-        coord_el = ls_el.find(f"{{{_KML_NS['kml']}}}coordinates")
-        if coord_el is None or not coord_el.text:
-            continue
-        coords = _parse_coordinates(coord_el.text)
-        if len(coords) >= 2:
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {},
-            })
-
-    # -- Polygons --
-    for poly_el in root.iter(f"{{{_KML_NS['kml']}}}Polygon"):
-        outer = poly_el.find(
-            f"{{{_KML_NS['kml']}}}outerBoundaryIs/"
-            f"{{{_KML_NS['kml']}}}LinearRing/"
-            f"{{{_KML_NS['kml']}}}coordinates"
-        )
-        if outer is None or not outer.text:
-            continue
-        coords = _parse_coordinates(outer.text)
-        if len(coords) >= 4:
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "Polygon", "coordinates": [coords]},
-                "properties": {},
-            })
-
-    if not features:
-        return None
-
-    return {"type": "FeatureCollection", "features": features}
-
-
 # ============================================================================
 # SECTION 5: UI COMPONENTS (st.* allowed)
 # ============================================================================
@@ -1135,16 +1057,20 @@ def _render_sidebar_network_panel() -> bool:
                 f"({cache_stats['size_mb']:.1f} MB)"
             )
 
-            zip_data = export_cache_as_zip()
-            if zip_data:
-                st.download_button(
-                    "📤 Export Cache (.zip)",
-                    data=zip_data,
-                    file_name="osmnx_cache.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                    key="export_cache_btn",
-                )
+            if st.button(
+                "📤 Export Cache (.zip)",
+                use_container_width=True,
+                key="export_cache_btn",
+            ):
+                zip_data = export_cache_as_zip()
+                if zip_data:
+                    st.download_button(
+                        "⬇ Download Ready",
+                        data=zip_data,
+                        file_name="osmnx_cache.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
 
             if st.button(
                 "🗑️ ล้าง Cache",
@@ -1282,7 +1208,6 @@ def _render_sidebar_map_settings() -> None:
             )
 
         st.checkbox("📜 รูปแปลงที่ดิน", key="show_dol")
-        st.checkbox("🚂 แนวรถไฟเชียงของ", key="show_railway")
 
         st.markdown("##### 🚗 การเดินทาง (Isochrone)")
         st.selectbox(
@@ -1448,23 +1373,6 @@ def render_map() -> Optional[Dict[str, Any]]:
     _add_wms_layer(
         m, "dol", "รูปแปลงที่ดิน", st.session_state.show_dol
     )
-
-    # ---- Railway KML Layer ----
-    if st.session_state.show_railway:
-        railway_geojson = _parse_kml_to_geojson()
-        if railway_geojson and railway_geojson.get("features"):
-            folium.GeoJson(
-                railway_geojson,
-                name="แนวรถไฟเชียงของ",
-                style_function=lambda _x: {
-                    "color": "#E63946",
-                    "weight": 4,
-                    "opacity": 0.85,
-                    "dashArray": "8, 4",
-                    "fillOpacity": 0,
-                },
-                tooltip="แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ",
-            ).add_to(m)
 
     # ---- Markers ----
     for i, marker in enumerate(markers):
