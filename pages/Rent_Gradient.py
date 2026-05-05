@@ -130,6 +130,10 @@ TIMEOUT_INIT: int = 3
 TIMEOUT_GITHUB_LIST: int = 10
 TIMEOUT_GITHUB_DOWNLOAD: int = 60
 TIMEOUT_GITHUB_CONFIG_DOWNLOAD: int = 20
+BUNDLE_VERSION: str = "1.0"
+CACHE_FORMAT_VERSION: str = "1.0"
+CONFIG_SCHEMA_VERSION: int = 2
+MAX_CACHE_ENTRY_BYTES: int = 150 * 1024 * 1024
 
 # Map Geoapify travel_mode -> OSMnx network_type
 TRAVEL_MODE_TO_NETWORK_TYPE: Dict[str, str] = {
@@ -789,6 +793,105 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
     return result
 
 
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _build_bundle_manifest() -> Dict[str, Any]:
+    return {
+        "bundle_version": BUNDLE_VERSION,
+        "app_name": "Rent_Gradient",
+        "app_version": "streamlit-monolith",
+        "config_schema_version": CONFIG_SCHEMA_VERSION,
+        "cache_format_version": CACHE_FORMAT_VERSION,
+        "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "platform_info": {"python": os.sys.version.split()[0], "os": os.name},
+        "import_policy": {"mode": "fallback"},
+    }
+
+
+def export_bundle_zip() -> bytes:
+    """Export all-in-one bundle.zip with separated config + cache files."""
+    config_bytes = StateManager.export_config().encode("utf-8")
+    cache_bytes = export_cache_as_zip() or b""
+    manifest = _build_bundle_manifest()
+    manifest["cache_present"] = bool(cache_bytes)
+    manifest["integrity_checksums"] = {
+        "config/config.json": _sha256_bytes(config_bytes),
+        "cache/cache.zip": _sha256_bytes(cache_bytes),
+    }
+    manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+    checksums = [
+        f"{_sha256_bytes(manifest_bytes)}  manifest.json",
+        f"{_sha256_bytes(config_bytes)}  config/config.json",
+        f"{_sha256_bytes(cache_bytes)}  cache/cache.zip",
+    ]
+    checksum_bytes = ("\n".join(checksums) + "\n").encode("utf-8")
+    readme_bytes = (
+        "Rent_Gradient bundle.zip\n"
+        "- manifest.json: compatibility & policy\n"
+        "- config/config.json: user settings + precomputed results\n"
+        "- cache/cache.zip: OSM graph cache archive\n"
+    ).encode("utf-8")
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", manifest_bytes)
+        zf.writestr("config/config.json", config_bytes)
+        zf.writestr("cache/cache.zip", cache_bytes)
+        zf.writestr("checksums.sha256", checksum_bytes)
+        zf.writestr("README.txt", readme_bytes)
+    return out.getvalue()
+
+
+def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
+    """Import bundle.zip with validation and fallback policy."""
+    result = {"success": False, "config_loaded": False, "cache_loaded": False, "warnings": [], "errors": []}
+    try:
+        with zipfile.ZipFile(io.BytesIO(bundle_bytes), "r") as zf:
+            required = {"manifest.json", "config/config.json", "cache/cache.zip", "checksums.sha256"}
+            names = set(zf.namelist())
+            missing = required - names
+            if missing:
+                result["errors"].append(f"ไฟล์ไม่ครบใน bundle: {', '.join(sorted(missing))}")
+                return result
+
+            manifest = json.loads(zf.read("manifest.json"))
+            if manifest.get("bundle_version") != BUNDLE_VERSION:
+                result["errors"].append("bundle_version ไม่รองรับ")
+                return result
+            if manifest.get("config_schema_version") != CONFIG_SCHEMA_VERSION:
+                result["errors"].append("config schema ไม่เข้ากัน")
+                return result
+
+            config_bytes = zf.read("config/config.json")
+            cache_bytes = zf.read("cache/cache.zip")
+            if len(cache_bytes) > MAX_CACHE_ENTRY_BYTES:
+                result["warnings"].append("cache ใหญ่เกินกำหนด ระบบจะโหลดเฉพาะ config")
+                cache_bytes = b""
+
+            declared = manifest.get("integrity_checksums", {})
+            if declared.get("config/config.json") != _sha256_bytes(config_bytes):
+                result["errors"].append("checksum config ไม่ถูกต้อง")
+                return result
+            if declared.get("cache/cache.zip") != _sha256_bytes(cache_bytes if cache_bytes else b""):
+                result["warnings"].append("checksum cache ไม่ถูกต้อง โหลดเฉพาะ config")
+                cache_bytes = b""
+
+            StateManager.import_config(json.loads(config_bytes.decode("utf-8")))
+            result["config_loaded"] = True
+            if cache_bytes:
+                cache_result = import_cache_from_zip(cache_bytes)
+                if cache_result.get("success"):
+                    result["cache_loaded"] = True
+                else:
+                    result["warnings"].append("cache ใช้งานไม่ได้ โหลดเฉพาะ config")
+            result["success"] = result["config_loaded"]
+    except Exception as e:
+        result["errors"].append(f"นำเข้า bundle ล้มเหลว: {str(e)}")
+    return result
+
+
 # -------------------------------------------------------- GitHub cache helpers
 def _fetch_github_cache_list_impl() -> List[Dict[str, Any]]:
     """(Pure) Fetch list of ``*_cache.zip`` files from the GitHub repo."""
@@ -1201,6 +1304,34 @@ def _add_wms_layer(
 def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
+        bundle_data = export_bundle_zip()
+        st.download_button(
+            "Download Bundle (.zip)",
+            bundle_data,
+            "rent_gradient_bundle.zip",
+            "application/zip",
+            use_container_width=True,
+            disabled=locked,
+        )
+
+        uploaded_bundle = st.file_uploader(
+            "Upload Bundle (.zip)",
+            type=["zip"],
+            key="bundle_uploader",
+        )
+        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", use_container_width=True, disabled=locked):
+            bundle_result = import_bundle_zip(uploaded_bundle.read())
+            if bundle_result["success"]:
+                mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
+                st.toast(f"✅ โหลด Bundle สำเร็จ ({mode})", icon="📦")
+                for warn in bundle_result["warnings"]:
+                    st.warning(warn)
+                st.rerun()
+            else:
+                for err in bundle_result["errors"]:
+                    st.error(err)
+
+        st.markdown("---")
         export_data = StateManager.export_config()
         st.download_button(
             "Download Config (.json)",
