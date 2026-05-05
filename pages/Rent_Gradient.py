@@ -144,7 +144,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "api_key", "map_style_name", "travel_mode", "time_intervals",
     "show_dol", "show_cityplan", "cityplan_opacity", "show_population",
     "show_traffic", "colors", "show_betweenness", "show_closeness",
-    "show_railway", "show_golden_spots", "ui_locked",
+    "show_railway", "show_golden_spots",
 ]
 
 # Keys to persist as precomputed outputs (avoid recalculation after import)
@@ -1198,10 +1198,8 @@ def _add_wms_layer(
     ).add_to(m)
 
 
-def _render_sidebar_config_section() -> bool:
-    """Config Import / Export expander + global UI lock toggle."""
-    ui_locked = st.toggle("🔒 Lock Active Markers + เมนูทั้งหมด", key=StateManager.K_UI_LOCKED)
-
+def _render_sidebar_config_section(locked: bool) -> None:
+    """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
         export_data = StateManager.export_config()
         st.download_button(
@@ -1210,13 +1208,13 @@ def _render_sidebar_config_section() -> bool:
             "geo_cbd_config.json",
             "application/json",
             use_container_width=True,
-            disabled=ui_locked,
+            disabled=locked,
         )
 
         uploaded_file = st.file_uploader(
             "Upload .json", type=["json"], label_visibility="collapsed"
         )
-        if uploaded_file and st.button("ยืนยันการโหลด", use_container_width=True, disabled=ui_locked):
+        if uploaded_file and st.button("ยืนยันการโหลด", use_container_width=True, disabled=locked):
             try:
                 data = json.load(uploaded_file)
                 StateManager.import_config(data)
@@ -1233,9 +1231,9 @@ def _render_sidebar_config_section() -> bool:
                 "เลือกไฟล์ตั้งค่า",
                 cfg_names,
                 key="github_config_name",
-                disabled=ui_locked,
+                disabled=locked,
             )
-            if st.button("โหลดจาก GitHub", use_container_width=True, disabled=ui_locked):
+            if st.button("โหลดจาก GitHub", use_container_width=True, disabled=locked):
                 selected_obj = next((c for c in configs if c["name"] == selected), None)
                 if not selected_obj or not selected_obj.get("download_url"):
                     st.error("ไม่พบลิงก์ดาวน์โหลดไฟล์")
@@ -1251,8 +1249,6 @@ def _render_sidebar_config_section() -> bool:
                         st.rerun()
         else:
             st.caption("ไม่พบไฟล์ .json ในโฟลเดอร์ Geoapify_Map")
-
-    return ui_locked
 
 
 def _render_sidebar_marker_input(locked: bool) -> None:
@@ -1303,7 +1299,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
                 value=prev_active,
                 key=f"active_chk_{i}",
                 label_visibility="collapsed",
-                disabled=ui_locked,
+                disabled=locked,
             )
 
             if is_active != prev_active:
@@ -1567,7 +1563,8 @@ def render_sidebar() -> Tuple[bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
 
-        ui_locked = _render_sidebar_config_section()
+        ui_locked = st.toggle("🔒 Lock Active Markers + เมนูทั้งหมด", key=StateManager.K_UI_LOCKED)
+        _render_sidebar_config_section(ui_locked)
         st.markdown("---")
         _render_sidebar_marker_input(ui_locked)
 
@@ -1585,7 +1582,7 @@ def render_sidebar() -> Tuple[bool, bool, List[Tuple[int, Dict[str, Any]]]]:
             "🧩 คำนวณหา Isochrone CBD",
             type="primary",
             use_container_width=True,
-            disabled=locked,
+            disabled=ui_locked,
         )
 
     return do_calc, do_network, active_list
