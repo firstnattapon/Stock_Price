@@ -1303,7 +1303,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
                 value=prev_active,
                 key=f"active_chk_{i}",
                 label_visibility="collapsed",
-                disabled=locked,
+                disabled=ui_locked,
             )
 
             if is_active != prev_active:
