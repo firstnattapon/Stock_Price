@@ -199,8 +199,6 @@ class StateManager:
     K_SHOW_CLOSENESS: str = "show_closeness"
     K_SHOW_RAILWAY: str = "show_railway"
     K_SHOW_GOLDEN: str = "show_golden_spots"
-    K_MAP_CENTER: str = "map_center"
-    K_MAP_ZOOM: str = "map_zoom"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -228,8 +226,6 @@ class StateManager:
         K_SHOW_CLOSENESS: False,
         K_SHOW_RAILWAY: False,
         K_SHOW_GOLDEN: True,
-        K_MAP_CENTER: [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]],
-        K_MAP_ZOOM: 14,
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -401,8 +397,6 @@ class StateManager:
         """Reset to factory defaults."""
         st.session_state[cls.K_MARKERS] = [dict(cls._DEFAULT_MARKER)]
         st.session_state[cls.K_LAST_CLICK] = None
-        st.session_state[cls.K_MAP_CENTER] = [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]]
-        st.session_state[cls.K_MAP_ZOOM] = 14
         cls.clear_results()
 
     @classmethod
@@ -430,13 +424,6 @@ class StateManager:
                 st.session_state[result_key] = data[result_key]
                 imported_cached_results = True
 
-        if "map_view" in data and isinstance(data["map_view"], dict):
-            mv = data["map_view"]
-            if "center" in mv and isinstance(mv["center"], list) and len(mv["center"]) == 2:
-                st.session_state[cls.K_MAP_CENTER] = mv["center"]
-            if "zoom" in mv:
-                st.session_state[cls.K_MAP_ZOOM] = mv["zoom"]
-
         # Clear results only when no precomputed payload is included.
         if not imported_cached_results:
             cls.clear_results()
@@ -456,10 +443,6 @@ class StateManager:
                 "precomputed_results": {
                     k: st.session_state.get(k)
                     for k in RESULT_KEYS_TO_SAVE
-                },
-                "map_view": {
-                    "center": st.session_state.get(cls.K_MAP_CENTER),
-                    "zoom": st.session_state.get(cls.K_MAP_ZOOM),
                 },
             },
             indent=2,
@@ -1522,15 +1505,15 @@ def render_map() -> Optional[Dict[str, Any]]:
     """Build and display the Folium map. Returns the ``st_folium`` output dict."""
     style_conf = MAP_STYLES[StateManager.get_map_style_name()]
     markers = StateManager.get_markers()
-    center = st.session_state.get(
-        StateManager.K_MAP_CENTER,
-        [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]],
+    center = (
+        [markers[-1]["lat"], markers[-1]["lng"]]
+        if markers
+        else [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]]
     )
-    zoom_start = st.session_state.get(StateManager.K_MAP_ZOOM, 14)
 
     m = folium.Map(
         location=center,
-        zoom_start=zoom_start,
+        zoom_start=14,
         tiles=style_conf["tiles"],
         attr=style_conf["attr"],
     )
@@ -1691,13 +1674,7 @@ def render_map() -> Optional[Dict[str, Any]]:
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
-    return st_folium(
-        m,
-        height=900,
-        use_container_width=True,
-        key="main_map",
-        returned_objects=["last_clicked", "center", "zoom"],
-    )
+    return st_folium(m, height=900, use_container_width=True, key="main_map")
 
 
 # ============================================================================
@@ -1885,13 +1862,6 @@ def handle_map_click(map_output: Optional[Dict[str, Any]]) -> None:
     """Process a map click event — add marker if debounce passes."""
     if not map_output:
         return
-    center = map_output.get("center")
-    zoom = map_output.get("zoom")
-    if center and isinstance(center, dict) and "lat" in center and "lng" in center:
-        st.session_state[StateManager.K_MAP_CENTER] = [center["lat"], center["lng"]]
-    if isinstance(zoom, (int, float)):
-        st.session_state[StateManager.K_MAP_ZOOM] = int(zoom)
-
     clicked = map_output.get("last_clicked")
     if not clicked:
         return
