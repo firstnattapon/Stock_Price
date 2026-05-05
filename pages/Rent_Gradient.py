@@ -129,7 +129,6 @@ TIMEOUT_API: int = 15
 TIMEOUT_INIT: int = 3
 TIMEOUT_GITHUB_LIST: int = 10
 TIMEOUT_GITHUB_DOWNLOAD: int = 60
-TIMEOUT_GITHUB_CONFIG_DOWNLOAD: int = 20
 BUNDLE_VERSION: str = "1.0"
 CACHE_FORMAT_VERSION: str = "1.0"
 CONFIG_SCHEMA_VERSION: int = 2
@@ -159,16 +158,9 @@ RESULT_KEYS_TO_SAVE: List[str] = [
 ]
 
 # GitHub Cache Repository Configuration
-GITHUB_CACHE_CONFIG: Dict[str, str] = {
-    "api_url": (
-        "https://api.github.com/repos/firstnattapon/Stock_Price/"
-        "contents/Geoapify_Map"
-    ),
-    "raw_base_url": (
-        "https://raw.githubusercontent.com/firstnattapon/"
-        "Stock_Price/main/Geoapify_Map"
-    ),
-}
+GITHUB_BUNDLE_URL: str = (
+    "https://raw.githubusercontent.com/firstnattapon/Stock_Price/main/Geoapify_Map/%E0%B9%80%E0%B8%8A%E0%B8%B5%E0%B8%A2%E0%B8%87%E0%B8%82%E0%B8%AD%E0%B8%87.zip"
+)
 
 
 # ============================================================================
@@ -892,88 +884,17 @@ def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
     return result
 
 
-# -------------------------------------------------------- GitHub cache helpers
-def _fetch_github_cache_list_impl() -> List[Dict[str, Any]]:
-    """(Pure) Fetch list of ``*_cache.zip`` files from the GitHub repo."""
+
+def download_github_bundle() -> Tuple[Optional[bytes], Optional[str]]:
+    """Download fixed-source bundle ZIP from GitHub."""
     try:
-        response = requests.get(
-            GITHUB_CACHE_CONFIG["api_url"], timeout=TIMEOUT_GITHUB_LIST
-        )
-        if response.status_code != 200:
-            return []
-        files = response.json()
-        cache_files: List[Dict[str, Any]] = []
-        for f in files:
-            if isinstance(f, dict) and f.get("name", "").endswith("_cache.zip"):
-                cache_files.append(
-                    {
-                        "name": f["name"],
-                        "download_url": f.get("download_url", ""),
-                        "size_kb": f.get("size", 0) // 1024,
-                    }
-                )
-        return cache_files
-    except Exception:
-        return []
+        response = requests.get(GITHUB_BUNDLE_URL, timeout=TIMEOUT_GITHUB_DOWNLOAD)
+        response.raise_for_status()
+        return response.content, None
+    except requests.RequestException as e:
+        return None, f"ดาวน์โหลด Bundle จาก GitHub ไม่สำเร็จ: {str(e)}"
 
 
-def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[str]]:
-    """Download a cache ZIP from GitHub. Returns ``(bytes, error_msg)``."""
-    try:
-        response = requests.get(download_url, timeout=TIMEOUT_GITHUB_DOWNLOAD)
-        if response.status_code == 200:
-            return response.content, None
-        return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
-    except requests.Timeout:
-        return None, "หมดเวลาในการดาวน์โหลด กรุณาลองใหม่"
-    except Exception as e:
-        return None, f"เกิดข้อผิดพลาด: {str(e)}"
-
-def fetch_github_config_list() -> List[Dict[str, str]]:
-    """Fetch available project JSON configs from the Geoapify_Map folder."""
-    try:
-        response = requests.get(
-            GITHUB_CACHE_CONFIG["api_url"], timeout=TIMEOUT_GITHUB_LIST
-        )
-        if response.status_code != 200:
-            return []
-
-        files = response.json()
-        configs: List[Dict[str, str]] = []
-        for f in files:
-            if not isinstance(f, dict):
-                continue
-            name = f.get("name", "")
-            if not name.endswith(".json"):
-                continue
-            configs.append(
-                {
-                    "name": name,
-                    "download_url": f.get("download_url", ""),
-                }
-            )
-        return sorted(configs, key=lambda x: x["name"])
-    except Exception:
-        return []
-
-
-def download_github_config(download_url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Download and parse a JSON config file from GitHub."""
-    try:
-        response = requests.get(download_url, timeout=TIMEOUT_GITHUB_CONFIG_DOWNLOAD)
-        if response.status_code != 200:
-            return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
-        return response.json(), None
-    except requests.Timeout:
-        return None, "หมดเวลาในการดาวน์โหลด กรุณาลองใหม่"
-    except json.JSONDecodeError:
-        return None, "ไฟล์ JSON ไม่ถูกต้อง"
-    except Exception as e:
-        return None, f"เกิดข้อผิดพลาด: {str(e)}"
-
-
-
-# ------------------------------------------------ Network analysis (pure logic)
 def _fetch_osm_graph(
     polygon_wkt_str: str, network_type: str
 ) -> Tuple[Optional[nx.MultiDiGraph], bool, Optional[str]]:
@@ -1191,12 +1112,6 @@ def compute_centrality_cached(
     return _compute_centrality_impl(polygon_wkt_str, network_type)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_github_cache_list_cached() -> List[Dict[str, Any]]:
-    """Cached GitHub cache-file listing."""
-    return _fetch_github_cache_list_impl()
-
-
 # ------------------------------------------------------------ KML → GeoJSON
 
 # Path to the bundled KML file (resolved relative to this script)
@@ -1332,54 +1247,25 @@ def _render_sidebar_config_section(locked: bool) -> None:
                     st.error(err)
 
         st.markdown("---")
-        export_data = StateManager.export_config()
-        st.download_button(
-            "Download Config (.json)",
-            export_data,
-            "geo_cbd_config.json",
-            "application/json",
-            use_container_width=True,
-            disabled=locked,
-        )
-
-        uploaded_file = st.file_uploader(
-            "Upload .json", type=["json"], label_visibility="collapsed"
-        )
-        if uploaded_file and st.button("ยืนยันการโหลด", use_container_width=True, disabled=locked):
-            try:
-                data = json.load(uploaded_file)
-                StateManager.import_config(data)
-                st.toast("✅ โหลดการตั้งค่าสำเร็จ!", icon="💾")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error loading config: {e}")
-
-        st.markdown("##### Import จาก Geoapify_Map")
-        configs = fetch_github_config_list()
-        if configs:
-            cfg_names = [c["name"] for c in configs]
-            selected = st.selectbox(
-                "เลือกไฟล์ตั้งค่า",
-                cfg_names,
-                key="github_config_name",
-                disabled=locked,
-            )
-            if st.button("โหลดจาก GitHub", use_container_width=True, disabled=locked):
-                selected_obj = next((c for c in configs if c["name"] == selected), None)
-                if not selected_obj or not selected_obj.get("download_url"):
-                    st.error("ไม่พบลิงก์ดาวน์โหลดไฟล์")
+        st.markdown("##### Import Bundle from GitHub")
+        st.caption("แหล่งข้อมูลคงที่: เชียงของ.zip")
+        if st.button("นำเข้า Bundle จาก GitHub", use_container_width=True, disabled=locked):
+            bundle_bytes, err = download_github_bundle()
+            if err:
+                st.error(err)
+            elif not bundle_bytes:
+                st.error("ไม่พบข้อมูล Bundle จาก GitHub")
+            else:
+                bundle_result = import_bundle_zip(bundle_bytes)
+                if bundle_result["success"]:
+                    mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
+                    st.toast(f"✅ โหลด Bundle จาก GitHub สำเร็จ ({mode})", icon="📥")
+                    for warn in bundle_result["warnings"]:
+                        st.warning(warn)
+                    st.rerun()
                 else:
-                    data, err = download_github_config(selected_obj["download_url"])
-                    if err:
-                        st.error(err)
-                    elif data is None:
-                        st.error("ไม่สามารถอ่านไฟล์ตั้งค่าได้")
-                    else:
-                        StateManager.import_config(data)
-                        st.toast(f"✅ โหลด {selected} สำเร็จ!", icon="📥")
-                        st.rerun()
-        else:
-            st.caption("ไม่พบไฟล์ .json ในโฟลเดอร์ Geoapify_Map")
+                    for err_msg in bundle_result["errors"]:
+                        st.error(err_msg)
 
 
 def _render_sidebar_marker_input(locked: bool) -> None:
@@ -1511,81 +1397,6 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
         else:
             st.caption("📊 **Cache ว่างเปล่า**")
 
-        # ---- GitHub Cache Selection ----
-        st.markdown("---")
-        st.markdown("##### 🌐 Cache จาก GitHub")
-
-        github_caches = fetch_github_cache_list_cached()
-
-        if github_caches:
-            cache_options = ["-- เลือก Cache --"] + [
-                f"{c['name']} ({c['size_kb']} KB)" for c in github_caches
-            ]
-            selected_idx = st.selectbox(
-                "เลือก Cache จาก Repository",
-                range(len(cache_options)),
-                format_func=lambda i: cache_options[i],
-                key="github_cache_select",
-                label_visibility="collapsed",
-                disabled=locked,
-            )
-
-            if selected_idx > 0:
-                selected_cache = github_caches[selected_idx - 1]
-                if st.button(
-                    "📥 ดาวน์โหลด & นำเข้า",
-                    use_container_width=True,
-                    type="primary",
-                    disabled=locked,
-                ):
-                    with st.spinner(f"กำลังดาวน์โหลด {selected_cache['name']}..."):
-                        zip_bytes, error = download_github_cache(
-                            selected_cache["download_url"]
-                        )
-                        if zip_bytes:
-                            imp_result = import_cache_from_zip(zip_bytes)
-                            if imp_result["success"]:
-                                msg = (
-                                    f"นำเข้าสำเร็จ! ({imp_result['imported']} ใหม่, "
-                                    f"{imp_result['skipped']} ข้าม)"
-                                )
-                                st.toast(msg, icon="✅")
-                                st.rerun()
-                            else:
-                                for err in imp_result["errors"]:
-                                    st.error(err)
-                        else:
-                            st.error(f"❌ {error}")
-        else:
-            st.caption("⚠️ ไม่พบ cache ใน GitHub หรือไม่สามารถเชื่อมต่อได้")
-
-        # ---- Manual Cache Upload ----
-        st.markdown("---")
-        uploaded_cache = st.file_uploader(
-            "📥 Import Cache (.zip)",
-            type=["zip"],
-            key="cache_uploader",
-            label_visibility="visible",
-            disabled=locked,
-        )
-        if uploaded_cache:
-            if st.button(
-                "✅ ยืนยันการนำเข้า",
-                use_container_width=True,
-                type="secondary",
-                disabled=locked,
-            ):
-                imp_result = import_cache_from_zip(uploaded_cache.read())
-                if imp_result["success"]:
-                    msg = (
-                        f"นำเข้าสำเร็จ! ({imp_result['imported']} ใหม่, "
-                        f"{imp_result['skipped']} ข้าม)"
-                    )
-                    st.toast(msg, icon="✅")
-                    st.rerun()
-                else:
-                    for err in imp_result["errors"]:
-                        st.error(err)
 
         st.markdown("---")
         do_network: bool = st.button(
