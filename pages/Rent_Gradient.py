@@ -200,6 +200,7 @@ class StateManager:
     K_SHOW_CLOSENESS: str = "show_closeness"
     K_SHOW_RAILWAY: str = "show_railway"
     K_SHOW_GOLDEN: str = "show_golden_spots"
+    K_UI_LOCKED: str = "ui_locked"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -227,6 +228,7 @@ class StateManager:
         K_SHOW_CLOSENESS: False,
         K_SHOW_RAILWAY: False,
         K_SHOW_GOLDEN: True,
+        K_UI_LOCKED: False,
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -1196,7 +1198,7 @@ def _add_wms_layer(
     ).add_to(m)
 
 
-def _render_sidebar_config_section() -> None:
+def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
         export_data = StateManager.export_config()
@@ -1206,12 +1208,13 @@ def _render_sidebar_config_section() -> None:
             "geo_cbd_config.json",
             "application/json",
             use_container_width=True,
+            disabled=locked,
         )
 
         uploaded_file = st.file_uploader(
             "Upload .json", type=["json"], label_visibility="collapsed"
         )
-        if uploaded_file and st.button("ยืนยันการโหลด", use_container_width=True):
+        if uploaded_file and st.button("ยืนยันการโหลด", use_container_width=True, disabled=locked):
             try:
                 data = json.load(uploaded_file)
                 StateManager.import_config(data)
@@ -1228,8 +1231,9 @@ def _render_sidebar_config_section() -> None:
                 "เลือกไฟล์ตั้งค่า",
                 cfg_names,
                 key="github_config_name",
+                disabled=locked,
             )
-            if st.button("โหลดจาก GitHub", use_container_width=True):
+            if st.button("โหลดจาก GitHub", use_container_width=True, disabled=locked):
                 selected_obj = next((c for c in configs if c["name"] == selected), None)
                 if not selected_obj or not selected_obj.get("download_url"):
                     st.error("ไม่พบลิงก์ดาวน์โหลดไฟล์")
@@ -1247,7 +1251,7 @@ def _render_sidebar_config_section() -> None:
             st.caption("ไม่พบไฟล์ .json ในโฟลเดอร์ Geoapify_Map")
 
 
-def _render_sidebar_marker_input() -> None:
+def _render_sidebar_marker_input(locked: bool) -> None:
     """Manual coordinate input row."""
     c1, c2 = st.columns([0.7, 0.3])
     coords_input = c1.text_input(
@@ -1255,8 +1259,9 @@ def _render_sidebar_marker_input() -> None:
         placeholder="20.21, 100.40",
         label_visibility="collapsed",
         key="manual_coords",
+        disabled=locked,
     )
-    if c2.button("เพิ่ม", use_container_width=True):
+    if c2.button("เพิ่ม", use_container_width=True, disabled=locked):
         try:
             lat_str, lng_str = coords_input.strip().split(",")
             StateManager.add_marker(float(lat_str), float(lng_str))
@@ -1266,17 +1271,17 @@ def _render_sidebar_marker_input() -> None:
             st.error("Format: Lat, Lng")
 
 
-def _render_sidebar_marker_list() -> List[Tuple[int, Dict[str, Any]]]:
+def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]]:
     """Render the marker list with toggle / delete controls. Returns active_list."""
     markers = StateManager.get_markers()
 
     # Delete last / Reset buttons
     c1, c2 = st.columns(2)
-    if c1.button("❌ ลบจุดล่าสุด", use_container_width=True) and markers:
+    if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
         StateManager.pop_last_marker()
         StateManager.clear_results(["isochrone", "intersection"])
         st.rerun()
-    if c2.button("🔄 รีเซ็ต", use_container_width=True):
+    if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
         StateManager.reset()
         st.rerun()
 
@@ -1294,6 +1299,7 @@ def _render_sidebar_marker_list() -> List[Tuple[int, Dict[str, Any]]]:
                 value=prev_active,
                 key=f"active_chk_{i}",
                 label_visibility="collapsed",
+                disabled=locked,
             )
 
             if is_active != prev_active:
@@ -1312,7 +1318,7 @@ def _render_sidebar_marker_list() -> List[Tuple[int, Dict[str, Any]]]:
                 unsafe_allow_html=True,
             )
 
-            if col3.button("✕", key=f"del_btn_{i}"):
+            if col3.button("✕", key=f"del_btn_{i}", disabled=locked):
                 StateManager.remove_marker(i)
                 StateManager.clear_results(["isochrone", "intersection"])
                 st.rerun()
@@ -1321,7 +1327,7 @@ def _render_sidebar_marker_list() -> List[Tuple[int, Dict[str, Any]]]:
     return StateManager.get_active_markers()
 
 
-def _render_sidebar_network_panel() -> bool:
+def _render_sidebar_network_panel(locked: bool) -> bool:
     """
     Render the Network Analysis expander (cache management + run button).
 
@@ -1350,6 +1356,7 @@ def _render_sidebar_network_panel() -> bool:
                 "📤 Export Cache (.zip)",
                 use_container_width=True,
                 key="export_cache_btn",
+                disabled=locked,
             ):
                 zip_data = export_cache_as_zip()
                 if zip_data:
@@ -1365,6 +1372,7 @@ def _render_sidebar_network_panel() -> bool:
                 "🗑️ ล้าง Cache",
                 use_container_width=True,
                 type="secondary",
+                disabled=locked,
             ):
                 clear_disk_cache()
                 st.toast("ล้าง Cache สำเร็จ!", icon="✅")
@@ -1388,6 +1396,7 @@ def _render_sidebar_network_panel() -> bool:
                 format_func=lambda i: cache_options[i],
                 key="github_cache_select",
                 label_visibility="collapsed",
+                disabled=locked,
             )
 
             if selected_idx > 0:
@@ -1396,6 +1405,7 @@ def _render_sidebar_network_panel() -> bool:
                     "📥 ดาวน์โหลด & นำเข้า",
                     use_container_width=True,
                     type="primary",
+                    disabled=locked,
                 ):
                     with st.spinner(f"กำลังดาวน์โหลด {selected_cache['name']}..."):
                         zip_bytes, error = download_github_cache(
@@ -1425,12 +1435,14 @@ def _render_sidebar_network_panel() -> bool:
             type=["zip"],
             key="cache_uploader",
             label_visibility="visible",
+            disabled=locked,
         )
         if uploaded_cache:
             if st.button(
                 "✅ ยืนยันการนำเข้า",
                 use_container_width=True,
                 type="secondary",
+                disabled=locked,
             ):
                 imp_result = import_cache_from_zip(uploaded_cache.read())
                 if imp_result["success"]:
@@ -1448,7 +1460,7 @@ def _render_sidebar_network_panel() -> bool:
         do_network: bool = st.button(
             "🚀 Run Network Analysis",
             use_container_width=True,
-            disabled=not can_analyze,
+            disabled=(not can_analyze) or locked,
         )
 
         # ---- Network results preview ----
@@ -1467,6 +1479,7 @@ def _render_sidebar_network_panel() -> bool:
                 "➕ เพิ่มจุดนี้ลงในรายการ",
                 use_container_width=True,
                 type="secondary",
+                disabled=locked,
             ):
                 StateManager.add_marker(top["lat"], top["lon"])
                 StateManager.clear_results(["isochrone", "intersection"])
@@ -1494,6 +1507,7 @@ def _render_sidebar_network_panel() -> bool:
                 "➕ เพิ่มจุดทำเลที่ดินทองอันดับ 1",
                 use_container_width=True,
                 type="secondary",
+                disabled=locked,
             ):
                 StateManager.add_marker(best["lat"], best["lon"])
                 StateManager.clear_results(["isochrone", "intersection"])
@@ -1501,32 +1515,32 @@ def _render_sidebar_network_panel() -> bool:
                 st.rerun()
 
         st.markdown("##### Layer Controls")
-        st.checkbox("Show Roads (Betweenness)", key="show_betweenness")
+        st.checkbox("Show Roads (Betweenness)", key="show_betweenness", disabled=locked)
         st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
-        st.checkbox("Show Nodes (Integration)", key="show_closeness")
+        st.checkbox("Show Nodes (Integration)", key="show_closeness", disabled=locked)
         st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
-        st.checkbox("Show Golden Spots", key="show_golden_spots")
+        st.checkbox("Show Golden Spots", key="show_golden_spots", disabled=locked)
         st.caption("💎: จุดทำเลที่ดินทอง (คะแนนรวมสูง)")
 
     return do_network
 
 
-def _render_sidebar_map_settings() -> None:
+def _render_sidebar_map_settings(locked: bool) -> None:
     """Map & Layer settings expander."""
     with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=True):
-        st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name")
-        st.checkbox("🚦 การจราจร (Google Traffic)", key="show_traffic")
-        st.checkbox("👥 ความหนาแน่นประชากร", key="show_population")
+        st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name", disabled=locked)
+        st.checkbox("🚦 การจราจร (Google Traffic)", key="show_traffic", disabled=locked)
+        st.checkbox("👥 ความหนาแน่นประชากร", key="show_population", disabled=locked)
 
         c1, c2 = st.columns([0.65, 0.35])
-        c1.checkbox("🏙️ ผังเมืองรวม", key="show_cityplan")
+        c1.checkbox("🏙️ ผังเมืองรวม", key="show_cityplan", disabled=locked)
         if st.session_state.show_cityplan:
             c2.slider(
-                "Op.", 0.2, 1.0, key="cityplan_opacity", label_visibility="collapsed"
+                "Op.", 0.2, 1.0, key="cityplan_opacity", label_visibility="collapsed", disabled=locked
             )
 
-        st.checkbox("📜 รูปแปลงที่ดิน", key="show_dol")
-        st.checkbox("🚂 แนวรถไฟเชียงของ", key="show_railway")
+        st.checkbox("📜 รูปแปลงที่ดิน", key="show_dol", disabled=locked)
+        st.checkbox("🚂 แนวรถไฟเชียงของ", key="show_railway", disabled=locked)
 
         st.markdown("##### 🚗 การเดินทาง (Isochrone)")
         st.selectbox(
@@ -1534,8 +1548,9 @@ def _render_sidebar_map_settings() -> None:
             list(TRAVEL_MODE_NAMES.keys()),
             format_func=TRAVEL_MODE_NAMES.get,
             key="travel_mode",
+            disabled=locked,
         )
-        st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals")
+        st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
 def render_sidebar() -> Tuple[bool, bool, List[Tuple[int, Dict[str, Any]]]]:
@@ -1548,24 +1563,26 @@ def render_sidebar() -> Tuple[bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
 
-        _render_sidebar_config_section()
+        ui_locked = st.toggle("🔒 Lock Active Markers + เมนูทั้งหมด", key=StateManager.K_UI_LOCKED)
+        _render_sidebar_config_section(ui_locked)
         st.markdown("---")
-        _render_sidebar_marker_input()
+        _render_sidebar_marker_input(ui_locked)
 
-        st.text_input("Geoapify API Key", key="api_key", type="password")
+        st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
 
-        active_list = _render_sidebar_marker_list()
-        st.markdown("---")
-
-        do_network = _render_sidebar_network_panel()
+        active_list = _render_sidebar_marker_list(ui_locked)
         st.markdown("---")
 
-        _render_sidebar_map_settings()
+        do_network = _render_sidebar_network_panel(ui_locked)
+        st.markdown("---")
+
+        _render_sidebar_map_settings(ui_locked)
 
         do_calc: bool = st.button(
             "🧩 คำนวณหา Isochrone CBD",
             type="primary",
             use_container_width=True,
+            disabled=ui_locked,
         )
 
     return do_calc, do_network, active_list
@@ -1928,8 +1945,10 @@ def perform_network_analysis() -> None:
             )
 
 
-def handle_map_click(map_output: Optional[Dict[str, Any]]) -> None:
+def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None:
     """Process a map click event — add marker if debounce passes."""
+    if locked:
+        return
     if not map_output:
         return
     clicked = map_output.get("last_clicked")
@@ -1979,7 +1998,7 @@ def main() -> None:
     map_output = render_map()
 
     # 5. Handle Map Click → mutate state & rerun
-    handle_map_click(map_output)
+    handle_map_click(map_output, st.session_state[StateManager.K_UI_LOCKED])
 
 
 if __name__ == "__main__":
