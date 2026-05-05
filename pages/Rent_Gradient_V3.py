@@ -47,8 +47,7 @@ PAGE_CONFIG: Dict[str, Any] = {
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "JSON_URL": (
-        "https://raw.githubusercontent.com/firstnattapon/Stock_Price/"
-        "refs/heads/main/Geoapify_Map/geoapify_cbd_project.json"
+        "https://raw.githubusercontent.com/firstnattapon/Stock_Price/refs/heads/main/Geoapify_Map/geoapify_cbd_project.json"
     ),
     "LAT": 20.219443,
     "LON": 100.403630,
