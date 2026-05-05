@@ -129,6 +129,7 @@ TIMEOUT_API: int = 15
 TIMEOUT_INIT: int = 3
 TIMEOUT_GITHUB_LIST: int = 10
 TIMEOUT_GITHUB_DOWNLOAD: int = 60
+TIMEOUT_GITHUB_CONFIG_DOWNLOAD: int = 20
 
 # Map Geoapify travel_mode -> OSMnx network_type
 TRAVEL_MODE_TO_NETWORK_TYPE: Dict[str, str] = {
@@ -823,6 +824,49 @@ def download_github_cache(download_url: str) -> Tuple[Optional[bytes], Optional[
     except Exception as e:
         return None, f"เกิดข้อผิดพลาด: {str(e)}"
 
+def fetch_github_config_list() -> List[Dict[str, str]]:
+    """Fetch available project JSON configs from the Geoapify_Map folder."""
+    try:
+        response = requests.get(
+            GITHUB_CACHE_CONFIG["api_url"], timeout=TIMEOUT_GITHUB_LIST
+        )
+        if response.status_code != 200:
+            return []
+
+        files = response.json()
+        configs: List[Dict[str, str]] = []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            name = f.get("name", "")
+            if not name.endswith(".json"):
+                continue
+            configs.append(
+                {
+                    "name": name,
+                    "download_url": f.get("download_url", ""),
+                }
+            )
+        return sorted(configs, key=lambda x: x["name"])
+    except Exception:
+        return []
+
+
+def download_github_config(download_url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Download and parse a JSON config file from GitHub."""
+    try:
+        response = requests.get(download_url, timeout=TIMEOUT_GITHUB_CONFIG_DOWNLOAD)
+        if response.status_code != 200:
+            return None, f"ดาวน์โหลดล้มเหลว (HTTP {response.status_code})"
+        return response.json(), None
+    except requests.Timeout:
+        return None, "หมดเวลาในการดาวน์โหลด กรุณาลองใหม่"
+    except json.JSONDecodeError:
+        return None, "ไฟล์ JSON ไม่ถูกต้อง"
+    except Exception as e:
+        return None, f"เกิดข้อผิดพลาด: {str(e)}"
+
+
 
 # ------------------------------------------------ Network analysis (pure logic)
 def _fetch_osm_graph(
@@ -1175,6 +1219,32 @@ def _render_sidebar_config_section() -> None:
                 st.rerun()
             except Exception as e:
                 st.error(f"Error loading config: {e}")
+
+        st.markdown("##### Import จาก Geoapify_Map")
+        configs = fetch_github_config_list()
+        if configs:
+            cfg_names = [c["name"] for c in configs]
+            selected = st.selectbox(
+                "เลือกไฟล์ตั้งค่า",
+                cfg_names,
+                key="github_config_name",
+            )
+            if st.button("โหลดจาก GitHub", use_container_width=True):
+                selected_obj = next((c for c in configs if c["name"] == selected), None)
+                if not selected_obj or not selected_obj.get("download_url"):
+                    st.error("ไม่พบลิงก์ดาวน์โหลดไฟล์")
+                else:
+                    data, err = download_github_config(selected_obj["download_url"])
+                    if err:
+                        st.error(err)
+                    elif data is None:
+                        st.error("ไม่สามารถอ่านไฟล์ตั้งค่าได้")
+                    else:
+                        StateManager.import_config(data)
+                        st.toast(f"✅ โหลด {selected} สำเร็จ!", icon="📥")
+                        st.rerun()
+        else:
+            st.caption("ไม่พบไฟล์ .json ในโฟลเดอร์ Geoapify_Map")
 
 
 def _render_sidebar_marker_input() -> None:
