@@ -544,19 +544,28 @@ def compute_golden_land_opportunities(
     if max_bet <= 0:
         max_bet = 1.0
 
+    # Precompute mean adjacent edge-betweenness per node once.
+    # This avoids repeated ``graph.edges(node)`` scans for every node.
+    node_edge_score_sum: Dict[Any, float] = {}
+    node_edge_count: Dict[Any, int] = {}
+    for u, v in graph.edges():
+        bet_norm = edge_betweenness_cent.get(tuple(sorted((u, v))), 0.0) / max_bet
+
+        node_edge_score_sum[u] = node_edge_score_sum.get(u, 0.0) + bet_norm
+        node_edge_count[u] = node_edge_count.get(u, 0) + 1
+
+        if u != v:
+            node_edge_score_sum[v] = node_edge_score_sum.get(v, 0.0) + bet_norm
+            node_edge_count[v] = node_edge_count.get(v, 0) + 1
+
     ranked: List[Dict[str, Any]] = []
     for node, data in graph.nodes(data=True):
         close_norm = closeness_cent.get(node, 0.0) / max_close
         degree_norm = degree_dict.get(node, 0) / max_degree
 
-        adj = list(graph.edges(node))
-        if adj:
-            edge_scores = []
-            for u, v in adj:
-                edge_scores.append(
-                    edge_betweenness_cent.get(tuple(sorted((u, v))), 0.0) / max_bet
-                )
-            edge_bet_norm = sum(edge_scores) / len(edge_scores)
+        edge_count = node_edge_count.get(node, 0)
+        if edge_count > 0:
+            edge_bet_norm = node_edge_score_sum[node] / edge_count
         else:
             edge_bet_norm = 0.0
 
