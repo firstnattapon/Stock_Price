@@ -146,6 +146,13 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_railway", "show_golden_spots",
 ]
 
+# Keys to persist as precomputed outputs (avoid recalculation after import)
+RESULT_KEYS_TO_SAVE: List[str] = [
+    "isochrone_data",
+    "intersection_data",
+    "network_data",
+]
+
 # GitHub Cache Repository Configuration
 GITHUB_CACHE_CONFIG: Dict[str, str] = {
     "api_url": (
@@ -394,25 +401,48 @@ class StateManager:
 
     @classmethod
     def import_config(cls, data: Dict[str, Any]) -> None:
-        """Import settings from an uploaded config dict."""
+        """Import settings + optional precomputed outputs from config."""
+        imported_cached_results = False
+
         if "markers" in data:
             st.session_state[cls.K_MARKERS] = data["markers"]
+
         settings = data.get("settings", {})
         for k, v in settings.items():
             if k in SESSION_KEYS_TO_SAVE:
                 st.session_state[k] = v
-        cls.clear_results()
+
+        precomputed_results = data.get("precomputed_results", {})
+        for result_key in RESULT_KEYS_TO_SAVE:
+            if result_key in precomputed_results:
+                st.session_state[result_key] = precomputed_results[result_key]
+                imported_cached_results = True
+
+        # Backward compatibility: allow old flat structure.
+        for result_key in RESULT_KEYS_TO_SAVE:
+            if result_key in data:
+                st.session_state[result_key] = data[result_key]
+                imported_cached_results = True
+
+        # Clear results only when no precomputed payload is included.
+        if not imported_cached_results:
+            cls.clear_results()
 
     @classmethod
     def export_config(cls) -> str:
-        """Export current config as a JSON string."""
+        """Export config and currently computed outputs as a JSON string."""
         return json.dumps(
             {
+                "format_version": 2,
                 "markers": st.session_state[cls.K_MARKERS],
                 "settings": {
                     k: st.session_state[k]
                     for k in SESSION_KEYS_TO_SAVE
                     if k in st.session_state
+                },
+                "precomputed_results": {
+                    k: st.session_state.get(k)
+                    for k in RESULT_KEYS_TO_SAVE
                 },
             },
             indent=2,
