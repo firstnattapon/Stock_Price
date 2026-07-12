@@ -24,7 +24,7 @@ from shapely import wkt
 import json
 import networkx as nx
 import osmnx as ox
-import matplotlib.cm as cm
+import matplotlib
 import matplotlib.colors as colors
 from typing import List, Dict, Any, Optional, Tuple
 import time
@@ -1371,11 +1371,9 @@ def _compute_centrality_impl(
         betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight="length")
     max_bet = max(betweenness_cent.values()) if betweenness_cent else 1.0
 
-    # Colour-map for betweenness
-    try:
-        cmap_bet = cm.colormaps["plasma"]
-    except AttributeError:
-        cmap_bet = cm.get_cmap("plasma")  # older matplotlib
+    # Public colormap registry (Matplotlib >= 3.5).
+    # matplotlib.cm.get_cmap was removed in newer Matplotlib releases.
+    cmap_bet = matplotlib.colormaps["plasma"]
 
     # ---- Build edge GeoJSON features ----
     edges_geojson: List[Dict[str, Any]] = []
