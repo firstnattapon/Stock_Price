@@ -2375,8 +2375,8 @@ def render_header() -> None:
     """หัวเรื่อง + สรุปหลักการของหน้าแบบย่อ."""
     st.markdown("#### 💹 Rent Gradient — Bid-Rent CBD Analysis")
     st.caption(
-        "① Isochrone 20 นาทีหา Scope → ② Network หา C20 → "
-        "③ Isochrone 5 นาทีหา C5 + Golden Spots → ④ Rent Gradient: R(d) = R₀·e^(−λd)"
+        "① เริ่มใกล้ศูนย์กลางประชากร → ② Isochrone 20 นาทีหา C20 → "
+        "③ Isochrone 5 นาทีหา C5 → ④ Golden Spots → ⑤ Rent Gradient"
     )
 
 
@@ -2607,218 +2607,206 @@ def render_analytics_panel() -> None:
             st.info("ยังไม่มีหมุด — คลิกบนแผนที่หรือกรอกพิกัดใน sidebar", icon="📍")
 
     with tab_theory:
-        st.markdown(
+        st.html(
             """
 <style>
-.cbd-guide {
-    --cbd-green: #45d6a0;
-    --cbd-blue: #67b7ff;
-    --cbd-amber: #ffcb6b;
-    --cbd-panel: #101c27;
-    --cbd-line: #294050;
+.rg-guide {
+    max-width: 920px;
+    margin: 0 auto;
     color: #edf7f4;
+    font-family: inherit;
 }
-.cbd-guide * { box-sizing: border-box; }
-.cbd-guide .hero {
-    padding: 22px 24px;
-    border: 1px solid rgba(69, 214, 160, .34);
-    border-radius: 18px;
-    background:
-        radial-gradient(circle at 100% 0%, rgba(103, 183, 255, .16), transparent 42%),
-        linear-gradient(135deg, rgba(69, 214, 160, .13), rgba(16, 28, 39, .92));
+.rg-guide * { box-sizing: border-box; }
+.rg-guide .principle {
+    padding: 20px 22px;
+    border: 1px solid rgba(83, 214, 162, .38);
+    border-radius: 16px;
+    background: linear-gradient(135deg, rgba(83, 214, 162, .13), #101c27);
 }
-.cbd-guide .kicker {
-    margin-bottom: 6px;
-    color: var(--cbd-green);
+.rg-guide .label {
+    margin-bottom: 5px;
+    color: #53d6a2;
     font-size: .76rem;
-    font-weight: 800;
-    letter-spacing: .11em;
-}
-.cbd-guide .hero h3 {
-    margin: 0 0 8px;
-    color: #ffffff;
-    font-size: clamp(1.25rem, 3vw, 1.85rem);
-    line-height: 1.25;
-}
-.cbd-guide .hero p { margin: 0; color: #bcd0d4; }
-.cbd-guide .hero strong { color: #ffffff; }
-.cbd-guide .flow-title {
-    margin: 24px 0 12px;
-    color: #ffffff;
-    font-size: 1.05rem;
-    font-weight: 800;
-}
-.cbd-guide .flow {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 11px;
-}
-.cbd-guide .step {
-    position: relative;
-    min-height: 188px;
-    padding: 16px;
-    border: 1px solid var(--cbd-line);
-    border-radius: 15px;
-    background: var(--cbd-panel);
-}
-.cbd-guide .step:not(:last-child)::after {
-    content: "→";
-    position: absolute;
-    z-index: 2;
-    top: 50%;
-    right: -18px;
-    width: 24px;
-    color: var(--cbd-green);
-    font-size: 1.15rem;
     font-weight: 900;
-    text-align: center;
-    transform: translateY(-50%);
+    letter-spacing: .08em;
 }
-.cbd-guide .badge {
-    display: inline-grid;
-    width: 30px;
-    height: 30px;
-    margin-bottom: 10px;
-    place-items: center;
-    border-radius: 9px;
-    color: #05251b;
-    background: var(--cbd-green);
-    font-weight: 900;
-}
-.cbd-guide .step h4 {
-    margin: 0 0 6px;
+.rg-guide h3 {
+    margin: 0 0 7px;
     color: #ffffff;
-    font-size: .98rem;
+    font-size: clamp(1.15rem, 2.6vw, 1.55rem);
 }
-.cbd-guide .step p {
-    margin: 0;
-    color: #9fb4ba;
-    font-size: .86rem;
-    line-height: 1.55;
-}
-.cbd-guide code {
+.rg-guide p { margin: 0; color: #b6c9cd; line-height: 1.65; }
+.rg-guide code {
     padding: 2px 6px;
     border-radius: 6px;
     color: #dffff3;
-    background: rgba(69, 214, 160, .12);
+    background: rgba(83, 214, 162, .12);
 }
-.cbd-guide .rules {
+.rg-guide .flow-title {
+    margin: 22px 0 11px;
+    color: #ffffff;
+    font-size: 1.05rem;
+    font-weight: 850;
+}
+.rg-guide .flow {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 11px;
+    gap: 9px;
+}
+.rg-guide .step {
+    display: grid;
+    grid-template-columns: 38px 1fr;
+    gap: 12px;
+    align-items: start;
+    padding: 13px 15px;
+    border: 1px solid #29404e;
+    border-radius: 13px;
+    background: #101c27;
+}
+.rg-guide .number {
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border-radius: 10px;
+    color: #05251b;
+    background: #53d6a2;
+    font-weight: 950;
+}
+.rg-guide .step b {
+    display: block;
+    margin-bottom: 2px;
+    color: #ffffff;
+}
+.rg-guide .step span {
+    color: #9fb4ba;
+    font-size: .88rem;
+    line-height: 1.55;
+}
+.rg-guide .notes {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 9px;
     margin-top: 12px;
 }
-.cbd-guide .rule {
-    padding: 14px 15px;
-    border: 1px solid var(--cbd-line);
-    border-radius: 13px;
-    background: rgba(16, 28, 39, .74);
+.rg-guide .note {
+    padding: 13px 14px;
+    border: 1px solid #29404e;
+    border-radius: 12px;
+    color: #adbec2;
+    background: rgba(16, 28, 39, .72);
+    font-size: .84rem;
 }
-.cbd-guide .rule b { display: block; margin-bottom: 3px; color: var(--cbd-amber); }
-.cbd-guide .rule span { color: #a9bbc0; font-size: .84rem; }
-.cbd-guide .equations {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 11px;
-    margin-top: 12px;
+.rg-guide .note b {
+    display: block;
+    margin-bottom: 3px;
+    color: #ffcb6b;
 }
-.cbd-guide .equation {
-    padding: 15px 17px;
-    border: 1px solid rgba(103, 183, 255, .25);
-    border-radius: 13px;
-    background: rgba(103, 183, 255, .07);
-}
-.cbd-guide .equation b { display: block; margin-bottom: 4px; color: var(--cbd-blue); }
-.cbd-guide .equation p { margin: 0; color: #afc2c7; font-size: .86rem; }
-.cbd-guide .notice {
+.rg-guide .formula {
     margin-top: 12px;
     padding: 14px 16px;
-    border-left: 4px solid var(--cbd-amber);
-    border-radius: 0 13px 13px 0;
-    color: #e7d8b8;
-    background: rgba(255, 203, 107, .08);
+    border-left: 4px solid #67b8ff;
+    border-radius: 0 12px 12px 0;
+    color: #c7d9dc;
+    background: rgba(103, 184, 255, .08);
     font-size: .88rem;
 }
-@media (max-width: 850px) {
-    .cbd-guide .flow { grid-template-columns: 1fr 1fr; }
-    .cbd-guide .step:not(:last-child)::after { display: none; }
-}
-@media (max-width: 560px) {
-    .cbd-guide .flow,
-    .cbd-guide .rules,
-    .cbd-guide .equations { grid-template-columns: 1fr; }
-    .cbd-guide .step { min-height: auto; }
+.rg-guide .formula b { color: #8dccff; }
+@media (max-width: 680px) {
+    .rg-guide .notes { grid-template-columns: 1fr; }
 }
 </style>
 
-<div class="cbd-guide">
-    <div class="hero">
-        <div class="kicker">SIMPLE · STABLE · FAST</div>
-        <h3>20 นาทีหา “ขอบเขต” · 5 นาทีหา “แกนกลาง”</h3>
+<div class="rg-guide">
+    <div class="principle">
+        <div class="label">หลักการเลือกหมุดเริ่มต้น</div>
+        <h3>หมุดเริ่มต้น = โหนดถนนที่ใกล้ “จุดกึ่งกลางประชากร” มากที่สุด</h3>
         <p>
-            <strong>จุดกึ่งกลาง Travel Areas ใช้ได้ในฐานะ Seed Center ชั่วคราว</strong>
-            แต่ CBD Anchor ขั้นสุดท้ายควรมาจากโหนดถนนที่มี Closeness สูงสุดหลังทำ Network Analysis
+            หมุดนี้มีหน้าที่สร้างขอบเขตค้นหา 20 นาทีเท่านั้น
+            <strong>ไม่ใช่ CBD และไม่ใช่แปลงที่ต้องการลงทุน</strong>
         </p>
     </div>
 
-    <div class="flow-title">🧭 Flow ที่แนะนำ</div>
+    <div class="flow-title">🧭 Flow การหา CBD และ Rent Gradient</div>
     <div class="flow">
         <div class="step">
-            <div class="badge">1</div>
-            <h4>Wide Scan · 20 นาที</h4>
-            <p>เลือกเวลา <code>[20]</code> ค่าเดียว สร้าง Travel Area รอบกว้าง จุดกึ่งกลางรูปทรงเป็นเพียง Seed สำหรับเริ่มค้นหา</p>
+            <div class="number">1</div>
+            <div>
+                <b>ปักหมุดเริ่มต้น</b>
+                <span>เลือกโหนดถนนที่ใกล้จุดกึ่งกลางประชากรมากที่สุด</span>
+            </div>
         </div>
+
         <div class="step">
-            <div class="badge">2</div>
-            <h4>Network Center · C20</h4>
-            <p>รัน Network Analysis บนพื้นที่ 20 นาที แล้วใช้โหนดที่มี <strong>Closeness สูงสุด</strong> เป็น <code>C20</code></p>
+            <div class="number">2</div>
+            <div>
+                <b>คำนวณพื้นที่เดินทาง 20 นาที</b>
+                <span>เลือกเวลา <code>[20]</code> ค่าเดียว เพื่อสร้างขอบเขตค้นหารอบกว้าง</span>
+            </div>
         </div>
+
         <div class="step">
-            <div class="badge">3</div>
-            <h4>Zoom · 5 นาที</h4>
-            <p>ปัก <code>C20</code> เป็นหมุดใหม่ เลือก <code>[5]</code> แล้วสร้าง Isochrone ใหม่ จากนั้นรัน Network อีกครั้งเพื่อหา <code>C5</code> และ Golden Spots</p>
+            <div class="number">3</div>
+            <div>
+                <b>รัน Network Analysis</b>
+                <span>วิเคราะห์พื้นที่ 20 นาที แล้วหา <code>C20</code> = โหนดที่มี Closeness สูงสุด</span>
+            </div>
         </div>
+
         <div class="step">
-            <div class="badge">4</div>
-            <h4>Rent Gradient</h4>
-            <p>ใช้ <code>C5</code> เป็น CBD Anchor ขั้นสุดท้าย แล้วคำนวณ <strong>R(d) = R₀·e<sup>−λd</sup></strong> จากระยะถึงศูนย์กลาง</p>
+            <div class="number">4</div>
+            <div>
+                <b>ใช้ C20 เป็นหมุดใหม่</b>
+                <span>ปิดหรือลบหมุดเดิม เลือกเวลา <code>[5]</code> แล้วคำนวณ Isochrone ใหม่จาก C20</span>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="number">5</div>
+            <div>
+                <b>รัน Network Analysis อีกครั้ง</b>
+                <span>วิเคราะห์พื้นที่ 5 นาที แล้วหา <code>C5</code> = CBD Anchor ขั้นสุดท้าย</span>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="number">6</div>
+            <div>
+                <b>หา Golden Spots</b>
+                <span>จัดอันดับจุดที่น่าสนใจรอบ C5 และตรวจประกอบด้วยผังเมือง รูปแปลง และประชากร</span>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="number">7</div>
+            <div>
+                <b>คำนวณ Rent Gradient</b>
+                <span>ใช้ C5 เป็นจุดอ้างอิงของ <code>R(d) = R₀·e<sup>−λd</sup></code> เพื่อสร้าง Curve, Rings และ Rent Heat</span>
+            </div>
         </div>
     </div>
 
-    <div class="rules">
-        <div class="rule">
-            <b>✓ เลือกเวลาทีละค่า</b>
-            <span>รอบแรกใช้ [20] รอบละเอียดใช้ [5] ไม่เลือกพร้อมกัน เพราะพื้นที่ใหญ่จะครอบงำผลรวม</span>
+    <div class="notes">
+        <div class="note">
+            <b>G20 ไม่ใช่ขั้นตอนหลัก</b>
+            จุดกึ่งกลาง Travel Areas ใช้ชั่วคราวเฉพาะตอนที่ยังไม่มีผล Network
         </div>
-        <div class="rule">
-            <b>✓ สร้าง 5 นาทีใหม่</b>
-            <span>ห้ามย่อ Polygon 20 นาทีลง 25% เพราะเวลาเดินทางตามโครงข่ายถนนไม่ได้เปลี่ยนเป็นสัดส่วนตรง</span>
+        <div class="note">
+            <b>สร้างพื้นที่ 5 นาทีใหม่</b>
+            ต้องคำนวณจาก C20 ใหม่ ไม่ใช่ย่อรูปพื้นที่ 20 นาที
         </div>
-        <div class="rule">
-            <b>✓ รัน Network ใหม่</b>
-            <span>หลังเปลี่ยนหมุดหรือช่วงเวลา ต้องคำนวณ Network ซ้ำ ไม่เช่นนั้น Center และ Golden Spots จะเป็นผลเก่า</span>
-        </div>
-    </div>
-
-    <div class="equations">
-        <div class="equation">
-            <b>🏆 Integration Center</b>
-            <p><code>C = arg max(Closeness)</code> — จุดที่เดินทางถึงโหนดอื่นในขอบเขตได้ง่ายที่สุด ใช้เป็น CBD เชิงการเข้าถึง</p>
-        </div>
-        <div class="equation">
-            <b>💎 Golden Spots</b>
-            <p><code>0.50×Closeness + 0.30×Degree + 0.20×Low Traffic</code> — เป็น Candidate จากถนน ควรตรวจผังเมือง รูปแปลง และประชากรซ้ำ</p>
+        <div class="note">
+            <b>รัน Network ใหม่เสมอ</b>
+            หลังเปลี่ยนหมุดหรือเวลา เพื่อไม่ให้ C5 และ Golden Spots ใช้ผลเก่า
         </div>
     </div>
 
-    <div class="notice">
-        <strong>การประเมินราคา:</strong>
-        ถ้าไม่มีตัวอย่างราคาจริงอย่างน้อย 2 จุดที่ระยะต่างกัน ผล Rent Gradient จะเป็นดัชนีสัมพัทธ์ 0–100
-        ไม่ใช่ราคาตลาดจริง หากต้องการตรวจความเสถียร ให้ใช้ C5 เป็นหมุดและทำรอบ 5 นาทีซ้ำจน Integration Center ไม่เปลี่ยน
+    <div class="formula">
+        <b>หมายเหตุเรื่องราคา:</b>
+        หากไม่มีตัวอย่างราคาจริงอย่างน้อย 2 จุดที่มีระยะต่างกัน
+        ระบบจะแสดงดัชนีสัมพัทธ์ 0–100 ไม่ใช่ราคาตลาดจริง
     </div>
 </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
 
