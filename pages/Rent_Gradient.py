@@ -2375,8 +2375,8 @@ def render_header() -> None:
     """หัวเรื่อง + สรุปหลักการของหน้าแบบย่อ."""
     st.markdown("#### 💹 Rent Gradient — Bid-Rent CBD Analysis")
     st.caption(
-        "① ปักหมุด → ② Isochrone หา CBD → ③ Network Analysis หา Golden Spots → "
-        "④ Rent Gradient ประเมินราคา ตามทฤษฎี Alonso-Muth-Mills: R(d) = R₀·e^(−λd)"
+        "① Isochrone 20 นาทีหา Scope → ② Network หา C20 → "
+        "③ Isochrone 5 นาทีหา C5 + Golden Spots → ④ Rent Gradient: R(d) = R₀·e^(−λd)"
     )
 
 
@@ -2609,30 +2609,216 @@ def render_analytics_panel() -> None:
     with tab_theory:
         st.markdown(
             """
-##### 📐 หลักการของหน้านี้ (คงเดิม + ต่อยอด)
+<style>
+.cbd-guide {
+    --cbd-green: #45d6a0;
+    --cbd-blue: #67b7ff;
+    --cbd-amber: #ffcb6b;
+    --cbd-panel: #101c27;
+    --cbd-line: #294050;
+    color: #edf7f4;
+}
+.cbd-guide * { box-sizing: border-box; }
+.cbd-guide .hero {
+    padding: 22px 24px;
+    border: 1px solid rgba(69, 214, 160, .34);
+    border-radius: 18px;
+    background:
+        radial-gradient(circle at 100% 0%, rgba(103, 183, 255, .16), transparent 42%),
+        linear-gradient(135deg, rgba(69, 214, 160, .13), rgba(16, 28, 39, .92));
+}
+.cbd-guide .kicker {
+    margin-bottom: 6px;
+    color: var(--cbd-green);
+    font-size: .76rem;
+    font-weight: 800;
+    letter-spacing: .11em;
+}
+.cbd-guide .hero h3 {
+    margin: 0 0 8px;
+    color: #ffffff;
+    font-size: clamp(1.25rem, 3vw, 1.85rem);
+    line-height: 1.25;
+}
+.cbd-guide .hero p { margin: 0; color: #bcd0d4; }
+.cbd-guide .hero strong { color: #ffffff; }
+.cbd-guide .flow-title {
+    margin: 24px 0 12px;
+    color: #ffffff;
+    font-size: 1.05rem;
+    font-weight: 800;
+}
+.cbd-guide .flow {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 11px;
+}
+.cbd-guide .step {
+    position: relative;
+    min-height: 188px;
+    padding: 16px;
+    border: 1px solid var(--cbd-line);
+    border-radius: 15px;
+    background: var(--cbd-panel);
+}
+.cbd-guide .step:not(:last-child)::after {
+    content: "→";
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    right: -18px;
+    width: 24px;
+    color: var(--cbd-green);
+    font-size: 1.15rem;
+    font-weight: 900;
+    text-align: center;
+    transform: translateY(-50%);
+}
+.cbd-guide .badge {
+    display: inline-grid;
+    width: 30px;
+    height: 30px;
+    margin-bottom: 10px;
+    place-items: center;
+    border-radius: 9px;
+    color: #05251b;
+    background: var(--cbd-green);
+    font-weight: 900;
+}
+.cbd-guide .step h4 {
+    margin: 0 0 6px;
+    color: #ffffff;
+    font-size: .98rem;
+}
+.cbd-guide .step p {
+    margin: 0;
+    color: #9fb4ba;
+    font-size: .86rem;
+    line-height: 1.55;
+}
+.cbd-guide code {
+    padding: 2px 6px;
+    border-radius: 6px;
+    color: #dffff3;
+    background: rgba(69, 214, 160, .12);
+}
+.cbd-guide .rules {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 11px;
+    margin-top: 12px;
+}
+.cbd-guide .rule {
+    padding: 14px 15px;
+    border: 1px solid var(--cbd-line);
+    border-radius: 13px;
+    background: rgba(16, 28, 39, .74);
+}
+.cbd-guide .rule b { display: block; margin-bottom: 3px; color: var(--cbd-amber); }
+.cbd-guide .rule span { color: #a9bbc0; font-size: .84rem; }
+.cbd-guide .equations {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 11px;
+    margin-top: 12px;
+}
+.cbd-guide .equation {
+    padding: 15px 17px;
+    border: 1px solid rgba(103, 183, 255, .25);
+    border-radius: 13px;
+    background: rgba(103, 183, 255, .07);
+}
+.cbd-guide .equation b { display: block; margin-bottom: 4px; color: var(--cbd-blue); }
+.cbd-guide .equation p { margin: 0; color: #afc2c7; font-size: .86rem; }
+.cbd-guide .notice {
+    margin-top: 12px;
+    padding: 14px 16px;
+    border-left: 4px solid var(--cbd-amber);
+    border-radius: 0 13px 13px 0;
+    color: #e7d8b8;
+    background: rgba(255, 203, 107, .08);
+    font-size: .88rem;
+}
+@media (max-width: 850px) {
+    .cbd-guide .flow { grid-template-columns: 1fr 1fr; }
+    .cbd-guide .step:not(:last-child)::after { display: none; }
+}
+@media (max-width: 560px) {
+    .cbd-guide .flow,
+    .cbd-guide .rules,
+    .cbd-guide .equations { grid-template-columns: 1fr; }
+    .cbd-guide .step { min-height: auto; }
+}
+</style>
 
-**1) หา CBD ด้วย Isochrone Intersection** — พื้นที่ที่เดินทางถึงได้จากทุกหมุดภายในเวลาที่กำหนด
-คือย่านศูนย์กลางเชิงการเข้าถึง (Accessibility-based CBD)
+<div class="cbd-guide">
+    <div class="hero">
+        <div class="kicker">SIMPLE · STABLE · FAST</div>
+        <h3>20 นาทีหา “ขอบเขต” · 5 นาทีหา “แกนกลาง”</h3>
+        <p>
+            <strong>จุดกึ่งกลาง Travel Areas ใช้ได้ในฐานะ Seed Center ชั่วคราว</strong>
+            แต่ CBD Anchor ขั้นสุดท้ายควรมาจากโหนดถนนที่มี Closeness สูงสุดหลังทำ Network Analysis
+        </p>
+    </div>
 
-**2) Network Analysis (OSMnx)** — วัดความสำคัญของถนน/แยกด้วย Centrality:
-- *Betweenness* = ทางผ่านหลัก (traffic flow)
-- *Closeness* = จุดที่เข้าถึงทุกที่ได้ง่าย (integration hub)
+    <div class="flow-title">🧭 Flow ที่แนะนำ</div>
+    <div class="flow">
+        <div class="step">
+            <div class="badge">1</div>
+            <h4>Wide Scan · 20 นาที</h4>
+            <p>เลือกเวลา <code>[20]</code> ค่าเดียว สร้าง Travel Area รอบกว้าง จุดกึ่งกลางรูปทรงเป็นเพียง Seed สำหรับเริ่มค้นหา</p>
+        </div>
+        <div class="step">
+            <div class="badge">2</div>
+            <h4>Network Center · C20</h4>
+            <p>รัน Network Analysis บนพื้นที่ 20 นาที แล้วใช้โหนดที่มี <strong>Closeness สูงสุด</strong> เป็น <code>C20</code></p>
+        </div>
+        <div class="step">
+            <div class="badge">3</div>
+            <h4>Zoom · 5 นาที</h4>
+            <p>ปัก <code>C20</code> เป็นหมุดใหม่ เลือก <code>[5]</code> แล้วสร้าง Isochrone ใหม่ จากนั้นรัน Network อีกครั้งเพื่อหา <code>C5</code> และ Golden Spots</p>
+        </div>
+        <div class="step">
+            <div class="badge">4</div>
+            <h4>Rent Gradient</h4>
+            <p>ใช้ <code>C5</code> เป็น CBD Anchor ขั้นสุดท้าย แล้วคำนวณ <strong>R(d) = R₀·e<sup>−λd</sup></strong> จากระยะถึงศูนย์กลาง</p>
+        </div>
+    </div>
 
-**3) สมการทำเลที่ดินทอง (หลักการเดิม)**
-`Score = 0.50×Closeness + 0.30×Degree + 0.20×(1−Betweenness)`
-— หาแยกที่เข้าถึงง่าย เชื่อมต่อดี แต่ยังไม่ใช่ทางผ่านพลุกพล่าน = "ก่อนคนรู้"
+    <div class="rules">
+        <div class="rule">
+            <b>✓ เลือกเวลาทีละค่า</b>
+            <span>รอบแรกใช้ [20] รอบละเอียดใช้ [5] ไม่เลือกพร้อมกัน เพราะพื้นที่ใหญ่จะครอบงำผลรวม</span>
+        </div>
+        <div class="rule">
+            <b>✓ สร้าง 5 นาทีใหม่</b>
+            <span>ห้ามย่อ Polygon 20 นาทีลง 25% เพราะเวลาเดินทางตามโครงข่ายถนนไม่ได้เปลี่ยนเป็นสัดส่วนตรง</span>
+        </div>
+        <div class="rule">
+            <b>✓ รัน Network ใหม่</b>
+            <span>หลังเปลี่ยนหมุดหรือช่วงเวลา ต้องคำนวณ Network ซ้ำ ไม่เช่นนั้น Center และ Golden Spots จะเป็นผลเก่า</span>
+        </div>
+    </div>
 
-**4) Rent Gradient / Bid-Rent (ต่อยอดตามทฤษฎี Alonso–Muth–Mills)**
-`R(d) = R₀ · e^(−λ·d)` — ค่าเช่า/มูลค่าที่ดินลดลงแบบ exponential ตามระยะ d จาก CBD
-- **λ** (rent gradient): อัตราการลดของราคาต่อ km — เมืองยิ่งกระจุก λ ยิ่งสูง
-- **d½ = ln2/λ**: ระยะที่ราคาเหลือครึ่งเดียว
-- ใส่ *ตัวอย่างราคาจริง* ≥ 2 จุด ระบบจะ fit λ, R₀ ด้วย log-linear OLS พร้อมค่า R²
-- ไม่มีตัวอย่าง → แสดงเป็น *ดัชนี 0–100* เทียบสัมพัทธ์ภายในพื้นที่ศึกษา
+    <div class="equations">
+        <div class="equation">
+            <b>🏆 Integration Center</b>
+            <p><code>C = arg max(Closeness)</code> — จุดที่เดินทางถึงโหนดอื่นในขอบเขตได้ง่ายที่สุด ใช้เป็น CBD เชิงการเข้าถึง</p>
+        </div>
+        <div class="equation">
+            <b>💎 Golden Spots</b>
+            <p><code>0.50×Closeness + 0.30×Degree + 0.20×Low Traffic</code> — เป็น Candidate จากถนน ควรตรวจผังเมือง รูปแปลง และประชากรซ้ำ</p>
+        </div>
+    </div>
 
-**ข้อจำกัด**: ระยะทางใช้เส้นตรง (ไม่ใช่ระยะถนน), โมเดล monocentric (CBD เดียว),
-คุณภาพขึ้นกับข้อมูล OSM และตัวอย่างราคาที่กรอก — ใช้เป็นเครื่องมือคัดกรองเบื้องต้น
-ไม่ใช่ราคาประเมินทางการ
-            """
+    <div class="notice">
+        <strong>การประเมินราคา:</strong>
+        ถ้าไม่มีตัวอย่างราคาจริงอย่างน้อย 2 จุดที่ระยะต่างกัน ผล Rent Gradient จะเป็นดัชนีสัมพัทธ์ 0–100
+        ไม่ใช่ราคาตลาดจริง หากต้องการตรวจความเสถียร ให้ใช้ C5 เป็นหมุดและทำรอบ 5 นาทีซ้ำจน Integration Center ไม่เปลี่ยน
+    </div>
+</div>
+            """,
+            unsafe_allow_html=True,
         )
 
 
