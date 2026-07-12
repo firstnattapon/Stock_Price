@@ -1,4 +1,7 @@
-pandas
+# pandas 3 + pyarrow >=22 segfault ใน Streamlit script-rerun threads
+# (st.dataframe / st.data_editor Arrow serialization) — pin ชุดที่ทดสอบแล้ว
+pandas>=2.2,<3
+pyarrow>=14,<22
 streamlit>=1.39.0
 yfinance
 thingspeak

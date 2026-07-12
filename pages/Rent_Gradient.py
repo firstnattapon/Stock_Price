@@ -1,10 +1,11 @@
 """
-Geoapify CBD x Longdo GIS + Network Analysis
-==============================================
+Geoapify CBD x Longdo GIS + Network Analysis + Rent Gradient (Bid-Rent)
+=======================================================================
 Refactored: Modular Monolith Architecture
 - Section 1: Constants & Configuration
 - Section 2: State Manager (Centralized Session State)
 - Section 3: Pure Functions (No st.* — testable, cacheable)
+  - รวม Rent Gradient Engine ตามทฤษฎี Alonso-Muth-Mills: R(d) = R₀·e^(−λ·d)
 - Section 4: Cached Wrappers (@st.cache_data)
 - Section 5: UI Components (st.* allowed)
 - Section 6: Business Logic Orchestrators
@@ -13,6 +14,8 @@ Refactored: Modular Monolith Architecture
 
 import streamlit as st
 import folium
+from folium.plugins import Fullscreen, MeasureControl, MousePosition
+from branca.element import MacroElement, Template
 from streamlit_folium import st_folium
 import requests
 from shapely.geometry import shape, mapping
@@ -32,7 +35,8 @@ from pathlib import Path
 import zipfile
 import io
 import xml.etree.ElementTree as ET
-from math import radians, sin, cos, sqrt, atan2
+import pandas as pd
+from math import radians, sin, cos, sqrt, atan2, log, exp, pi
 
 
 # ============================================================================
@@ -116,6 +120,7 @@ NETWORK_CONFIG: Dict[str, Any] = {
     "click_debounce_seconds": 0.5,
     "click_distance_threshold_meters": 10,
     "large_graph_threshold": 2000,
+    "betweenness_k_samples": 400,
     "golden_land_top_n": 10,
     "golden_land_weights": {
         "closeness": 0.50,
@@ -123,6 +128,30 @@ NETWORK_CONFIG: Dict[str, Any] = {
         "low_traffic_bonus": 0.20,
     },
 }
+
+# Rent Gradient (Bid-Rent Model: Alonso-Muth-Mills) Configuration
+# หลักการ: ค่าเช่า/มูลค่าที่ดินลดลงแบบ negative exponential ตามระยะจาก CBD
+#   R(d) = R₀ · e^(−λ·d)
+RENT_CONFIG: Dict[str, Any] = {
+    "base_index": 100.0,        # R₀ เมื่อยังไม่มีตัวอย่างราคาจริง (โหมดดัชนี 0–100)
+    "edge_decay_ratio": 4.0,    # ค่า λ เริ่มต้น: ดัชนีลดเหลือ 1/4 ที่ขอบพื้นที่ศึกษา
+    "num_rings": 6,             # จำนวนวงแหวนราคาบนแผนที่
+    "ring_fill_opacity": 0.16,
+    "curve_points": 80,         # ความละเอียดเส้นโค้ง Bid-Rent
+    "min_lambda": 1e-6,
+    "default_d_max_km": 5.0,
+    "min_d_max_km": 0.3,
+}
+
+# Sequential ramp (อ่อน→เข้ม = ค่าเช่าต่ำ→สูง) สำหรับวงแหวน/heat ของ Rent Gradient
+RENT_RAMP: List[str] = [
+    "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b",
+]
+
+# สีกราฟ Bid-Rent Curve (ผ่านการตรวจ colorblind-safe + contrast แล้ว)
+CHART_COLOR_CURVE: str = "#2a78d6"
+CHART_COLOR_SAMPLES: str = "#eb6834"
+CHART_COLOR_MUTED: str = "#898781"
 
 # Timeout constants (seconds)
 TIMEOUT_API: int = 15
@@ -148,6 +177,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_dol", "show_cityplan", "cityplan_opacity", "show_population",
     "show_traffic", "colors", "show_betweenness", "show_closeness",
     "show_railway", "show_golden_spots",
+    "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
 ]
 
 # Keys to persist as precomputed outputs (avoid recalculation after import)
@@ -155,6 +185,7 @@ RESULT_KEYS_TO_SAVE: List[str] = [
     "isochrone_data",
     "intersection_data",
     "network_data",
+    "rent_gradient_data",
 ]
 
 # GitHub Cache Repository Configuration
@@ -197,6 +228,11 @@ class StateManager:
     K_SHOW_RAILWAY: str = "show_railway"
     K_SHOW_GOLDEN: str = "show_golden_spots"
     K_UI_LOCKED: str = "ui_locked"
+    K_RENT_SAMPLES: str = "rent_samples"
+    K_RENT_DATA: str = "rent_gradient_data"
+    K_SHOW_RENT_RINGS: str = "show_rent_rings"
+    K_SHOW_RENT_NODES: str = "show_rent_nodes"
+    K_RENT_UNIT: str = "rent_unit_label"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -225,6 +261,11 @@ class StateManager:
         K_SHOW_RAILWAY: False,
         K_SHOW_GOLDEN: True,
         K_UI_LOCKED: False,
+        K_RENT_SAMPLES: [],
+        K_RENT_DATA: None,
+        K_SHOW_RENT_RINGS: True,
+        K_SHOW_RENT_NODES: False,
+        K_RENT_UNIT: "บาท/ตร.ว./เดือน",
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -324,6 +365,26 @@ class StateManager:
     def get_map_style_name(cls) -> str:
         return st.session_state[cls.K_MAP_STYLE]
 
+    @classmethod
+    def get_rent_samples(cls) -> List[Dict[str, Any]]:
+        return st.session_state[cls.K_RENT_SAMPLES]
+
+    @classmethod
+    def set_rent_samples(cls, samples: List[Dict[str, Any]]) -> None:
+        st.session_state[cls.K_RENT_SAMPLES] = samples
+
+    @classmethod
+    def get_rent_data(cls) -> Optional[Dict[str, Any]]:
+        return st.session_state[cls.K_RENT_DATA]
+
+    @classmethod
+    def set_rent_data(cls, data: Optional[Dict[str, Any]]) -> None:
+        st.session_state[cls.K_RENT_DATA] = data
+
+    @classmethod
+    def get_rent_unit(cls) -> str:
+        return st.session_state[cls.K_RENT_UNIT]
+
     # -------------------------------------------------------------- mutators
     @classmethod
     def set_isochrone_data(cls, data: Optional[Dict[str, Any]]) -> None:
@@ -378,11 +439,11 @@ class StateManager:
         Smart cache invalidation — clear only specified layers.
 
         Args:
-            layers: ``['isochrone', 'intersection', 'network']``.
+            layers: ``['isochrone', 'intersection', 'network', 'rent']``.
                     ``None`` clears all.
         """
         if layers is None:
-            layers = ["isochrone", "intersection", "network"]
+            layers = ["isochrone", "intersection", "network", "rent"]
 
         if "isochrone" in layers:
             st.session_state[cls.K_ISOCHRONE] = None
@@ -390,6 +451,8 @@ class StateManager:
             st.session_state[cls.K_INTERSECTION] = None
         if "network" in layers:
             st.session_state[cls.K_NETWORK] = None
+        if "rent" in layers:
+            st.session_state[cls.K_RENT_DATA] = None
 
     @classmethod
     def reset(cls) -> None:
@@ -401,8 +464,6 @@ class StateManager:
     @classmethod
     def import_config(cls, data: Dict[str, Any]) -> None:
         """Import settings + optional precomputed outputs from config."""
-        imported_cached_results = False
-
         if "markers" in data:
             st.session_state[cls.K_MARKERS] = data["markers"]
 
@@ -411,21 +472,19 @@ class StateManager:
             if k in SESSION_KEYS_TO_SAVE:
                 st.session_state[k] = v
 
+        # Start from a clean slate so keys absent from the payload
+        # don't keep stale results anchored to the previous CBD.
+        cls.clear_results()
+
         precomputed_results = data.get("precomputed_results", {})
         for result_key in RESULT_KEYS_TO_SAVE:
             if result_key in precomputed_results:
                 st.session_state[result_key] = precomputed_results[result_key]
-                imported_cached_results = True
 
         # Backward compatibility: allow old flat structure.
         for result_key in RESULT_KEYS_TO_SAVE:
             if result_key in data:
                 st.session_state[result_key] = data[result_key]
-                imported_cached_results = True
-
-        # Clear results only when no precomputed payload is included.
-        if not imported_cached_results:
-            cls.clear_results()
 
     @classmethod
     def export_config(cls) -> str:
@@ -618,6 +677,348 @@ def compute_golden_land_opportunities(
 
     ranked.sort(key=lambda x: x["score"], reverse=True)
     return ranked[:top_n]
+
+
+def approx_geom_area_km2(geojson_geom: Dict[str, Any]) -> Optional[float]:
+    """พื้นที่โดยประมาณ (km²) ของ geometry ใน WGS84 — แม่นพอสำหรับแสดงผล."""
+    try:
+        geom = shape(geojson_geom)
+        lat_c = geom.centroid.y
+        return geom.area * 110.574 * 111.320 * cos(radians(lat_c))
+    except Exception:
+        return None
+
+
+# ----------------------------------------------------- Rent Gradient Engine
+# ทฤษฎี Bid-Rent (Alonso-Muth-Mills): มูลค่า/ค่าเช่าที่ดินลดลงตามระยะจาก CBD
+#   R(d) = R₀ · e^(−λ·d)
+#   λ    = อัตราการลดลงของค่าเช่า (rent gradient) ต่อ km
+#   d½   = ln(2)/λ = ระยะที่ค่าเช่าลดลงครึ่งหนึ่ง (half-value distance)
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in kilometres."""
+    return calculate_distance_meters(lat1, lon1, lat2, lon2) / 1000.0
+
+
+def predict_rent(distance_km: float, r0: float, lam: float) -> float:
+    """Bid-rent prediction: R(d) = R₀ · e^(−λ·d)."""
+    return r0 * exp(-lam * distance_km)
+
+
+def rent_color_for_norm(norm: float) -> str:
+    """Map normalized rent 0..1 (ต่ำ→สูง) onto the sequential ramp (อ่อน→เข้ม)."""
+    norm = max(0.0, min(1.0, norm))
+    idx = int(round(norm * (len(RENT_RAMP) - 1)))
+    return RENT_RAMP[idx]
+
+
+def fit_rent_gradient_from_samples(
+    samples: List[Dict[str, Any]],
+    anchor_lat: float,
+    anchor_lon: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Fit R(d) = R₀·e^(−λd) จากตัวอย่างราคาจริงด้วย log-linear OLS.
+
+    ln(R) = ln(R₀) − λ·d  →  regression เส้นตรงบน (d, ln R)
+
+    Returns ``{r0, lam, r2, n_samples, points}`` หรือ ``None``
+    เมื่อข้อมูลไม่พอ (ต้องมี ≥ 2 จุดที่ระยะต่างกัน และราคา > 0).
+    """
+    pts: List[Tuple[float, float]] = []  # (distance_km, ln_rent)
+    for s in samples:
+        try:
+            lat = float(s["lat"])
+            lon = float(s["lon"])
+            rent = float(s["rent"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if rent <= 0:
+            continue
+        d = haversine_km(anchor_lat, anchor_lon, lat, lon)
+        pts.append((d, log(rent)))
+
+    if len(pts) < 2:
+        return None
+
+    n = len(pts)
+    mean_x = sum(p[0] for p in pts) / n
+    mean_y = sum(p[1] for p in pts) / n
+    sxx = sum((p[0] - mean_x) ** 2 for p in pts)
+    if sxx <= 1e-12:  # ทุกจุดระยะเท่ากัน — fit ไม่ได้
+        return None
+    sxy = sum((p[0] - mean_x) * (p[1] - mean_y) for p in pts)
+
+    slope = sxy / sxx
+    intercept = mean_y - slope * mean_x
+    lam = -slope
+    r0 = exp(intercept)
+
+    ss_tot = sum((p[1] - mean_y) ** 2 for p in pts)
+    ss_res = sum((p[1] - (intercept + slope * p[0])) ** 2 for p in pts)
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 1.0
+
+    return {
+        "r0": r0,
+        "lam": lam,
+        "r2": r2,
+        "n_samples": n,
+        "points": [{"d": p[0], "rent": exp(p[1])} for p in pts],
+    }
+
+
+def resolve_cbd_anchor(
+    intersection_data: Optional[Dict[str, Any]],
+    network_data: Optional[Dict[str, Any]],
+    isochrone_data: Optional[Dict[str, Any]],
+    markers: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    หาจุดยึด CBD สำหรับ Rent Gradient ตามลำดับความน่าเชื่อถือ:
+    1) centroid ของ CBD Zone (จุดตัด isochrone)
+    2) Integration Center จาก Network Analysis
+    3) centroid ของ Travel Areas ทั้งหมด
+    4) ค่าเฉลี่ยตำแหน่งหมุดที่ active
+    """
+    # 1) CBD intersection centroid
+    try:
+        feats = (intersection_data or {}).get("features") or []
+        if feats:
+            geom = shape(feats[0]["geometry"])
+            c = geom.centroid
+            return {"lat": c.y, "lon": c.x, "source": "CBD Zone (จุดตัด Isochrone)"}
+    except Exception:
+        pass
+
+    # 2) Network Integration Center
+    try:
+        top = (network_data or {}).get("top_node")
+        if top and top.get("score", -1) >= 0:
+            return {"lat": top["lat"], "lon": top["lon"], "source": "Integration Center (Network)"}
+    except Exception:
+        pass
+
+    # 3) Union centroid of all isochrones
+    try:
+        feats = (isochrone_data or {}).get("features") or []
+        if feats:
+            combined = unary_union([shape(f["geometry"]) for f in feats])
+            c = combined.centroid
+            return {"lat": c.y, "lon": c.x, "source": "จุดกึ่งกลาง Travel Areas"}
+    except Exception:
+        pass
+
+    # 4) Mean of active markers
+    active = [m for m in markers if m.get("active", True)]
+    if active:
+        lat = sum(m["lat"] for m in active) / len(active)
+        lon = sum(m["lng"] for m in active) / len(active)
+        return {"lat": lat, "lon": lon, "source": "ค่าเฉลี่ยตำแหน่งหมุด"}
+
+    return None
+
+
+def isochrone_max_distance_km(
+    anchor_lat: float,
+    anchor_lon: float,
+    isochrone_data: Optional[Dict[str, Any]],
+) -> float:
+    """ระยะไกลสุดจากจุดยึดถึงขอบ Travel Areas (ใช้มุม bounding box ของแต่ละ feature)."""
+    d_max = 0.0
+    feats = (isochrone_data or {}).get("features") or []
+    for f in feats:
+        try:
+            minx, miny, maxx, maxy = shape(f["geometry"]).bounds
+        except Exception:
+            continue
+        for lon, lat in ((minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)):
+            d = haversine_km(anchor_lat, anchor_lon, lat, lon)
+            d_max = max(d_max, d)
+    if d_max <= 0:
+        d_max = RENT_CONFIG["default_d_max_km"]
+    return max(d_max, RENT_CONFIG["min_d_max_km"])
+
+
+def _geodesic_circle_coords(
+    lat: float, lon: float, radius_km: float, n_points: int = 72
+) -> List[List[float]]:
+    """พิกัดวงกลมโดยประมาณรอบจุดศูนย์กลาง (แก้ความบิดเบี้ยวของลองจิจูดตามละติจูด)."""
+    dlat = radius_km / 110.574
+    dlon = radius_km / (111.320 * max(cos(radians(lat)), 1e-6))
+    coords = []
+    for i in range(n_points + 1):
+        t = 2.0 * pi * i / n_points
+        coords.append([lon + dlon * cos(t), lat + dlat * sin(t)])
+    return coords
+
+
+def build_rent_rings_geojson(
+    anchor_lat: float,
+    anchor_lon: float,
+    d_max_km: float,
+    r0: float,
+    lam: float,
+    is_index: bool,
+    unit_label: str,
+) -> Dict[str, Any]:
+    """สร้างวงแหวนราคา (annuli) รอบ CBD — สีตามค่าเช่าคาดการณ์ที่กึ่งกลางวง."""
+    n_rings = RENT_CONFIG["num_rings"]
+    step = d_max_km / n_rings
+
+    # ช่วงค่าเช่าทั้งหมดสำหรับ normalize สี (รองรับกรณี λ < 0 ที่ curve กลับทิศ)
+    r_at_0 = predict_rent(0.0, r0, lam)
+    r_at_max = predict_rent(d_max_km, r0, lam)
+    r_lo, r_hi = min(r_at_0, r_at_max), max(r_at_0, r_at_max)
+    r_span = (r_hi - r_lo) or 1.0
+
+    features: List[Dict[str, Any]] = []
+    for i in range(1, n_rings + 1):
+        r_in = step * (i - 1)
+        r_out = step * i
+        rent_mid = predict_rent((r_in + r_out) / 2.0, r0, lam)
+        norm = (rent_mid - r_lo) / r_span
+
+        outer = _geodesic_circle_coords(anchor_lat, anchor_lon, r_out)
+        rings = [outer]
+        if r_in > 0:
+            rings.append(list(reversed(_geodesic_circle_coords(anchor_lat, anchor_lon, r_in))))
+
+        if is_index:
+            rent_label = f"ดัชนี ≈ {rent_mid:.1f} / 100"
+        else:
+            rent_label = f"≈ {rent_mid:,.0f} {unit_label}"
+
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": rings},
+                "properties": {
+                    "band": f"{r_in:.1f} – {r_out:.1f} km",
+                    "rent_mid": round(rent_mid, 2),
+                    "rent_label": rent_label,
+                    "color": rent_color_for_norm(norm),
+                },
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+def build_rent_nodes_geojson(
+    nodes_geojson: Optional[Dict[str, Any]],
+    anchor_lat: float,
+    anchor_lon: float,
+    r0: float,
+    lam: float,
+    d_max_km: float,
+) -> Optional[Dict[str, Any]]:
+    """ทาสีโหนดถนน (จาก Network Analysis) ตามค่าเช่าคาดการณ์ → Rent Heat."""
+    feats = (nodes_geojson or {}).get("features") or []
+    if not feats:
+        return None
+
+    r_at_0 = predict_rent(0.0, r0, lam)
+    r_at_max = predict_rent(d_max_km, r0, lam)
+    r_lo, r_hi = min(r_at_0, r_at_max), max(r_at_0, r_at_max)
+    r_span = (r_hi - r_lo) or 1.0
+
+    out_features: List[Dict[str, Any]] = []
+    for f in feats:
+        try:
+            lon, lat = f["geometry"]["coordinates"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        rent = predict_rent(haversine_km(anchor_lat, anchor_lon, lat, lon), r0, lam)
+        norm = (rent - r_lo) / r_span
+        out_features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {
+                    "type": "rent_node",
+                    "rent": round(rent, 2),
+                    "color": rent_color_for_norm(norm),
+                },
+            }
+        )
+    return {"type": "FeatureCollection", "features": out_features}
+
+
+def compute_rent_gradient_data(
+    intersection_data: Optional[Dict[str, Any]],
+    network_data: Optional[Dict[str, Any]],
+    isochrone_data: Optional[Dict[str, Any]],
+    markers: List[Dict[str, Any]],
+    samples: List[Dict[str, Any]],
+    unit_label: str,
+) -> Dict[str, Any]:
+    """
+    คำนวณ Rent Gradient ทั้งชุด (pure, JSON-serializable):
+    anchor → fit/default model → rings + curve + rent heat.
+    """
+    anchor = resolve_cbd_anchor(intersection_data, network_data, isochrone_data, markers)
+    if anchor is None:
+        return {"error": "ไม่พบจุดยึด CBD — กรุณาปักหมุดและคำนวณ Isochrone ก่อน"}
+
+    d_max = isochrone_max_distance_km(anchor["lat"], anchor["lon"], isochrone_data)
+
+    fit = fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
+    if fit is not None:
+        r0, lam, r2 = fit["r0"], fit["lam"], fit["r2"]
+        n_samples = fit["n_samples"]
+        is_index = False
+        samples_scatter = fit["points"]
+        # ขยายขอบเขตกราฟ/วงแหวนให้คลุมตัวอย่างที่อยู่ไกลกว่า Travel Areas
+        d_max = max(d_max, max((p["d"] for p in samples_scatter), default=0.0) * 1.05)
+    else:
+        r0 = RENT_CONFIG["base_index"]
+        lam = log(RENT_CONFIG["edge_decay_ratio"]) / d_max
+        r2 = None
+        n_samples = 0
+        is_index = True
+        samples_scatter = []
+
+    inverted = lam < 0
+    abs_lam = abs(lam)
+    half_dist = (log(2.0) / abs_lam) if abs_lam > RENT_CONFIG["min_lambda"] else None
+
+    # เส้นโค้ง Bid-Rent สำหรับกราฟ
+    n_pts = RENT_CONFIG["curve_points"]
+    curve_d = [d_max * i / (n_pts - 1) for i in range(n_pts)]
+    curve_r = [predict_rent(d, r0, lam) for d in curve_d]
+
+    rings = build_rent_rings_geojson(
+        anchor["lat"], anchor["lon"], d_max, r0, lam, is_index, unit_label
+    )
+    rent_nodes = build_rent_nodes_geojson(
+        (network_data or {}).get("nodes"), anchor["lat"], anchor["lon"], r0, lam, d_max
+    )
+
+    return {
+        "anchor": anchor,
+        "model": {
+            "r0": r0,
+            "lam": lam,
+            "r2": r2,
+            "n_samples": n_samples,
+            "is_index": is_index,
+            "inverted": inverted,
+            "unit": unit_label,
+            "d_max_km": d_max,
+            "half_dist_km": half_dist,
+        },
+        "curve": {"d": curve_d, "r": curve_r},
+        "samples_scatter": samples_scatter,
+        "rings_geojson": rings,
+        "rent_nodes_geojson": rent_nodes,
+    }
+
+
+def format_rent_value(value: float, model: Dict[str, Any]) -> str:
+    """แสดงผลราคา: โหมดดัชนี → 'ดัชนี xx/100', โหมดราคาจริง → 'x,xxx หน่วย'."""
+    if model.get("is_index"):
+        return f"ดัชนี {value:.1f}/100"
+    return f"{value:,.0f} {model.get('unit', '')}".strip()
 
 
 # ------------------------------------------------------------------ API calls
@@ -958,10 +1359,16 @@ def _compute_centrality_impl(
     max_close = max(closeness_cent.values()) if closeness_cent else 1.0
 
     # Betweenness centrality (on undirected projection)
+    # กราฟใหญ่: ประมาณค่าด้วย k-source sampling (เร็วขึ้นหลายสิบเท่า,
+    # อันดับความสำคัญของถนนแทบไม่เปลี่ยน) — seed คงที่เพื่อผลซ้ำได้
     G_undir = G.to_undirected()
-    betweenness_cent: Dict[Any, float] = nx.edge_betweenness_centrality(
-        G_undir, weight="length"
-    )
+    if is_large_graph:
+        k_samples = min(NETWORK_CONFIG["betweenness_k_samples"], node_count)
+        betweenness_cent: Dict[Any, float] = nx.edge_betweenness_centrality(
+            G_undir, k=k_samples, weight="length", seed=42
+        )
+    else:
+        betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight="length")
     max_bet = max(betweenness_cent.values()) if betweenness_cent else 1.0
 
     # Colour-map for betweenness
@@ -1216,18 +1623,85 @@ def _add_wms_layer(
     ).add_to(m)
 
 
+def _legend_swatch_row(color_css: str, label: str, extra_style: str = "") -> str:
+    """HTML แถวเดียวของ legend: สี่เหลี่ยมสี + ป้ายข้อความ."""
+    return (
+        '<div style="display:flex; align-items:center; gap:6px; margin:1px 0;">'
+        f'<span style="display:inline-block; width:14px; height:14px; border-radius:3px; '
+        f'background:{color_css}; {extra_style}"></span>'
+        f'<span>{label}</span></div>'
+    )
+
+
+def _add_map_legend(m: folium.Map) -> None:
+    """เพิ่มกล่อง Legend มุมล่างซ้าย อธิบายทุกเลเยอร์ที่กำลังแสดงอยู่."""
+    clrs = StateManager.get_colors()
+    rows: List[str] = []
+
+    if StateManager.get_isochrone_data():
+        rows.append('<div style="font-weight:600; margin-bottom:2px;">เวลาเดินทาง</div>')
+        rows.append(_legend_swatch_row(clrs["step1"], "≤ 10 นาที"))
+        rows.append(_legend_swatch_row(clrs["step2"], "≤ 20 นาที"))
+        rows.append(_legend_swatch_row(clrs["step3"], "≤ 30 นาที"))
+        rows.append(_legend_swatch_row(clrs["step4"], "> 30 นาที"))
+
+    if StateManager.get_intersection_data():
+        rows.append(_legend_swatch_row(
+            "#FFD700", "CBD Zone", "border:2px dashed #FF8C00;"
+        ))
+
+    net_data = StateManager.get_network_data()
+    if net_data and st.session_state.show_golden_spots and net_data.get("golden_spots"):
+        rows.append(_legend_swatch_row(
+            "#FFD60A", "💎 Golden Spot", "border:2px solid #8C6A00; border-radius:50%;"
+        ))
+
+    rent_data = StateManager.get_rent_data()
+    if rent_data and "error" not in rent_data and st.session_state.show_rent_rings:
+        model = rent_data["model"]
+        unit = "ดัชนี" if model["is_index"] else model["unit"]
+        rows.append(
+            '<div style="font-weight:600; margin:4px 0 2px;">Rent Gradient</div>'
+            '<div style="display:flex; align-items:center; gap:6px;">'
+            f'<span style="display:inline-block; width:56px; height:10px; border-radius:3px; '
+            f'background:linear-gradient(90deg, {RENT_RAMP[-1]}, {RENT_RAMP[0]});"></span>'
+            f'<span>CBD → ขอบ ({unit})</span></div>'
+        )
+
+    if not rows:
+        return
+
+    html = (
+        '<div style="position:fixed; bottom:18px; left:12px; z-index:9999; '
+        'background:rgba(255,255,255,0.93); border:1px solid rgba(11,11,11,0.10); '
+        'border-radius:8px; padding:8px 10px; font-size:12px; color:#0b0b0b; '
+        'box-shadow:0 1px 4px rgba(0,0,0,0.18); line-height:1.45; '
+        'font-family:system-ui, -apple-system, sans-serif;">'
+        + "".join(rows)
+        + "</div>"
+    )
+    legend = MacroElement()
+    legend._template = Template(
+        "{% macro html(this, kwargs) %}" + html + "{% endmacro %}"
+    )
+    m.get_root().add_child(legend)
+
+
 def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
-        bundle_data = export_bundle_zip()
-        st.download_button(
-            "Download Bundle (.zip)",
-            bundle_data,
-            "rent_gradient_bundle.zip",
-            "application/zip",
-            use_container_width=True,
-            disabled=locked,
-        )
+        # สร้าง bundle เฉพาะเมื่อผู้ใช้กดปุ่ม — ไม่ zip cache ก้อนใหญ่ทุก rerun
+        if st.button("📦 เตรียม Bundle (.zip)", use_container_width=True, disabled=locked):
+            st.session_state["_bundle_bytes"] = export_bundle_zip()
+        if st.session_state.get("_bundle_bytes"):
+            st.download_button(
+                "⬇ Download Bundle (.zip)",
+                st.session_state["_bundle_bytes"],
+                "rent_gradient_bundle.zip",
+                "application/zip",
+                use_container_width=True,
+                disabled=locked,
+            )
 
         uploaded_bundle = st.file_uploader(
             "Upload Bundle (.zip)",
@@ -1282,7 +1756,7 @@ def _render_sidebar_marker_input(locked: bool) -> None:
         try:
             lat_str, lng_str = coords_input.strip().split(",")
             StateManager.add_marker(float(lat_str), float(lng_str))
-            StateManager.clear_results(["isochrone", "intersection"])
+            StateManager.clear_results(["isochrone", "intersection", "rent"])
             st.rerun()
         except Exception:
             st.error("Format: Lat, Lng")
@@ -1296,7 +1770,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
     c1, c2 = st.columns(2)
     if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
         StateManager.pop_last_marker()
-        StateManager.clear_results(["isochrone", "intersection"])
+        StateManager.clear_results(["isochrone", "intersection", "rent"])
         st.rerun()
     if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
         StateManager.reset()
@@ -1321,7 +1795,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             if is_active != prev_active:
                 StateManager.set_marker_active(i, is_active)
-                StateManager.clear_results(["isochrone", "intersection"])
+                StateManager.clear_results(["isochrone", "intersection", "rent"])
 
             if is_active:
                 style = (
@@ -1337,7 +1811,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             if col3.button("✕", key=f"del_btn_{i}", disabled=locked):
                 StateManager.remove_marker(i)
-                StateManager.clear_results(["isochrone", "intersection"])
+                StateManager.clear_results(["isochrone", "intersection", "rent"])
                 st.rerun()
 
     # Refresh active list after possible mutations
@@ -1375,15 +1849,15 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 key="export_cache_btn",
                 disabled=locked,
             ):
-                zip_data = export_cache_as_zip()
-                if zip_data:
-                    st.download_button(
-                        "⬇ Download Ready",
-                        data=zip_data,
-                        file_name="osmnx_cache.zip",
-                        mime="application/zip",
-                        use_container_width=True,
-                    )
+                st.session_state["_cache_zip_bytes"] = export_cache_as_zip()
+            if st.session_state.get("_cache_zip_bytes"):
+                st.download_button(
+                    "⬇ Download Ready",
+                    data=st.session_state["_cache_zip_bytes"],
+                    file_name="osmnx_cache.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
 
             if st.button(
                 "🗑️ ล้าง Cache",
@@ -1424,7 +1898,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 disabled=locked,
             ):
                 StateManager.add_marker(top["lat"], top["lon"])
-                StateManager.clear_results(["isochrone", "intersection"])
+                StateManager.clear_results(["isochrone", "intersection", "rent"])
                 st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
                 st.rerun()
 
@@ -1452,7 +1926,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 disabled=locked,
             ):
                 StateManager.add_marker(best["lat"], best["lon"])
-                StateManager.clear_results(["isochrone", "intersection"])
+                StateManager.clear_results(["isochrone", "intersection", "rent"])
                 st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
 
@@ -1465,6 +1939,104 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
         st.caption("💎: จุดทำเลที่ดินทอง (คะแนนรวมสูง)")
 
     return do_network
+
+
+def _sync_rent_samples_from_editor(edited_df: "pd.DataFrame") -> None:
+    """แปลงตาราง data_editor → list ตัวอย่างราคา แล้ว sync เข้า session state."""
+    new_samples: List[Dict[str, float]] = []
+    for _, row in edited_df.iterrows():
+        try:
+            lat, lon, rent = float(row["lat"]), float(row["lon"]), float(row["rent"])
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(lat) or pd.isna(lon) or pd.isna(rent) or rent <= 0:
+            continue
+        new_samples.append({"lat": lat, "lon": lon, "rent": rent})
+
+    if new_samples != StateManager.get_rent_samples():
+        StateManager.set_rent_samples(new_samples)
+
+
+def _render_sidebar_rent_panel(locked: bool) -> bool:
+    """
+    Render the Rent Gradient (Bid-Rent) expander.
+
+    Returns ``True`` if the user clicked **คำนวณ Rent Gradient**.
+    """
+    with st.expander("💰 Rent Gradient (Bid-Rent)", expanded=True):
+        st.caption("หลัก Alonso-Muth-Mills: **R(d) = R₀ · e^(−λ·d)** — ค่าเช่าลดลงตามระยะจาก CBD")
+
+        can_run = StateManager.get_isochrone_data() is not None
+        if not can_run:
+            st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
+
+        # ---- Calibration samples ----
+        st.markdown("##### 🧾 ตัวอย่างราคาจริง (Calibration)")
+        st.caption(
+            "ใส่ ≥ 2 จุดที่ระยะต่างกันเพื่อ fit λ จากตลาดจริง — "
+            "เว้นว่างไว้ระบบจะใช้ดัชนี 0–100"
+        )
+        samples = StateManager.get_rent_samples()
+        df = pd.DataFrame(samples, columns=["lat", "lon", "rent"], dtype="float64")
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            disabled=locked,
+            column_config={
+                "lat": st.column_config.NumberColumn("Lat", format="%.5f"),
+                "lon": st.column_config.NumberColumn("Lon", format="%.5f"),
+                "rent": st.column_config.NumberColumn("ราคา", min_value=0.0),
+            },
+        )
+        if not locked:
+            _sync_rent_samples_from_editor(edited_df)
+
+        st.text_input("หน่วยราคา", key="rent_unit_label", disabled=locked)
+
+        # ---- Layer toggles ----
+        st.checkbox("🌈 Rent Rings (วงแหวนราคา)", key="show_rent_rings", disabled=locked)
+        st.checkbox("🔥 Rent Heat (โหนดถนน)", key="show_rent_nodes", disabled=locked)
+        st.caption("Rent Heat ต้องรัน Network Analysis ก่อน")
+
+        do_rent: bool = st.button(
+            "🧮 คำนวณ Rent Gradient",
+            use_container_width=True,
+            disabled=(not can_run) or locked,
+        )
+
+        # ---- Model summary ----
+        rent_data = StateManager.get_rent_data()
+        if rent_data and "error" not in rent_data:
+            model = rent_data["model"]
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            c1.metric("λ (ต่อ km)", f"{model['lam']:.4f}")
+            half = model.get("half_dist_km")
+            c2.metric("d½ (km)", f"{half:.2f}" if half else "∞")
+
+            c3, c4 = st.columns(2)
+            r0_txt = f"{model['r0']:,.0f}" if not model["is_index"] else f"{model['r0']:.0f} (ดัชนี)"
+            c3.metric("R₀ ที่ CBD", r0_txt)
+            if model.get("r2") is not None:
+                c4.metric("R² (fit)", f"{model['r2']:.3f}")
+            else:
+                c4.metric("Calibration", "ดัชนี (ไม่มีตัวอย่าง)")
+
+            anchor = rent_data["anchor"]
+            st.caption(
+                f"จุดยึด CBD: **{anchor['source']}** "
+                f"({anchor['lat']:.5f}, {anchor['lon']:.5f})"
+            )
+            if model.get("inverted"):
+                st.warning(
+                    "λ ติดลบ — ราคาตัวอย่างสูงขึ้นตามระยะจาก CBD "
+                    "(gradient กลับทิศ) ตรวจสอบตำแหน่งตัวอย่างหรือจุดยึด CBD",
+                    icon="↔️",
+                )
+
+    return do_rent
 
 
 def _render_sidebar_map_settings(locked: bool) -> None:
@@ -1495,12 +2067,13 @@ def _render_sidebar_map_settings(locked: bool) -> None:
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
-def render_sidebar() -> Tuple[bool, bool, List[Tuple[int, Dict[str, Any]]]]:
+def render_sidebar() -> Tuple[bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     """
-    Orchestrate the full sidebar.
+    Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
+    ① ปักหมุด → ② Isochrone CBD → ③ Network → ④ Rent Gradient → ตั้งค่าแผนที่
 
     Returns:
-        ``(do_calculate, do_network, active_markers_list)``
+        ``(do_calculate, do_network, do_rent, active_markers_list)``
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -1513,21 +2086,24 @@ def render_sidebar() -> Tuple[bool, bool, List[Tuple[int, Dict[str, Any]]]]:
         st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
 
         active_list = _render_sidebar_marker_list(ui_locked)
+
+        do_calc: bool = st.button(
+            "🧩 ① คำนวณหา Isochrone CBD",
+            type="primary",
+            use_container_width=True,
+            disabled=ui_locked,
+        )
         st.markdown("---")
 
         do_network = _render_sidebar_network_panel(ui_locked)
         st.markdown("---")
 
+        do_rent = _render_sidebar_rent_panel(ui_locked)
+        st.markdown("---")
+
         _render_sidebar_map_settings(ui_locked)
 
-        do_calc: bool = st.button(
-            "🧩 คำนวณหา Isochrone CBD",
-            type="primary",
-            use_container_width=True,
-            disabled=ui_locked,
-        )
-
-    return do_calc, do_network, active_list
+    return do_calc, do_network, do_rent, active_list
 
 
 def render_map() -> Optional[Dict[str, Any]]:
@@ -1547,6 +2123,21 @@ def render_map() -> Optional[Dict[str, Any]]:
         attr=style_conf["attr"],
     )
 
+    # ---- เครื่องมือสำรวจทำเล ----
+    Fullscreen(position="topleft").add_to(m)
+    MeasureControl(
+        position="topleft",
+        primary_length_unit="kilometers",
+        secondary_length_unit="meters",
+        primary_area_unit="sqmeters",
+    ).add_to(m)
+    MousePosition(
+        position="bottomright",
+        separator=" , ",
+        num_digits=5,
+        prefix="พิกัด:",
+    ).add_to(m)
+
     # ---- Traffic overlay ----
     if st.session_state.show_traffic:
         folium.TileLayer(
@@ -1554,6 +2145,62 @@ def render_map() -> Optional[Dict[str, Any]]:
             attr="Google Traffic",
             name="Google Traffic",
             overlay=True,
+        ).add_to(m)
+
+    # ---- Rent Gradient Layers (วาดก่อนเพื่อให้อยู่ใต้เลเยอร์วิเคราะห์อื่น) ----
+    rent_data = StateManager.get_rent_data()
+    rent_model = None
+    rent_anchor = None
+    if rent_data and "error" not in rent_data:
+        rent_model = rent_data["model"]
+        rent_anchor = rent_data["anchor"]
+
+        if st.session_state.show_rent_rings and rent_data.get("rings_geojson"):
+            folium.GeoJson(
+                rent_data["rings_geojson"],
+                name="Rent Gradient Rings",
+                style_function=lambda x: {
+                    "fillColor": x["properties"]["color"],
+                    "color": x["properties"]["color"],
+                    "weight": 1,
+                    "fillOpacity": RENT_CONFIG["ring_fill_opacity"],
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["band", "rent_label"],
+                    aliases=["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"],
+                    localize=True,
+                ),
+            ).add_to(m)
+
+        if st.session_state.show_rent_nodes and rent_data.get("rent_nodes_geojson"):
+            folium.GeoJson(
+                rent_data["rent_nodes_geojson"],
+                name="Rent Heat (Nodes)",
+                marker=folium.CircleMarker(),
+                style_function=lambda x: {
+                    "fillColor": x["properties"]["color"],
+                    "color": x["properties"]["color"],
+                    "weight": 1,
+                    "radius": 3,
+                    "fillOpacity": 0.85,
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["rent"],
+                    aliases=["ค่าเช่าคาดการณ์:"],
+                    localize=True,
+                ),
+            ).add_to(m)
+
+        # จุดยึด CBD ของโมเดล
+        folium.Marker(
+            [rent_anchor["lat"], rent_anchor["lon"]],
+            tooltip=f"จุดยึด CBD — {rent_anchor['source']}",
+            popup=folium.Popup(
+                f"<b>CBD Anchor</b><br>{rent_anchor['source']}<br>"
+                f"R₀ = {format_rent_value(rent_model['r0'], rent_model)}",
+                max_width=260,
+            ),
+            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
         ).add_to(m)
 
     # ---- Network Analysis Layers ----
@@ -1692,9 +2339,19 @@ def render_map() -> Optional[Dict[str, Any]]:
     # ---- Markers ----
     for i, marker in enumerate(markers):
         active = marker.get("active", True)
+        popup_html = f"<b>จุดที่ {i+1}</b>"
+        if rent_model and rent_anchor:
+            d_km = haversine_km(
+                rent_anchor["lat"], rent_anchor["lon"], marker["lat"], marker["lng"]
+            )
+            est = predict_rent(d_km, rent_model["r0"], rent_model["lam"])
+            popup_html += (
+                f"<br>ระยะจาก CBD: {d_km:.2f} km"
+                f"<br>ประเมิน: {format_rent_value(est, rent_model)}"
+            )
         folium.Marker(
             [marker["lat"], marker["lng"]],
-            popup=f"จุดที่ {i+1}",
+            popup=folium.Popup(popup_html, max_width=260),
             icon=folium.Icon(
                 color=MARKER_COLORS[i % len(MARKER_COLORS)] if active else "gray",
                 icon="map-marker" if active else "ban",
@@ -1703,7 +2360,282 @@ def render_map() -> Optional[Dict[str, Any]]:
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
-    return st_folium(m, height=900, use_container_width=True, key="main_map")
+    _add_map_legend(m)
+
+    # returned_objects จำกัดเฉพาะ last_clicked → เลื่อน/ซูมแผนที่ไม่ trigger
+    # Streamlit rerun ทั้งหน้า (เร็วขึ้นมากบน Streamlit Cloud)
+    return st_folium(
+        m,
+        height=900,
+        use_container_width=True,
+        key="main_map",
+        returned_objects=["last_clicked"],
+    )
+
+
+def render_header() -> None:
+    """หัวเรื่อง + สรุปหลักการของหน้าแบบย่อ."""
+    st.markdown("#### 💹 Rent Gradient — Bid-Rent CBD Analysis")
+    st.caption(
+        "① ปักหมุด → ② Isochrone หา CBD → ③ Network Analysis หา Golden Spots → "
+        "④ Rent Gradient ประเมินราคา ตามทฤษฎี Alonso-Muth-Mills: R(d) = R₀·e^(−λd)"
+    )
+
+
+def render_metrics_row() -> None:
+    """แถวตัวชี้วัดสรุปเหนือแผนที่."""
+    active_n = len(StateManager.get_active_markers())
+    inter_data = StateManager.get_intersection_data()
+    net_data = StateManager.get_network_data()
+    rent_data = StateManager.get_rent_data()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📍 หมุด Active", active_n)
+
+    cbd_txt = "—"
+    if inter_data:
+        feats = inter_data.get("features") or []
+        area = approx_geom_area_km2(feats[0]["geometry"]) if feats else None
+        cbd_txt = f"{area:.2f} km²" if area is not None else "พบแล้ว"
+    c2.metric("🎯 CBD Zone", cbd_txt)
+
+    net_txt = "—"
+    if net_data and "error" not in net_data:
+        stats = net_data.get("stats", {})
+        net_txt = f"{stats.get('nodes_count', 0):,} โหนด"
+    c3.metric("🕸️ Network", net_txt)
+
+    lam_txt, half_txt = "—", "—"
+    if rent_data and "error" not in rent_data:
+        model = rent_data["model"]
+        lam_txt = f"{model['lam']:.4f}/km"
+        half = model.get("half_dist_km")
+        half_txt = f"{half:.2f} km" if half else "∞"
+    c4.metric("📉 λ (Rent Gradient)", lam_txt)
+    c5.metric("½ ราคา ที่ระยะ", half_txt)
+
+
+def _build_bid_rent_figure(rent_data: Dict[str, Any]):
+    """สร้างกราฟ Bid-Rent Curve (plotly) — โมเดล + จุดตัวอย่างจริง + เส้น d½."""
+    import plotly.graph_objects as go  # lazy import — โหลดเมื่อใช้จริงเท่านั้น
+
+    model = rent_data["model"]
+    curve = rent_data["curve"]
+    unit_text = "ดัชนีค่าเช่า (0–100)" if model["is_index"] else model["unit"]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=curve["d"],
+            y=curve["r"],
+            mode="lines",
+            name="Bid-Rent Curve (โมเดล)",
+            line=dict(color=CHART_COLOR_CURVE, width=2.5),
+            hovertemplate="ระยะ %{x:.2f} km<br>ค่าเช่า %{y:,.1f}<extra></extra>",
+        )
+    )
+
+    scatter = rent_data.get("samples_scatter") or []
+    if scatter:
+        fig.add_trace(
+            go.Scatter(
+                x=[p["d"] for p in scatter],
+                y=[p["rent"] for p in scatter],
+                mode="markers",
+                name="ตัวอย่างราคาจริง",
+                marker=dict(
+                    color=CHART_COLOR_SAMPLES,
+                    size=10,
+                    line=dict(color="#ffffff", width=1.5),
+                ),
+                hovertemplate="ระยะ %{x:.2f} km<br>ราคาจริง %{y:,.1f}<extra></extra>",
+            )
+        )
+
+    half = model.get("half_dist_km")
+    if half and half <= model["d_max_km"]:
+        fig.add_vline(
+            x=half,
+            line_dash="dash",
+            line_color=CHART_COLOR_MUTED,
+            annotation_text=f"d½ = {half:.2f} km",
+            annotation_font_color=CHART_COLOR_MUTED,
+        )
+
+    fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        xaxis=dict(
+            title="ระยะทางจาก CBD (km)",
+            gridcolor="rgba(137,135,129,0.25)",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title=unit_text,
+            gridcolor="rgba(137,135,129,0.25)",
+            zeroline=False,
+            rangemode="tozero",
+        ),
+        font=dict(size=13),
+    )
+    return fig
+
+
+def _build_golden_spots_df(
+    golden_spots: List[Dict[str, Any]],
+    rent_data: Optional[Dict[str, Any]],
+) -> pd.DataFrame:
+    """ตาราง Golden Spots — เสริมระยะจาก CBD, ราคาประเมิน และ Value Gap."""
+    has_rent = bool(rent_data and "error" not in rent_data)
+    rows = []
+    for i, s in enumerate(golden_spots, start=1):
+        row: Dict[str, Any] = {
+            "อันดับ": i,
+            "Score": round(s["score"], 4),
+            "Lat": round(s["lat"], 5),
+            "Lon": round(s["lon"], 5),
+            "Closeness": round(s.get("closeness_norm", 0.0), 3),
+            "Degree": round(s.get("degree_norm", 0.0), 3),
+        }
+        if has_rent:
+            model = rent_data["model"]
+            anchor = rent_data["anchor"]
+            d_km = haversine_km(anchor["lat"], anchor["lon"], s["lat"], s["lon"])
+            est = predict_rent(d_km, model["r0"], model["lam"])
+            rent_norm = max(0.0, min(1.0, est / model["r0"])) if model["r0"] else 0.0
+            row["ระยะจาก CBD (km)"] = round(d_km, 2)
+            row["ค่าเช่าคาดการณ์"] = round(est, 1)
+            # Value Gap: เข้าถึงง่าย (closeness สูง) แต่ราคายังต่ำ = โอกาส
+            row["Value Gap"] = round(s.get("closeness_norm", 0.0) - rent_norm, 3)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def render_analytics_panel() -> None:
+    """แท็บวิเคราะห์ใต้แผนที่: Bid-Rent Curve / Golden Spots / หมุด / หลักการ."""
+    rent_data = StateManager.get_rent_data()
+    net_data = StateManager.get_network_data()
+    has_rent = bool(rent_data and "error" not in rent_data)
+    golden_spots = (net_data or {}).get("golden_spots") if net_data else None
+    locked = st.session_state.get(StateManager.K_UI_LOCKED, False)
+
+    tab_curve, tab_gold, tab_marks, tab_theory = st.tabs(
+        ["📈 Bid-Rent Curve", "💎 Golden Spots", "📍 หมุด & ราคาประเมิน", "📐 หลักการ"]
+    )
+
+    with tab_curve:
+        if has_rent:
+            model = rent_data["model"]
+            st.plotly_chart(
+                _build_bid_rent_figure(rent_data),
+                use_container_width=True,
+                config={"displayModeBar": False},
+            )
+            eq_r0 = f"{model['r0']:,.1f}" if not model["is_index"] else f"{model['r0']:.0f}"
+            fit_txt = (
+                f" (fit จากตัวอย่าง {model['n_samples']} จุด, R² = {model['r2']:.3f})"
+                if model.get("r2") is not None
+                else " (โหมดดัชนี — ยังไม่ calibrate จากราคาจริง)"
+            )
+            st.caption(
+                f"R(d) = {eq_r0} × e^(−{model['lam']:.4f}·d)"
+                + fit_txt
+            )
+        else:
+            st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างเส้นโค้ง Bid-Rent", icon="💡")
+
+    with tab_gold:
+        if golden_spots:
+            df_gold = _build_golden_spots_df(golden_spots, rent_data)
+            st.dataframe(df_gold, use_container_width=True, hide_index=True)
+            if has_rent:
+                st.caption(
+                    "**Value Gap** = Closeness − (ค่าเช่าคาดการณ์/R₀) — "
+                    "ค่าบวกมาก = เข้าถึงง่ายแต่ราคายังต่ำ (โอกาส 'ก่อนคนรู้')"
+                )
+
+            c1, c2, _sp = st.columns([0.3, 0.3, 0.4])
+            csv_bytes = df_gold.to_csv(index=False).encode("utf-8-sig")
+            c1.download_button(
+                "⬇ ดาวน์โหลด CSV",
+                csv_bytes,
+                "golden_spots.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+            rank = c2.selectbox(
+                "เพิ่มอันดับลงแผนที่",
+                list(range(1, len(golden_spots) + 1)),
+                label_visibility="collapsed",
+                format_func=lambda r: f"➕ เพิ่มอันดับ {r} ลงแผนที่",
+            )
+            if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
+                spot = golden_spots[rank - 1]
+                StateManager.add_marker(spot["lat"], spot["lon"])
+                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                st.toast(f"เพิ่ม Golden Spot อันดับ {rank} แล้ว! กรุณากดคำนวณใหม่", icon="💎")
+                st.rerun()
+        else:
+            st.info("รัน **🚀 Network Analysis** เพื่อค้นหาทำเลที่ดินทอง", icon="💡")
+
+    with tab_marks:
+        markers = StateManager.get_markers()
+        if markers:
+            rows = []
+            for i, mk in enumerate(markers, start=1):
+                row: Dict[str, Any] = {
+                    "จุดที่": i,
+                    "สถานะ": "✅ Active" if mk.get("active", True) else "⏸ ปิด",
+                    "Lat": round(mk["lat"], 5),
+                    "Lon": round(mk["lng"], 5),
+                }
+                if has_rent:
+                    model = rent_data["model"]
+                    anchor = rent_data["anchor"]
+                    d_km = haversine_km(anchor["lat"], anchor["lon"], mk["lat"], mk["lng"])
+                    row["ระยะจาก CBD (km)"] = round(d_km, 2)
+                    row["ค่าเช่าคาดการณ์"] = format_rent_value(
+                        predict_rent(d_km, model["r0"], model["lam"]), model
+                    )
+                rows.append(row)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            if not has_rent:
+                st.caption("คำนวณ Rent Gradient เพื่อดูราคาประเมินของแต่ละหมุด")
+        else:
+            st.info("ยังไม่มีหมุด — คลิกบนแผนที่หรือกรอกพิกัดใน sidebar", icon="📍")
+
+    with tab_theory:
+        st.markdown(
+            """
+##### 📐 หลักการของหน้านี้ (คงเดิม + ต่อยอด)
+
+**1) หา CBD ด้วย Isochrone Intersection** — พื้นที่ที่เดินทางถึงได้จากทุกหมุดภายในเวลาที่กำหนด
+คือย่านศูนย์กลางเชิงการเข้าถึง (Accessibility-based CBD)
+
+**2) Network Analysis (OSMnx)** — วัดความสำคัญของถนน/แยกด้วย Centrality:
+- *Betweenness* = ทางผ่านหลัก (traffic flow)
+- *Closeness* = จุดที่เข้าถึงทุกที่ได้ง่าย (integration hub)
+
+**3) สมการทำเลที่ดินทอง (หลักการเดิม)**
+`Score = 0.50×Closeness + 0.30×Degree + 0.20×(1−Betweenness)`
+— หาแยกที่เข้าถึงง่าย เชื่อมต่อดี แต่ยังไม่ใช่ทางผ่านพลุกพล่าน = "ก่อนคนรู้"
+
+**4) Rent Gradient / Bid-Rent (ต่อยอดตามทฤษฎี Alonso–Muth–Mills)**
+`R(d) = R₀ · e^(−λ·d)` — ค่าเช่า/มูลค่าที่ดินลดลงแบบ exponential ตามระยะ d จาก CBD
+- **λ** (rent gradient): อัตราการลดของราคาต่อ km — เมืองยิ่งกระจุก λ ยิ่งสูง
+- **d½ = ln2/λ**: ระยะที่ราคาเหลือครึ่งเดียว
+- ใส่ *ตัวอย่างราคาจริง* ≥ 2 จุด ระบบจะ fit λ, R₀ ด้วย log-linear OLS พร้อมค่า R²
+- ไม่มีตัวอย่าง → แสดงเป็น *ดัชนี 0–100* เทียบสัมพัทธ์ภายในพื้นที่ศึกษา
+
+**ข้อจำกัด**: ระยะทางใช้เส้นตรง (ไม่ใช่ระยะถนน), โมเดล monocentric (CBD เดียว),
+คุณภาพขึ้นกับข้อมูล OSM และตัวอย่างราคาที่กรอก — ใช้เป็นเครื่องมือคัดกรองเบื้องต้น
+ไม่ใช่ราคาประเมินทางการ
+            """
+        )
 
 
 # ============================================================================
@@ -1783,6 +2715,9 @@ def perform_calculation(
         else:
             StateManager.set_intersection_data(None)
             st.toast("⚠️ ไม่พบพื้นที่ทับซ้อน", icon="⚠️")
+
+        # Rent Gradient ผูกกับ CBD ใหม่ — รีเฟรชอัตโนมัติ (pure math, เร็วมาก)
+        perform_rent_gradient(quiet=True)
 
 
 def _run_network_analysis_with_progress(
@@ -1879,12 +2814,45 @@ def perform_network_analysis() -> None:
                 )
                 st.toast(f"✅ Analysis Completed! {score_info}", icon="🏆")
 
+                # มีโหนดถนนแล้ว — รีเฟรช Rent Gradient เพื่อสร้าง Rent Heat
+                if StateManager.get_rent_data() is not None:
+                    perform_rent_gradient(quiet=True)
+
         except Exception as e:
             st.error(f"❌ Processing Error: {e}")
             st.info(
                 "💡 If the error persists, try a different location "
                 "or smaller time intervals."
             )
+
+
+def perform_rent_gradient(quiet: bool = False) -> None:
+    """Orchestrate Rent Gradient computation (pure math — ไม่มี API call)."""
+    iso_data = StateManager.get_isochrone_data()
+    if not iso_data:
+        if not quiet:
+            st.error("❌ กรุณาคำนวณ Isochrone ก่อน เพื่อกำหนดขอบเขตพื้นที่")
+        return
+
+    data = compute_rent_gradient_data(
+        StateManager.get_intersection_data(),
+        StateManager.get_network_data(),
+        iso_data,
+        StateManager.get_markers(),
+        StateManager.get_rent_samples(),
+        StateManager.get_rent_unit(),
+    )
+    if "error" in data:
+        StateManager.set_rent_data(None)
+        if not quiet:
+            st.error(f"❌ {data['error']}")
+        return
+
+    StateManager.set_rent_data(data)
+    if not quiet:
+        model = data["model"]
+        mode = "โหมดดัชนี" if model["is_index"] else f"calibrated, R²={model['r2']:.3f}"
+        st.toast(f"💰 Rent Gradient พร้อม ({mode}) λ={model['lam']:.4f}", icon="✅")
 
 
 def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None:
@@ -1901,7 +2869,7 @@ def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None
     if should_add_marker(clicked["lat"], clicked["lng"], last):
         StateManager.add_marker(clicked["lat"], clicked["lng"])
         StateManager.record_click(clicked["lat"], clicked["lng"])
-        StateManager.clear_results(["isochrone", "intersection"])
+        StateManager.clear_results(["isochrone", "intersection", "rent"])
         st.rerun()
 
 
@@ -1927,7 +2895,7 @@ def main() -> None:
     StateManager.initialize()
 
     # 2. Render Sidebar → capture user intents
-    do_calc, do_net, active_list = render_sidebar()
+    do_calc, do_net, do_rent, active_list = render_sidebar()
 
     # 3. Execute Business Logic (based on user intents)
     if do_calc:
@@ -1936,8 +2904,14 @@ def main() -> None:
     if do_net:
         perform_network_analysis()
 
-    # 4. Render Map
+    if do_rent:
+        perform_rent_gradient()
+
+    # 4. Render Header + Metrics + Map + Analytics
+    render_header()
+    render_metrics_row()
     map_output = render_map()
+    render_analytics_panel()
 
     # 5. Handle Map Click → mutate state & rerun
     handle_map_click(map_output, st.session_state[StateManager.K_UI_LOCKED])
