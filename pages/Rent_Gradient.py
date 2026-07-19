@@ -38,6 +38,15 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 from math import radians, sin, cos, sqrt, atan2, log, exp, pi
 
+# scipy เป็น optional accelerator สำหรับ closeness (fallback เป็น networkx ถ้าไม่มี)
+try:
+    import numpy as np
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
+    HAS_SCIPY: bool = True
+except Exception:
+    HAS_SCIPY = False
+
 
 # ============================================================================
 # SECTION 1: CONSTANTS & CONFIGURATION
@@ -121,6 +130,8 @@ NETWORK_CONFIG: Dict[str, Any] = {
     "click_distance_threshold_meters": 10,
     "large_graph_threshold": 2000,
     "betweenness_k_samples": 400,
+    "closeness_exact_threshold": 3000,
+    "closeness_k_pivots": 600,
     "golden_land_top_n": 10,
     "golden_land_weights": {
         "closeness": 0.50,
@@ -1330,6 +1341,84 @@ def _fetch_osm_graph(
         return None, False, f"Failed to fetch OSM graph: {str(e)}"
 
 
+def compute_weighted_closeness(
+    G_undir: nx.MultiGraph,
+) -> Tuple[Dict[Any, float], str]:
+    """
+    Weighted closeness centrality สำหรับหา CBD node (Network 1-Median).
+
+    หลักการ / สมการ:
+        v* = argmin_v Σ_u d_len(v,u)  ⟺  argmax C(v) = (N−1) / Σ_u d_len(v,u)
+        d_len = shortest path ถ่วงน้ำหนักด้วยความยาวถนนจริง (เมตร)
+
+    ความเสถียร: คำนวณเฉพาะ Largest Connected Component (LCC) —
+    โหนดนอก LCC ได้ค่า 0 จึงไม่มีสิทธิ์เป็น top node — และใช้ seed คงที่
+    ทำให้ผลซ้ำได้ทุกครั้ง
+
+    ความเร็ว:
+      - N ≤ closeness_exact_threshold → exact ด้วย scipy.sparse.csgraph.dijkstra
+      - N มากกว่า → Eppstein–Wang pivot sampling (k pivots, seed=42):
+            Ĉ(v) = k / Σ_{p∈pivots} d_len(v,p)   (error ~ O(1/√k))
+      - ไม่มี scipy → fallback nx.closeness_centrality(distance="length")
+
+    Returns:
+        ``(closeness_dict, method)`` โดย method ∈
+        {"exact-scipy", "pivot-approx", "networkx-fallback", "trivial"}
+    """
+    closeness: Dict[Any, float] = {node: 0.0 for node in G_undir.nodes}
+    if len(G_undir) < 2:
+        return closeness, "trivial"
+
+    lcc_nodes = max(nx.connected_components(G_undir), key=len)
+    n = len(lcc_nodes)
+    if n < 2:
+        return closeness, "trivial"
+    G_lcc = G_undir.subgraph(lcc_nodes)
+
+    if not HAS_SCIPY:
+        closeness.update(nx.closeness_centrality(G_lcc, distance="length"))
+        return closeness, "networkx-fallback"
+
+    # สร้าง sparse adjacency (เก็บ min length เมื่อมี parallel edges)
+    nodelist = list(G_lcc.nodes)
+    idx = {node: i for i, node in enumerate(nodelist)}
+    best_len: Dict[Tuple[int, int], float] = {}
+    for u, v, length in G_lcc.edges(data="length", default=1.0):
+        if u == v:
+            continue
+        a, b = idx[u], idx[v]
+        if a > b:
+            a, b = b, a
+        L = float(length)
+        if L < best_len.get((a, b), float("inf")):
+            best_len[(a, b)] = L
+
+    rows = np.fromiter((k[0] for k in best_len), dtype=np.int32, count=len(best_len))
+    cols = np.fromiter((k[1] for k in best_len), dtype=np.int32, count=len(best_len))
+    vals = np.fromiter(best_len.values(), dtype=np.float64, count=len(best_len))
+    csr = csr_matrix((vals, (rows, cols)), shape=(n, n))
+
+    if n <= NETWORK_CONFIG["closeness_exact_threshold"]:
+        dist = csgraph_dijkstra(csr, directed=False)
+        sums = dist.sum(axis=1)
+        k_eff = n - 1
+        method = "exact-scipy"
+    else:
+        k = min(NETWORK_CONFIG["closeness_k_pivots"], n)
+        rng = np.random.default_rng(42)
+        pivots = rng.choice(n, size=k, replace=False)
+        dist = csgraph_dijkstra(csr, directed=False, indices=pivots)
+        sums = dist.sum(axis=0)
+        k_eff = k
+        method = "pivot-approx"
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scores = np.where(np.isfinite(sums) & (sums > 0), k_eff / sums, 0.0)
+    for i, node in enumerate(nodelist):
+        closeness[node] = float(scores[i])
+    return closeness, method
+
+
 def _compute_centrality_impl(
     polygon_wkt_str: str, network_type: str = "drive"
 ) -> Dict[str, Any]:
@@ -1354,14 +1443,15 @@ def _compute_centrality_impl(
     node_count = len(G.nodes)
     is_large_graph = node_count > NETWORK_CONFIG["large_graph_threshold"]
 
-    # Closeness centrality
-    closeness_cent: Dict[Any, float] = nx.closeness_centrality(G)
+    G_undir = G.to_undirected()
+
+    # Closeness centrality — weighted 1-median บน LCC (แม่น/เสถียร/เร็ว)
+    closeness_cent, closeness_method = compute_weighted_closeness(G_undir)
     max_close = max(closeness_cent.values()) if closeness_cent else 1.0
 
     # Betweenness centrality (on undirected projection)
     # กราฟใหญ่: ประมาณค่าด้วย k-source sampling (เร็วขึ้นหลายสิบเท่า,
     # อันดับความสำคัญของถนนแทบไม่เปลี่ยน) — seed คงที่เพื่อผลซ้ำได้
-    G_undir = G.to_undirected()
     if is_large_graph:
         k_samples = min(NETWORK_CONFIG["betweenness_k_samples"], node_count)
         betweenness_cent: Dict[Any, float] = nx.edge_betweenness_centrality(
@@ -1473,6 +1563,7 @@ def _compute_centrality_impl(
             "nodes_count": len(G.nodes),
             "edges_count": len(G.edges),
             "used_approximation": is_large_graph,
+            "closeness_method": closeness_method,
             "was_cached": was_cached,
         },
     }
@@ -1887,6 +1978,14 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
             st.caption(f"Score: {top['score']:.4f}")
             if stats.get("used_approximation"):
                 st.caption("⚡ *ใช้ Approximation (กราฟขนาดใหญ่)*")
+            closeness_method_labels = {
+                "exact-scipy": "🧭 Closeness: exact (scipy, ถ่วงน้ำหนักเมตร)",
+                "pivot-approx": "🧭 Closeness: pivot sampling (Eppstein–Wang)",
+                "networkx-fallback": "🧭 Closeness: networkx fallback (ไม่มี scipy)",
+            }
+            method_label = closeness_method_labels.get(stats.get("closeness_method"))
+            if method_label:
+                st.caption(method_label)
             st.code(f"{top['lat']:.5f}, {top['lon']:.5f}")
 
             if st.button(
