@@ -955,6 +955,173 @@ def build_rent_nodes_geojson(
     return {"type": "FeatureCollection", "features": out_features}
 
 
+# ------------------------------------------------- Ring Report (สรุปรายวงแหวน)
+
+def _ring_index_for_distance(
+    d_km: float, step_km: float, n_rings: int
+) -> Optional[int]:
+    """คืน index วงแหวน (0-based) ของระยะ d_km — ``None`` เมื่ออยู่นอกวงนอกสุด."""
+    if step_km <= 0 or d_km < 0:
+        return None
+    idx = int(d_km / step_km)
+    if idx >= n_rings:
+        # จุดที่อยู่บนขอบนอกสุดพอดีนับเป็นวงสุดท้าย
+        return n_rings - 1 if d_km <= step_km * n_rings + 1e-9 else None
+    return idx
+
+
+def count_nodes_per_ring(
+    nodes_geojson: Optional[Dict[str, Any]],
+    anchor_lat: float,
+    anchor_lon: float,
+    step_km: float,
+    n_rings: int,
+) -> Tuple[List[int], List[List[float]], int]:
+    """นับโหนดถนน (จาก Network Analysis) ต่อวงแหวน Rent Gradient.
+
+    Returns:
+        ``(counts, closeness_per_ring, outside_count)`` —
+        โหนดที่ไกลกว่าวงนอกสุด (เช่น anchor เลื่อนหลังคำนวณ network)
+        นับรวมใน ``outside_count`` เพื่อให้ยอดรวมครบทุกโหนด
+    """
+    counts: List[int] = [0] * n_rings
+    closeness_per_ring: List[List[float]] = [[] for _ in range(n_rings)]
+    outside = 0
+    for f in ((nodes_geojson or {}).get("features") or []):
+        try:
+            lon, lat = f["geometry"]["coordinates"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        idx = _ring_index_for_distance(
+            haversine_km(anchor_lat, anchor_lon, lat, lon), step_km, n_rings
+        )
+        if idx is None:
+            outside += 1
+            continue
+        counts[idx] += 1
+        closeness_per_ring[idx].append(
+            float((f.get("properties") or {}).get("closeness", 0.0))
+        )
+    return counts, closeness_per_ring, outside
+
+
+def build_ring_report(
+    rent_data: Optional[Dict[str, Any]],
+    network_data: Optional[Dict[str, Any]],
+    samples: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """สรุปรายวงแหวน Rent Gradient สำหรับ scan หาโซนซื้อที่ดิน (pure).
+
+    1 แถว = 1 วง: ช่วงระยะ, พื้นที่, ค่าเช่าคาดการณ์ และเมื่อมีผล Network
+    Analysis จะเติมจำนวนโหนด, ความหนาแน่น, Closeness, Golden Spots และ
+    Value Gap (= Closeness เฉลี่ย − ราคา normalize) ตามนิยามเดียวกับ
+    ตาราง Golden Spots — ค่าบวกมาก = เข้าถึงง่ายแต่ราคาคาดการณ์ยังต่ำ
+    """
+    if not rent_data or "error" in rent_data:
+        return []
+    ring_feats = (rent_data.get("rings_geojson") or {}).get("features") or []
+    if not ring_feats:
+        return []
+
+    model = rent_data["model"]
+    anchor = rent_data["anchor"]
+    n_rings = len(ring_feats)
+    d_max = model["d_max_km"]
+    step = d_max / n_rings
+    r0 = float(model.get("r0") or 0.0)
+
+    nodes_fc = None
+    if network_data and "error" not in network_data:
+        nodes_fc = network_data.get("nodes")
+    has_net = bool((nodes_fc or {}).get("features"))
+
+    counts, closeness_per_ring, outside_nodes = count_nodes_per_ring(
+        nodes_fc, anchor["lat"], anchor["lon"], step, n_rings
+    )
+    total_nodes = sum(counts) + outside_nodes
+
+    golden_per_ring: List[List[int]] = [[] for _ in range(n_rings)]
+    golden_spots = (network_data or {}).get("golden_spots") or []
+    for rank, spot in enumerate(golden_spots, start=1):
+        idx = _ring_index_for_distance(
+            haversine_km(anchor["lat"], anchor["lon"], spot["lat"], spot["lon"]),
+            step,
+            n_rings,
+        )
+        if idx is not None:
+            golden_per_ring[idx].append(rank)
+
+    samples_per_ring: List[int] = [0] * n_rings
+    for s in samples or []:
+        try:
+            d = haversine_km(
+                anchor["lat"], anchor["lon"], float(s["lat"]), float(s["lon"])
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        idx = _ring_index_for_distance(d, step, n_rings)
+        if idx is not None:
+            samples_per_ring[idx] += 1
+
+    rows: List[Dict[str, Any]] = []
+    for i, feat in enumerate(ring_feats):
+        props = feat.get("properties") or {}
+        r_in, r_out = step * i, step * (i + 1)
+        area_km2 = pi * (r_out ** 2 - r_in ** 2)
+        row: Dict[str, Any] = {
+            "วง": i + 1,
+            "ช่วงระยะจาก CBD": props.get("band", f"{r_in:.1f} – {r_out:.1f} km"),
+            "พื้นที่ (km²)": round(area_km2, 2),
+            "ค่าเช่าคาดการณ์": props.get(
+                "rent_label",
+                format_rent_value(
+                    predict_rent((r_in + r_out) / 2.0, r0, model["lam"]), model
+                ),
+            ),
+        }
+        if has_net:
+            n_in = counts[i]
+            cl = closeness_per_ring[i]
+            cl_mean = (sum(cl) / len(cl)) if cl else 0.0
+            rent_mid = float(props.get("rent_mid", 0.0))
+            rent_norm = max(0.0, min(1.0, rent_mid / r0)) if r0 > 0 else 0.0
+            row["โหนด Network"] = n_in
+            row["% โหนด"] = (
+                round(100.0 * n_in / total_nodes, 1) if total_nodes else 0.0
+            )
+            row["โหนด/km²"] = round(n_in / area_km2, 1) if area_km2 > 0 else 0.0
+            row["Closeness เฉลี่ย"] = round(cl_mean, 3)
+            row["Closeness สูงสุด"] = round(max(cl), 3) if cl else 0.0
+            row["Golden Spots"] = ", ".join(map(str, golden_per_ring[i])) or "—"
+            row["Value Gap"] = round(cl_mean - rent_norm, 3)
+        row["ตัวอย่างราคา"] = samples_per_ring[i]
+        rows.append(row)
+
+    # โหนดนอกวงนอกสุด — แสดงเป็นแถวสุดท้ายให้ยอดรวมโหนดครบ
+    if has_net and outside_nodes > 0:
+        rows.append(
+            {
+                "วง": "—",
+                "ช่วงระยะจาก CBD": f"> {d_max:.1f} km (นอกวงนอกสุด)",
+                "พื้นที่ (km²)": None,
+                "ค่าเช่าคาดการณ์": "นอกขอบเขตโมเดล",
+                "โหนด Network": outside_nodes,
+                "% โหนด": (
+                    round(100.0 * outside_nodes / total_nodes, 1)
+                    if total_nodes
+                    else 0.0
+                ),
+                "โหนด/km²": None,
+                "Closeness เฉลี่ย": None,
+                "Closeness สูงสุด": None,
+                "Golden Spots": "—",
+                "Value Gap": None,
+                "ตัวอย่างราคา": 0,
+            }
+        )
+    return rows
+
+
 def compute_rent_gradient_data(
     intersection_data: Optional[Dict[str, Any]],
     network_data: Optional[Dict[str, Any]],
@@ -1004,6 +1171,21 @@ def compute_rent_gradient_data(
     rent_nodes = build_rent_nodes_geojson(
         (network_data or {}).get("nodes"), anchor["lat"], anchor["lon"], r0, lam, d_max
     )
+
+    # เติมจำนวนโหนด Network ต่อวงลง tooltip ของ Rent Gradient Rings บนแผนที่
+    nodes_fc = (network_data or {}).get("nodes") if network_data and "error" not in network_data else None
+    ring_feats = rings["features"]
+    n_rings = len(ring_feats)
+    if nodes_fc and nodes_fc.get("features") and n_rings > 0:
+        ring_step = d_max / n_rings
+        node_counts, _closeness, _outside = count_nodes_per_ring(
+            nodes_fc, anchor["lat"], anchor["lon"], ring_step, n_rings
+        )
+        for feat, count in zip(ring_feats, node_counts):
+            feat["properties"]["nodes_label"] = f"{count:,} โหนด"
+    else:
+        for feat in ring_feats:
+            feat["properties"]["nodes_label"] = "—"
 
     return {
         "anchor": anchor,
@@ -2253,6 +2435,15 @@ def render_map() -> Optional[Dict[str, Any]]:
         rent_anchor = rent_data["anchor"]
 
         if st.session_state.show_rent_rings and rent_data.get("rings_geojson"):
+            ring_feats = rent_data["rings_geojson"].get("features") or []
+            has_nodes_label = bool(
+                ring_feats and "nodes_label" in ring_feats[0].get("properties", {})
+            )
+            tooltip_fields = ["band", "rent_label"]
+            tooltip_aliases = ["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"]
+            if has_nodes_label:
+                tooltip_fields.append("nodes_label")
+                tooltip_aliases.append("โหนด Network:")
             folium.GeoJson(
                 rent_data["rings_geojson"],
                 name="Rent Gradient Rings",
@@ -2263,8 +2454,8 @@ def render_map() -> Optional[Dict[str, Any]]:
                     "fillOpacity": RENT_CONFIG["ring_fill_opacity"],
                 },
                 tooltip=folium.GeoJsonTooltip(
-                    fields=["band", "rent_label"],
-                    aliases=["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"],
+                    fields=tooltip_fields,
+                    aliases=tooltip_aliases,
                     localize=True,
                 ),
             ).add_to(m)
@@ -2620,8 +2811,14 @@ def render_analytics_panel() -> None:
     golden_spots = (net_data or {}).get("golden_spots") if net_data else None
     locked = st.session_state.get(StateManager.K_UI_LOCKED, False)
 
-    tab_curve, tab_gold, tab_marks, tab_theory = st.tabs(
-        ["📈 Bid-Rent Curve", "💎 Golden Spots", "📍 หมุด & ราคาประเมิน", "📐 หลักการ"]
+    tab_curve, tab_rings, tab_gold, tab_marks, tab_theory = st.tabs(
+        [
+            "📈 Bid-Rent Curve",
+            "🧾 Ring Report",
+            "💎 Golden Spots",
+            "📍 หมุด & ราคาประเมิน",
+            "📐 หลักการ",
+        ]
     )
 
     with tab_curve:
@@ -2644,6 +2841,39 @@ def render_analytics_panel() -> None:
             )
         else:
             st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างเส้นโค้ง Bid-Rent", icon="💡")
+
+    with tab_rings:
+        if has_rent:
+            ring_rows = build_ring_report(
+                rent_data, net_data, StateManager.get_rent_samples()
+            )
+            has_net_cols = bool(net_data and "error" not in net_data and net_data.get("nodes", {}).get("features"))
+            df_rings = pd.DataFrame(ring_rows)
+            st.dataframe(df_rings, use_container_width=True, hide_index=True)
+
+            csv_bytes = df_rings.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇ ดาวน์โหลด CSV",
+                csv_bytes,
+                "ring_report.csv",
+                "text/csv",
+            )
+
+            if not has_net_cols:
+                st.info(
+                    "รัน **🚀 Network Analysis** เพื่อเติมจำนวนโหนด, Closeness "
+                    "และ Value Gap รายวง",
+                    icon="💡",
+                )
+            st.caption(
+                "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนนในวง · "
+                "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
+                "**Value Gap** = Closeness เฉลี่ย − (ค่าเช่าคาดการณ์/R₀) — "
+                "วงที่ Value Gap สูงคือวงที่โครงข่ายเข้าถึงดีแต่ราคาคาดการณ์ยังต่ำ "
+                "จึงควรไล่ scan หาแปลงในวงนั้นก่อน"
+            )
+        else:
+            st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างรายงานรายวง", icon="💡")
 
     with tab_gold:
         if golden_spots:
