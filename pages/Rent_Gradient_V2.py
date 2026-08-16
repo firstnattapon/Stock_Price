@@ -255,6 +255,16 @@ TRAVEL_MODE_TO_NETWORK_TYPE: Dict[str, str] = {
     "transit": "drive",  # OSMnx has no transit; fallback to drive
 }
 
+# Overpass API mirrors — ไล่ลองทีละตัวเมื่อตัวหลัก (overpass-api.de) เชื่อมต่อไม่ได้
+# (เช่น "Connection refused" จาก network policy/firewall ของเซิร์ฟเวอร์ที่รันแอปนี้,
+# rate limit, หรือ downtime ชั่วคราว) — base URL เท่านั้น osmnx จะเติม "/interpreter" เอง
+OVERPASS_MIRRORS: List[str] = [
+    "https://overpass-api.de/api",
+    "https://overpass.kumi.systems/api",
+    "https://overpass.osm.ch/api",
+    "https://overpass.private.coffee/api",
+]
+
 # Keys to persist in config file
 SESSION_KEYS_TO_SAVE: List[str] = [
     "api_key", "map_style_name", "travel_mode", "time_intervals",
@@ -2127,11 +2137,30 @@ def download_github_bundle() -> Tuple[Optional[bytes], Optional[str]]:
         return None, f"ดาวน์โหลด Bundle จาก GitHub ไม่สำเร็จ: {str(e)}"
 
 
+# Exceptions ที่ถือว่าเป็นปัญหา "เชื่อมต่อไม่ได้" (ควรลอง mirror ถัดไป)
+# ต่างจากปัญหา "ไม่มีข้อมูล"/"geometry ผิด" (ลอง mirror อื่นก็ไม่ช่วย)
+_OVERPASS_CONNECTIVITY_EXCEPTIONS: Tuple[type, ...] = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.RequestException,
+    ConnectionError,
+    OSError,
+)
+
+
 def _fetch_osm_graph(
     polygon_wkt_str: str, network_type: str
 ) -> Tuple[Optional[nx.MultiDiGraph], bool, Optional[str]]:
     """
     Fetch an OSM graph for a polygon, with disk-cache lookup.
+
+    ไล่ลอง Overpass API ทีละเซิร์ฟเวอร์ — เริ่มจาก Custom Overpass URL (ถ้าตั้งไว้ใน
+    sidebar ขั้นสูง) → mirror ที่เคยใช้สำเร็จล่าสุดในเซสชันนี้ (ลองก่อนเพื่อความเร็ว)
+    → ``OVERPASS_MIRRORS`` ตามลำดับ — ใช้ตอนตัวหลัก overpass-api.de เชื่อมต่อไม่ได้
+    (เช่น "Connection refused" จาก firewall/network policy, rate limit, downtime)
+
+    ไม่ retry ข้าม mirror เมื่อปัญหาคือ geometry ผิดหรือ "ไม่มีข้อมูลในพื้นที่นี้"
+    เพราะ mirror อื่นก็จะได้ผลเดียวกัน — retry เฉพาะปัญหาการเชื่อมต่อจริงๆ.
 
     Returns:
         ``(graph, was_cached, error_message)``
@@ -2139,26 +2168,56 @@ def _fetch_osm_graph(
     try:
         cache_key = get_cache_key(polygon_wkt_str, network_type)
         polygon_geom = wkt.loads(polygon_wkt_str)
-
-        G = load_graph_from_cache(cache_key)
-        if G is not None:
-            return G, True, None
-
-        G = ox.graph_from_polygon(
-            polygon_geom, network_type=network_type, truncate_by_edge=True
-        )
-        save_graph_to_cache(cache_key, G)
-        return G, False, None
-
-    except ValueError as e:
-        return None, False, f"Invalid geometry: {str(e)}"
-    except ox._errors.InsufficientResponseError:
-        return None, False, (
-            "No OSM data available for this area. "
-            "Try a different location or larger region."
-        )
     except Exception as e:
-        return None, False, f"Failed to fetch OSM graph: {str(e)}"
+        return None, False, f"Invalid geometry: {str(e)}"
+
+    G = load_graph_from_cache(cache_key)
+    if G is not None:
+        return G, True, None
+
+    custom_endpoint = (st.session_state.get("_custom_overpass_url") or "").strip()
+    last_working = st.session_state.get("_last_working_overpass_mirror")
+    ordered = (
+        ([custom_endpoint] if custom_endpoint else [])
+        + ([last_working] if last_working else [])
+        + OVERPASS_MIRRORS
+    )
+    seen: set = set()
+    mirrors = [m for m in ordered if m and not (m in seen or seen.add(m))]
+
+    connectivity_errors: List[str] = []
+    for mirror in mirrors:
+        try:
+            ox.settings.overpass_url = mirror
+            G = ox.graph_from_polygon(
+                polygon_geom, network_type=network_type, truncate_by_edge=True
+            )
+            save_graph_to_cache(cache_key, G)
+            st.session_state["_last_working_overpass_mirror"] = mirror
+            return G, False, None
+        except ValueError as e:
+            return None, False, f"Invalid geometry: {str(e)}"
+        except ox._errors.InsufficientResponseError:
+            return None, False, (
+                "No OSM data available for this area. "
+                "Try a different location or larger region."
+            )
+        except _OVERPASS_CONNECTIVITY_EXCEPTIONS as e:
+            host = mirror.split("//", 1)[-1].split("/", 1)[0]
+            connectivity_errors.append(f"{host}: {str(e).splitlines()[0][:120]}")
+            continue
+        except Exception as e:
+            # ข้อผิดพลาดอื่นที่ไม่ใช่ปัญหาการเชื่อมต่อ — เปลี่ยน mirror ไปก็ไม่ช่วย
+            return None, False, f"Failed to fetch OSM graph: {str(e)}"
+
+    tried = ", ".join(m.split("//", 1)[-1].split("/", 1)[0] for m in mirrors)
+    return None, False, (
+        f"เชื่อมต่อ Overpass API ไม่สำเร็จทั้งหมด {len(mirrors)} เซิร์ฟเวอร์ ({tried}). "
+        "อาการ 'Connection refused' มักเกิดจาก Firewall/Network Policy ของเซิร์ฟเวอร์ที่รันแอปนี้ "
+        "บล็อกการเชื่อมต่อขาออก (outbound) ไปยังโดเมนเหล่านี้โดยเฉพาะ ไม่ใช่ปัญหาเน็ตทั่วไป — "
+        "ลองตรวจสอบ Egress/Firewall rule ของเซิร์ฟเวอร์ หรือระบุ Custom Overpass URL ที่เข้าถึงได้ "
+        "เองใน 🚀 Network Analysis panel (ขั้นสูง)"
+    )
 
 
 def compute_weighted_closeness(
@@ -2809,6 +2868,24 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
         else:
             st.caption("📊 **Cache ว่างเปล่า**")
 
+        # ---- Overpass API (ขั้นสูง) ----
+        st.markdown("##### 🌐 Overpass API (ขั้นสูง)")
+        st.caption(
+            "หาก Network Analysis ล้มเหลวด้วย Connection Refused/Timeout ซ้ำๆ "
+            "ระบบจะไล่ลอง mirror สำรองให้อัตโนมัติ ("
+            + ", ".join(m.split("//", 1)[-1].split("/", 1)[0] for m in OVERPASS_MIRRORS)
+            + ") แต่ถ้าเครือข่ายของเซิร์ฟเวอร์บล็อกทุกโดเมนด้านบน ให้ระบุ Overpass "
+            "endpoint ที่เข้าถึงได้เองด้านล่าง (base URL ไม่ต้องมี /interpreter)"
+        )
+        st.text_input(
+            "Custom Overpass URL (ไม่บังคับ)",
+            key="_custom_overpass_url",
+            placeholder="เช่น https://overpass.example.com/api",
+            disabled=locked,
+        )
+        last_working = st.session_state.get("_last_working_overpass_mirror")
+        if last_working:
+            st.caption(f"🟢 mirror ที่ใช้งานล่าสุด: `{last_working}`")
 
         st.markdown("---")
         do_network: bool = st.button(
@@ -4278,12 +4355,25 @@ def perform_network_analysis() -> None:
 
             if "error" in result:
                 st.error(f"❌ Network Analysis Failed: {result['error']}")
-                st.info(
-                    "💡 **Tips:**\n"
-                    "- Try a larger area\n"
-                    "- Check if the location has road data in OpenStreetMap\n"
-                    "- Verify internet connection"
-                )
+                if "Overpass API ไม่สำเร็จ" in result["error"] or "Connection" in result["error"]:
+                    st.info(
+                        "💡 **Tips (ปัญหาการเชื่อมต่อ Overpass API):**\n"
+                        "- ระบบลอง mirror สำรองให้อัตโนมัติแล้ว — ถ้ายังไม่สำเร็จทั้งหมด "
+                        "มักแปลว่าเซิร์ฟเวอร์ที่รันแอปนี้ถูก Firewall/Network Policy บล็อก "
+                        "outbound ไปยังโดเมน Overpass ทุกตัว\n"
+                        "- ลองใส่ Custom Overpass URL ในช่อง 'Overpass API (ขั้นสูง)' "
+                        "ด้านบน หากมี endpoint ที่เข้าถึงได้เอง (เช่น self-hosted หรือ "
+                        "ผ่าน proxy ขององค์กร)\n"
+                        "- ตรวจสอบว่าเซิร์ฟเวอร์อนุญาต outbound HTTPS ไปยังพอร์ต 443 "
+                        "ของโดเมนเหล่านี้ในการตั้งค่า Firewall/Security Group"
+                    )
+                else:
+                    st.info(
+                        "💡 **Tips:**\n"
+                        "- Try a larger area\n"
+                        "- Check if the location has road data in OpenStreetMap\n"
+                        "- Verify internet connection"
+                    )
             else:
                 StateManager.set_network_data(result)
                 score_info = (
