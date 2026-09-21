@@ -25,6 +25,7 @@ shapely
 networkx
 osmnx
 scipy
+pyproj>=3.6
 paho-mqtt
 mpy-cross>=1.27.0
 networkx>=3.2

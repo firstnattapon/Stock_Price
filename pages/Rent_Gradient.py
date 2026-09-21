@@ -38,6 +38,9 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 from math import radians, sin, cos, sqrt, atan2, log, exp, pi
 
+# Automated CBD search uses metric coordinates, independent of map projection.
+from pyproj import CRS, Transformer
+
 # scipy เป็น optional accelerator สำหรับ closeness (fallback เป็น networkx ถ้าไม่มี)
 try:
     import numpy as np
@@ -140,6 +143,17 @@ NETWORK_CONFIG: Dict[str, Any] = {
     },
 }
 
+ANCHOR_CONFIG: Dict[str, Any] = {
+    "initial_radius_m": 4000.0,
+    "final_radius_m": 150.0,
+    "buffer_ratio": 0.20,
+    "density_radius_m": 500.0,
+    "max_iterations": 80,
+    "max_evaluations": 2048,
+    "max_nodes": 100000,
+    "batch_size": 16,
+}
+
 # Rent Gradient (Bid-Rent Model: Alonso-Muth-Mills) Configuration
 # หลักการ: ค่าเช่า/มูลค่าที่ดินลดลงแบบ negative exponential ตามระยะจาก CBD
 #   R(d) = R₀ · e^(−λ·d)
@@ -189,6 +203,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_traffic", "colors", "show_betweenness", "show_closeness",
     "show_railway", "show_golden_spots",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
+    "anchor_lat", "anchor_lon", "anchor_radius_km", "anchor_seed", "anchor_restarts",
 ]
 
 # Keys to persist as precomputed outputs (avoid recalculation after import)
@@ -197,6 +212,7 @@ RESULT_KEYS_TO_SAVE: List[str] = [
     "intersection_data",
     "network_data",
     "rent_gradient_data",
+    "automated_anchor_data",
 ]
 
 # GitHub Cache Repository Configuration
@@ -244,6 +260,7 @@ class StateManager:
     K_SHOW_RENT_RINGS: str = "show_rent_rings"
     K_SHOW_RENT_NODES: str = "show_rent_nodes"
     K_RENT_UNIT: str = "rent_unit_label"
+    K_AUTO_ANCHOR: str = "automated_anchor_data"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -277,6 +294,12 @@ class StateManager:
         K_SHOW_RENT_RINGS: True,
         K_SHOW_RENT_NODES: False,
         K_RENT_UNIT: "บาท/ตร.ว./เดือน",
+        K_AUTO_ANCHOR: None,
+        "anchor_lat": DEFAULT_CONFIG["LAT"],
+        "anchor_lon": DEFAULT_CONFIG["LON"],
+        "anchor_radius_km": 10.0,
+        "anchor_seed": 42,
+        "anchor_restarts": 4,
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -454,7 +477,11 @@ class StateManager:
                     ``None`` clears all.
         """
         if layers is None:
-            layers = ["isochrone", "intersection", "network", "rent"]
+            layers = ["isochrone", "intersection", "network", "rent", "anchor"]
+
+        if "anchor" in layers:
+            st.session_state[cls.K_AUTO_ANCHOR] = None
+            st.session_state[cls.K_RENT_DATA] = None
 
         if "isochrone" in layers:
             st.session_state[cls.K_ISOCHRONE] = None
@@ -524,6 +551,242 @@ class StateManager:
 # ============================================================================
 
 # --------------------------------------------------------------------- Geometry
+def _anchor_projection(lat: float, lon: float) -> Transformer:
+    """Local azimuthal equidistant coordinates in metres."""
+    if not (-85 <= lat <= 85 and -180 <= lon <= 180):
+        raise ValueError("Study centre requires latitude ±85° and longitude ±180°.")
+    local = CRS.from_proj4(
+        f"+proj=aeqd +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m"
+    )
+    return Transformer.from_crs("EPSG:4326", local, always_xy=True)
+
+
+def anchor_study_polygon(lat: float, lon: float, radius_m: float):
+    """Download footprint with 20% buffer, independent of seed and isochrones."""
+    from shapely.geometry import Point
+    from shapely.ops import transform
+    from pyproj.enums import TransformDirection
+
+    if not 1000 <= radius_m <= 20000:
+        raise ValueError("Study radius must be between 1 and 20 km.")
+    projection = _anchor_projection(lat, lon)
+    polygon = transform(
+        lambda x, y: projection.transform(x, y, direction=TransformDirection.INVERSE),
+        Point(0, 0).buffer(radius_m * (1 + ANCHOR_CONFIG["buffer_ratio"]), quad_segs=64),
+    )
+    if not polygon.is_valid or polygon.bounds[2] - polygon.bounds[0] > 180:
+        raise ValueError("Study areas crossing the antimeridian are not supported.")
+    return polygon
+
+
+def automated_coarse_to_fine_anchor(
+    graph: nx.MultiDiGraph,
+    study_center: Tuple[float, float],
+    study_radius_m: float = 10000.0,
+    random_seed: int = 42,
+    restarts: int = 4,
+    initial_radius_m: float = 4000.0,
+    final_radius_m: float = 150.0,
+    max_iterations: int = 80,
+    max_evaluations: int = 2048,
+) -> Dict[str, Any]:
+    """Reproducible ARPS on a fixed buffered WGS84 road graph, without I/O.
+
+    Exact length-weighted SciPy Dijkstra uses the largest undirected component:
+    this is street accessibility, not a driving/one-way routing model. Parallel
+    and reverse edges use minimum length. Destinations and anchors lie inside
+    the study circle; paths may use buffer nodes. Junctions have >=3 distinct
+    neighbours; density counts them within 500 metric metres (no POI data).
+    Seeds/probes/anchors use junctions when available, otherwise road nodes
+    with an explicit warning. All inside road nodes remain destinations.
+
+    Score = .5*C/(C+1/study_radius) + .3*degree/max_degree
+            + .2*density/max_density. Normalisers are fixed across all probes.
+    Each seeded restart scans eight bearings, climbs strictly uphill, then
+    halves the radius on a plateau. The final neighbourhood is evaluated
+    exhaustively with exact shortest paths. If every eligible node fits the
+    evaluation budget, a final exhaustive audit certifies the global score
+    maximum independently of the seed. Otherwise convergence is only local.
+    Neither certificate proves an economic CBD. Resource exhaustion is explicit.
+    """
+    if not HAS_SCIPY:
+        raise RuntimeError("Automated CBD search requires SciPy and NumPy.")
+    from scipy.spatial import cKDTree
+
+    started = time.perf_counter()
+    anchor_study_polygon(*study_center, study_radius_m)
+    if not (0 < final_radius_m <= initial_radius_m <= study_radius_m):
+        raise ValueError("Require 0 < final radius <= initial radius <= study radius.")
+    if not (1 <= restarts <= 50 and 1 <= max_iterations <= 500
+            and 1 <= max_evaluations <= 10000):
+        raise ValueError("Invalid restart, iteration or evaluation limit.")
+    if not 2 <= len(graph) <= ANCHOR_CONFIG["max_nodes"]:
+        raise ValueError("Road graph must contain 2–100,000 nodes; reduce the study area.")
+    if CRS.from_user_input(graph.graph.get("crs", "EPSG:4326")) != CRS.from_epsg(4326):
+        raise ValueError("Road graph must use WGS84 longitude/latitude (EPSG:4326).")
+    roads = nx.Graph()
+    roads.add_nodes_from(graph.nodes(data=True))
+    for u, v, attrs in graph.edges(data=True):
+        if u == v:
+            continue
+        try:
+            length = float(attrs["length"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Every road edge must have length in metres.") from exc
+        if not np.isfinite(length) or length <= 0:
+            raise ValueError("Road lengths must be finite and positive.")
+        if not roads.has_edge(u, v) or length < roads[u][v]["length"]:
+            roads.add_edge(u, v, length=length)
+    node_key = lambda node: (type(node).__name__, str(node))
+    components = sorted(nx.connected_components(roads),
+                        key=lambda c: (-len(c), min(node_key(n) for n in c)))
+    roads = roads.subgraph(components[0])
+    nodes = sorted(roads, key=node_key)
+    if len(nodes) < 2:
+        raise ValueError("No connected roads available in the study area.")
+    index = {node: i for i, node in enumerate(nodes)}
+    try:
+        lonlat = np.array([(float(roads.nodes[n]["x"]), float(roads.nodes[n]["y"]))
+                           for n in nodes])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Every road node requires WGS84 x/y coordinates.") from exc
+    if (not np.isfinite(lonlat).all() or (np.abs(lonlat[:, 0]) > 180).any()
+            or (np.abs(lonlat[:, 1]) > 90).any()):
+        raise ValueError("Invalid road node coordinates.")
+    projection = _anchor_projection(*study_center)
+    xy = np.column_stack(projection.transform(lonlat[:, 0], lonlat[:, 1]))
+    radial_distance = np.linalg.norm(xy, axis=1)
+    eligible = np.flatnonzero(radial_distance <= study_radius_m)
+    if len(eligible) < 2:
+        raise ValueError("Fewer than two connected road nodes inside the study circle.")
+    degrees = np.array([roads.degree(n) for n in nodes], dtype=float)
+    junctions = np.flatnonzero(degrees >= 3)
+    candidates_inside = eligible[degrees[eligible] >= 3]
+    junction_fallback = len(candidates_inside) == 0
+    if junction_fallback:
+        candidates_inside = eligible
+    tree = cKDTree(xy[candidates_inside])
+    density = np.zeros(len(nodes))
+    if len(junctions):
+        density = cKDTree(xy[junctions]).query_ball_point(
+            xy, ANCHOR_CONFIG["density_radius_m"], return_length=True
+        ).astype(float)
+    degree_norm = degrees / max(float(degrees[eligible].max()), 1.0)
+    density_norm = density / max(float(density[eligible].max()), 1.0)
+    rows, cols, values = [], [], []
+    for u, v, attrs in roads.edges(data=True):
+        a, b = index[u], index[v]
+        rows.extend((a, b))
+        cols.extend((b, a))
+        values.extend((attrs["length"], attrs["length"]))
+    matrix = csr_matrix((values, (rows, cols)), shape=(len(nodes), len(nodes)))
+    scores: Dict[int, Dict[str, Any]] = {}
+
+    def evaluate(candidates):
+        missing = sorted(set(int(i) for i in candidates) - scores.keys())
+        if len(scores) + len(missing) > max_evaluations:
+            raise ValueError("Search evaluation budget exceeded; reduce the area or restarts.")
+        for start in range(0, len(missing), ANCHOR_CONFIG["batch_size"]):
+            batch = missing[start:start + ANCHOR_CONFIG["batch_size"]]
+            distances = csgraph_dijkstra(matrix, directed=False, indices=batch)
+            closeness = (len(eligible) - 1) / distances[:, eligible].sum(axis=1)
+            for i, c in zip(batch, closeness):
+                cn = float(c / (c + 1.0 / study_radius_m))
+                scores[i] = {
+                    "score": 0.50 * cn + 0.30 * float(degree_norm[i])
+                             + 0.20 * float(density_norm[i]),
+                    "closeness": float(c), "closeness_norm": cn,
+                    "degree_norm": float(degree_norm[i]),
+                    "density_norm": float(density_norm[i]),
+                    "degree": int(degrees[i]), "junction_count": int(density[i]),
+                }
+
+    def best_of(candidates):
+        candidates = sorted(set(int(i) for i in candidates))
+        evaluate(candidates)
+        return max(candidates, key=lambda i: (scores[i]["score"], -i))
+
+    def location(i):
+        return {"node_id": str(nodes[i]), "lat": float(lonlat[i, 1]),
+                "lon": float(lonlat[i, 0]), **scores[i]}
+
+    rng = np.random.default_rng(random_seed)
+    seeds = rng.choice(candidates_inside, size=min(restarts, len(candidates_inside)), replace=False)
+    outcomes, trace, final_indices = [], [], []
+    for run, seed in enumerate(seeds):
+        current = int(seed)
+        evaluate([current])
+        radius, converged = float(initial_radius_m), False
+        for iteration in range(max_iterations):
+            previous = current
+            fine = radius <= final_radius_m
+            candidates = [current]
+            if fine:
+                candidates.extend(int(candidates_inside[j]) for j in tree.query_ball_point(
+                    xy[current], final_radius_m))
+            else:
+                for bearing in range(0, 360, 45):
+                    theta = radians(bearing)
+                    target = xy[current] + radius * np.array([sin(theta), cos(theta)])
+                    if np.linalg.norm(target) > study_radius_m:
+                        continue
+                    # Empty probes cannot snap to a distant, unrelated road.
+                    nearby = tree.query_ball_point(target, radius * 0.5)
+                    if nearby:
+                        j = min(nearby, key=lambda j: (
+                            float(np.linalg.norm(xy[candidates_inside[j]] - target)), int(candidates_inside[j])))
+                        candidates.append(int(candidates_inside[j]))
+            winner = best_of(candidates)
+            if scores[winner]["score"] > scores[current]["score"] + 1e-12:
+                current, action = winner, "move"
+            elif fine:
+                action, converged = "converged", True
+            else:
+                action = "contract"
+            trace.append({"restart": run, "iteration": iteration,
+                          "radius_m": radius, "action": action,
+                          "from_node_id": str(nodes[previous]), **location(current)})
+            if converged:
+                break
+            if action == "contract":
+                radius = max(final_radius_m, radius * 0.5)
+        final_indices.append(current)
+        outcomes.append({"seed": location(int(seed)), "anchor": location(current),
+                         "converged": converged, "iterations": iteration + 1,
+                         "final_radius_m": radius})
+    # Real-road trials expose local traps even after radial contraction. For
+    # affordable graphs, certify the objective globally rather than imply that
+    # convergence alone establishes seed robustness. Reuse all ARPS distances.
+    globally_certified = len(candidates_inside) <= max_evaluations
+    winner = best_of(candidates_inside if globally_certified else final_indices)
+    anchor = dict(location(winner), source="Automated CBD Anchor")
+    warnings = []
+    if not globally_certified:
+        warnings.append("กราฟเกินงบตรวจครบทุกโหนด: ยืนยันได้เฉพาะผลค้นหาเฉพาะที่ ไม่รับรอง global optimum")
+    if len(components) > 1:
+        warnings.append(f"ใช้ component ใหญ่ที่สุด; ตัด {len(graph) - len(nodes)} โหนดที่ไม่เชื่อมต่อ")
+    if not all(o["converged"] for o in outcomes):
+        warnings.append("บางจุดเริ่มต้นถึงขีดจำกัดรอบก่อนลู่เข้า; ผลเป็น best-so-far")
+    boundary_margin = float(study_radius_m - radial_distance[winner])
+    if boundary_margin < initial_radius_m:
+        warnings.append("Anchor ใกล้ขอบพื้นที่ศึกษา: ควรขยายพื้นที่แล้วเปรียบเทียบผล")
+    if junction_fallback:
+        warnings.append("ไม่พบทางแยกในพื้นที่ศึกษา: ใช้โหนดถนนทั่วไปเป็นผู้สมัคร Anchor แทน")
+    spread = max(calculate_distance_meters(anchor["lat"], anchor["lon"],
+                 o["anchor"]["lat"], o["anchor"]["lon"]) for o in outcomes)
+    return {"anchor": anchor, "converged": all(o["converged"] for o in outcomes),
+            "method": "arps-exact-scipy", "density_source": "road-junctions-only",
+            "globally_certified": globally_certified,
+            "certification": "exhaustive-fixed-objective" if globally_certified else "local-only",
+            "study_center": list(study_center), "study_radius_m": study_radius_m,
+            "random_seed": int(random_seed), "restarts": outcomes, "trace": trace,
+            "evaluated_nodes": len(scores), "graph_nodes": len(nodes),
+            "candidate_nodes": len(candidates_inside), "junction_fallback": junction_fallback,
+            "destination_nodes": len(eligible), "boundary_margin_m": boundary_margin,
+            "restart_max_distance_m": spread, "warnings": warnings,
+            "compute_seconds": time.perf_counter() - started}
+
+
 def get_fill_color(minutes: float, colors_config: Dict[str, str]) -> str:
     """Determine polygon fill colour based on travel-time bucket."""
     if minutes <= 10:
@@ -783,14 +1046,20 @@ def resolve_cbd_anchor(
     network_data: Optional[Dict[str, Any]],
     isochrone_data: Optional[Dict[str, Any]],
     markers: List[Dict[str, Any]],
+    automated_anchor: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     หาจุดยึด CBD สำหรับ Rent Gradient ตามลำดับความน่าเชื่อถือ:
+    0) Automated CBD Anchor ที่ผู้ใช้สั่งค้นหา
     1) centroid ของ CBD Zone (จุดตัด isochrone)
     2) Integration Center จาก Network Analysis
     3) centroid ของ Travel Areas ทั้งหมด
     4) ค่าเฉลี่ยตำแหน่งหมุดที่ active
     """
+    # An explicitly discovered road anchor takes precedence over polygon centroids.
+    if automated_anchor:
+        return dict(automated_anchor["anchor"])
+
     # 1) CBD intersection centroid
     try:
         feats = (intersection_data or {}).get("features") or []
@@ -1129,16 +1398,21 @@ def compute_rent_gradient_data(
     markers: List[Dict[str, Any]],
     samples: List[Dict[str, Any]],
     unit_label: str,
+    automated_anchor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     คำนวณ Rent Gradient ทั้งชุด (pure, JSON-serializable):
     anchor → fit/default model → rings + curve + rent heat.
     """
-    anchor = resolve_cbd_anchor(intersection_data, network_data, isochrone_data, markers)
+    anchor = resolve_cbd_anchor(
+        intersection_data, network_data, isochrone_data, markers, automated_anchor
+    )
     if anchor is None:
         return {"error": "ไม่พบจุดยึด CBD — กรุณาปักหมุดและคำนวณ Isochrone ก่อน"}
 
     d_max = isochrone_max_distance_km(anchor["lat"], anchor["lon"], isochrone_data)
+    if automated_anchor and not isochrone_data:
+        d_max = automated_anchor["study_radius_m"] / 1000.0
 
     fit = fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
     if fit is not None:
@@ -2236,6 +2510,66 @@ def _sync_rent_samples_from_editor(edited_df: "pd.DataFrame") -> None:
         StateManager.set_rent_samples(new_samples)
 
 
+def _anchor_search_context() -> Dict[str, Any]:
+    return {
+        "study_center": [st.session_state.anchor_lat, st.session_state.anchor_lon],
+        "study_radius_m": st.session_state.anchor_radius_km * 1000,
+        "random_seed": st.session_state.anchor_seed,
+        "restarts": st.session_state.anchor_restarts,
+        "network_type": TRAVEL_MODE_TO_NETWORK_TYPE.get(StateManager.get_travel_mode(), "drive"),
+    }
+
+
+def _render_sidebar_anchor_panel(locked: bool) -> bool:
+    with st.expander("🎯 Automated CBD Anchor", expanded=True):
+        st.caption("กำหนดพื้นที่ศึกษา แล้วสุ่มจุดบนถนนเพื่อค้นหา 8 ทิศ: 4 กม. → 150 ม.")
+        st.number_input("ศูนย์พื้นที่ศึกษา Lat", -85.0, 85.0,
+                        key="anchor_lat", format="%.6f", disabled=locked)
+        st.number_input("ศูนย์พื้นที่ศึกษา Lon", -180.0, 180.0,
+                        key="anchor_lon", format="%.6f", disabled=locked)
+        st.number_input("รัศมีพื้นที่ศึกษา (กม.)", 4.0, 20.0,
+                        key="anchor_radius_km", step=1.0, disabled=locked)
+        st.number_input("Random seed (ทำซ้ำได้)", 0, 2147483647,
+                        key="anchor_seed", disabled=locked)
+        st.number_input("จำนวนจุดเริ่มต้น", 1, 50, key="anchor_restarts", disabled=locked)
+        st.caption("คะแนน: 50% Closeness + 30% Degree + 20% ความหนาแน่นทางแยกใน 500 ม. "
+                   "ใช้ถนนแบบไม่แยกทิศทางและ buffer 20%; ไม่ต้องมี Isochrone หรือ API Key")
+        result = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+        if result and result.get("context") != _anchor_search_context():
+            StateManager.clear_results(["anchor"])
+            st.rerun()
+        run = st.button("🎯 ค้นหา CBD Anchor อัตโนมัติ", disabled=locked or not HAS_SCIPY,
+                        use_container_width=True)
+        if not HAS_SCIPY:
+            st.error("กรุณาติดตั้ง scipy และ numpy เพื่อค้นหา Anchor")
+        if result:
+            anchor = result["anchor"]
+            st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
+            st.caption(f"Score {anchor['score']:.4f} · {result['evaluated_nodes']} โหนดที่ประเมิน · "
+                       f"คำนวณ {result['compute_seconds']:.2f} วินาที · "
+                       f"รวมโหลดข้อมูล {result['total_seconds']:.2f} วินาที")
+            st.caption("ตรวจคะแนนครบทุกโหนด: ยืนยันคะแนนสูงสุดในพื้นที่ศึกษาแล้ว"
+                       if result.get("globally_certified") else "ยังไม่ยืนยันคะแนนสูงสุดทั้งพื้นที่ศึกษา")
+            st.write(f"ระยะห่างสูงสุดจากผลเฉพาะที่แต่ละจุดเริ่มต้นถึง Anchor สุดท้าย: "
+                     f"{result['restart_max_distance_m']:.1f} ม.")
+            for warning in result["warnings"]:
+                st.warning(warning)
+            st.caption("150 ม. คือรัศมีค้นหาขั้นสุดท้าย ไม่ใช่ค่าความคลาดเคลื่อนที่ยืนยันแล้ว "
+                       "ความหนาแน่นทางแยกเป็นตัวแทนโครงสร้างเมือง; ต้องเทียบ CBD จริงเพื่อวัดความแม่นยำ")
+            fit = result.get("rent_fit_comparison")
+            if fit:
+                st.caption(f"R² ขณะค้นหา (log-rent): จุดสุ่มแรก {fit['seed_r2']:.3f} → "
+                           f"Anchor {fit['anchor_r2']:.3f}; ΔR²={fit['delta_r2']:+.3f} "
+                           "(เป็นการเปรียบเทียบ fit ไม่ใช่การทดสอบนัยสำคัญ)")
+            st.download_button("ดาวน์โหลดผลและเส้นทางค้นหา JSON",
+                               json.dumps(result, ensure_ascii=False, indent=2),
+                               "automated_cbd_anchor.json", "application/json")
+            if st.button("ล้าง Automated Anchor", disabled=locked):
+                StateManager.clear_results(["anchor"])
+                st.rerun()
+        return run
+
+
 def _render_sidebar_rent_panel(locked: bool) -> bool:
     """
     Render the Rent Gradient (Bid-Rent) expander.
@@ -2245,9 +2579,10 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
     with st.expander("💰 Rent Gradient (Bid-Rent)", expanded=True):
         st.caption("หลัก Alonso-Muth-Mills: **R(d) = R₀ · e^(−λ·d)** — ค่าเช่าลดลงตามระยะจาก CBD")
 
-        can_run = StateManager.get_isochrone_data() is not None
+        can_run = (StateManager.get_isochrone_data() is not None
+                   or st.session_state.get(StateManager.K_AUTO_ANCHOR) is not None)
         if not can_run:
-            st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
+            st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone หรือค้นหา Automated Anchor ก่อน", icon="🛑")
 
         # ---- Calibration samples ----
         st.markdown("##### 🧾 ตัวอย่างราคาจริง (Calibration)")
@@ -2346,13 +2681,13 @@ def _render_sidebar_map_settings(locked: bool) -> None:
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
-def render_sidebar() -> Tuple[bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
+def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     """
     Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
     ① ปักหมุด → ② Isochrone CBD → ③ Network → ④ Rent Gradient → ตั้งค่าแผนที่
 
     Returns:
-        ``(do_calculate, do_network, do_rent, active_markers_list)``
+        ``(do_calculate, do_network, do_rent, do_anchor, active_markers_list)``
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -2381,8 +2716,9 @@ def render_sidebar() -> Tuple[bool, bool, bool, List[Tuple[int, Dict[str, Any]]]
         st.markdown("---")
 
         _render_sidebar_map_settings(ui_locked)
+        do_anchor = _render_sidebar_anchor_panel(ui_locked)
 
-    return do_calc, do_network, do_rent, active_list
+    return do_calc, do_network, do_rent, do_anchor, active_list
 
 
 def render_map() -> Optional[Dict[str, Any]]:
@@ -2394,6 +2730,9 @@ def render_map() -> Optional[Dict[str, Any]]:
         if markers
         else [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]]
     )
+    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    if automated:
+        center = [automated["anchor"]["lat"], automated["anchor"]["lon"]]
 
     m = folium.Map(
         location=center,
@@ -2401,6 +2740,28 @@ def render_map() -> Optional[Dict[str, Any]]:
         tiles=style_conf["tiles"],
         attr=style_conf["attr"],
     )
+    if automated:
+        anchor = automated["anchor"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor",
+            popup=folium.Popup(f"<b>Automated CBD Anchor</b><br>Score: {anchor['score']:.4f}"
+                               f"<br>Junctions / 500 m: {anchor['junction_count']}", max_width=280),
+            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
+        ).add_to(m)
+        search_layer = folium.FeatureGroup(name="Automated Anchor search paths", show=False)
+        for run, outcome in enumerate(automated["restarts"]):
+            seed = outcome["seed"]
+            points = [[seed["lat"], seed["lon"]]] + [
+                [step["lat"], step["lon"]] for step in automated["trace"]
+                if step["restart"] == run and step["action"] == "move"
+            ]
+            folium.CircleMarker(points[0], radius=4, tooltip=f"Random seed {run + 1}",
+                                color="#184f95").add_to(search_layer)
+            if len(points) > 1:
+                folium.PolyLine(points, color="#184f95", weight=2).add_to(search_layer)
+        folium.Circle(automated["study_center"], radius=automated["study_radius_m"],
+                      color="#184f95", fill=False, tooltip="Study boundary").add_to(search_layer)
+        search_layer.add_to(m)
 
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
@@ -2479,17 +2840,18 @@ def render_map() -> Optional[Dict[str, Any]]:
                 ),
             ).add_to(m)
 
-        # จุดยึด CBD ของโมเดล
-        folium.Marker(
-            [rent_anchor["lat"], rent_anchor["lon"]],
-            tooltip=f"จุดยึด CBD — {rent_anchor['source']}",
-            popup=folium.Popup(
-                f"<b>CBD Anchor</b><br>{rent_anchor['source']}<br>"
-                f"R₀ = {format_rent_value(rent_model['r0'], rent_model)}",
-                max_width=260,
-            ),
-            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
-        ).add_to(m)
+        # Automated marker is already present, even when Rent layers are hidden.
+        if not automated:
+            folium.Marker(
+                [rent_anchor["lat"], rent_anchor["lon"]],
+                tooltip=f"จุดยึด CBD — {rent_anchor['source']}",
+                popup=folium.Popup(
+                    f"<b>CBD Anchor</b><br>{rent_anchor['source']}<br>"
+                    f"R₀ = {format_rent_value(rent_model['r0'], rent_model)}",
+                    max_width=260,
+                ),
+                icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
+            ).add_to(m)
 
     # ---- Network Analysis Layers ----
     net_data = StateManager.get_network_data()
@@ -3327,12 +3689,48 @@ def perform_network_analysis() -> None:
             )
 
 
+def perform_automated_anchor() -> None:
+    """Download one buffered graph, search, then publish the result atomically."""
+    context = _anchor_search_context()
+    started = time.perf_counter()
+    try:
+        with st.spinner("กำลังโหลดถนนพร้อม buffer 20% และค้นหา CBD… การโหลด OSM อาจใช้เวลานาน"):
+            polygon = anchor_study_polygon(*context["study_center"], context["study_radius_m"])
+            graph, cached, error = _fetch_osm_graph(polygon.wkt, context["network_type"])
+            if error or graph is None:
+                raise ValueError(error or "No road graph returned.")
+            result = automated_coarse_to_fine_anchor(
+                graph, tuple(context["study_center"]), context["study_radius_m"],
+                random_seed=context["random_seed"], restarts=context["restarts"],
+            )
+            result.update(context=context, graph_cached=cached,
+                          total_seconds=time.perf_counter() - started)
+            samples = StateManager.get_rent_samples()
+            first = result["restarts"][0]["seed"]
+            anchor = result["anchor"]
+            baseline = fit_rent_gradient_from_samples(samples, first["lat"], first["lon"])
+            fitted = fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
+            if baseline and fitted:
+                result["rent_fit_comparison"] = {
+                    "seed_r2": baseline["r2"], "anchor_r2": fitted["r2"],
+                    "delta_r2": fitted["r2"] - baseline["r2"], "n_samples": fitted["n_samples"],
+                }
+            StateManager.clear_results(["rent"])
+            st.session_state[StateManager.K_AUTO_ANCHOR] = result
+            perform_rent_gradient(quiet=True)
+    except Exception as exc:
+        st.error(f"ค้นหา Automated Anchor ไม่สำเร็จ: {exc}")
+        return
+    st.rerun()
+
+
 def perform_rent_gradient(quiet: bool = False) -> None:
     """Orchestrate Rent Gradient computation (pure math — ไม่มี API call)."""
     iso_data = StateManager.get_isochrone_data()
-    if not iso_data:
+    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    if not iso_data and not automated:
         if not quiet:
-            st.error("❌ กรุณาคำนวณ Isochrone ก่อน เพื่อกำหนดขอบเขตพื้นที่")
+            st.error("❌ กรุณาคำนวณ Isochrone หรือค้นหา Automated Anchor ก่อน")
         return
 
     data = compute_rent_gradient_data(
@@ -3342,6 +3740,7 @@ def perform_rent_gradient(quiet: bool = False) -> None:
         StateManager.get_markers(),
         StateManager.get_rent_samples(),
         StateManager.get_rent_unit(),
+        automated_anchor=automated,
     )
     if "error" in data:
         StateManager.set_rent_data(None)
@@ -3396,7 +3795,7 @@ def main() -> None:
     StateManager.initialize()
 
     # 2. Render Sidebar → capture user intents
-    do_calc, do_net, do_rent, active_list = render_sidebar()
+    do_calc, do_net, do_rent, do_anchor, active_list = render_sidebar()
 
     # 3. Execute Business Logic (based on user intents)
     if do_calc:
@@ -3407,6 +3806,9 @@ def main() -> None:
 
     if do_rent:
         perform_rent_gradient()
+
+    if do_anchor:
+        perform_automated_anchor()
 
     # 4. Render Header + Metrics + Map + Analytics
     render_header()
