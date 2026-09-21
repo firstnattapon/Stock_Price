@@ -31,6 +31,7 @@ import time
 import hashlib
 import pickle
 import os
+import threading
 from pathlib import Path
 import zipfile
 import io
@@ -153,6 +154,19 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     "max_nodes": 100000,
     "batch_size": 16,
 }
+
+# OSMnx uses one process-global Overpass URL. Keep downloads serialized while
+# switching endpoints so concurrent Streamlit sessions cannot leak settings.
+OVERPASS_CONFIG: Dict[str, Any] = {
+    "endpoints": [
+        "https://overpass-api.de/api",
+        "https://maps.mail.ru/osm/tools/overpass/api",
+        "https://overpass.private.coffee/api",
+    ],
+    "attempts_per_endpoint": 1,
+    "retry_backoff_seconds": 1.0,
+}
+_OVERPASS_LOCK = threading.RLock()
 
 # Rent Gradient (Bid-Rent Model: Alonso-Muth-Mills) Configuration
 # หลักการ: ค่าเช่า/มูลค่าที่ดินลดลงแบบ negative exponential ตามระยะจาก CBD
@@ -1775,26 +1789,67 @@ def _fetch_osm_graph(
     try:
         cache_key = get_cache_key(polygon_wkt_str, network_type)
         polygon_geom = wkt.loads(polygon_wkt_str)
+    except (ValueError, TypeError) as exc:
+        return None, False, f"Invalid geometry: {exc}"
 
+    # A deployment may put its own/self-hosted endpoints first without code
+    # changes. Values are base API URLs: OSMnx appends /status and /interpreter.
+    env_endpoints = [
+        value.strip().rstrip("/").removesuffix("/interpreter")
+        for value in os.getenv("OVERPASS_ENDPOINTS", "").split(",")
+        if value.strip()
+    ]
+    attempts = max(1, int(OVERPASS_CONFIG["attempts_per_endpoint"]))
+    failures: List[str] = []
+    with _OVERPASS_LOCK:
+        original_url = ox.settings.overpass_url
         G = load_graph_from_cache(cache_key)
         if G is not None:
             return G, True, None
 
-        G = ox.graph_from_polygon(
-            polygon_geom, network_type=network_type, truncate_by_edge=True
-        )
-        save_graph_to_cache(cache_key, G)
-        return G, False, None
+        endpoints: List[str] = []
+        for endpoint in [*env_endpoints, original_url,
+                         *OVERPASS_CONFIG["endpoints"]]:
+            endpoint = str(endpoint).strip().rstrip("/").removesuffix("/interpreter")
+            if endpoint and endpoint not in endpoints:
+                endpoints.append(endpoint)
+        try:
+            for endpoint in endpoints:
+                ox.settings.overpass_url = endpoint
+                for attempt in range(1, attempts + 1):
+                    try:
+                        G = ox.graph_from_polygon(
+                            polygon_geom,
+                            network_type=network_type,
+                            truncate_by_edge=True,
+                        )
+                        G.graph["overpass_endpoint"] = endpoint
+                        save_graph_to_cache(cache_key, G)
+                        return G, False, None
+                    except ox._errors.InsufficientResponseError:
+                        return None, False, (
+                            "No OSM road data available for this area. "
+                            "Try a different location, network mode, or larger region."
+                        )
+                    except (ox._errors.ValidationError,
+                            ox._errors.GraphSimplificationError) as exc:
+                        return None, False, f"Invalid OSM graph request: {exc}"
+                    except Exception as exc:
+                        short_error = " ".join(str(exc).split())[:300]
+                        failures.append(
+                            f"{endpoint} (attempt {attempt}/{attempts}): {short_error}"
+                        )
+                        if attempt < attempts:
+                            time.sleep(float(OVERPASS_CONFIG["retry_backoff_seconds"]))
+        finally:
+            ox.settings.overpass_url = original_url
 
-    except ValueError as e:
-        return None, False, f"Invalid geometry: {str(e)}"
-    except ox._errors.InsufficientResponseError:
-        return None, False, (
-            "No OSM data available for this area. "
-            "Try a different location or larger region."
-        )
-    except Exception as e:
-        return None, False, f"Failed to fetch OSM graph: {str(e)}"
+    details = " | ".join(failures)
+    return None, False, (
+        f"Failed to fetch OSM graph after trying {len(endpoints)} Overpass servers. "
+        f"Check internet/proxy access or set OVERPASS_ENDPOINTS to a reachable base URL. "
+        f"Attempts: {details}"
+    )
 
 
 def compute_weighted_closeness(
@@ -2548,6 +2603,10 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
             st.caption(f"Score {anchor['score']:.4f} · {result['evaluated_nodes']} โหนดที่ประเมิน · "
                        f"คำนวณ {result['compute_seconds']:.2f} วินาที · "
                        f"รวมโหลดข้อมูล {result['total_seconds']:.2f} วินาที")
+            st.caption(
+                f"แหล่งกราฟ: {result.get('graph_source_endpoint', 'unknown')}"
+                + (" (disk cache)" if result.get("graph_cached") else "")
+            )
             st.caption("ตรวจคะแนนครบทุกโหนด: ยืนยันคะแนนสูงสุดในพื้นที่ศึกษาแล้ว"
                        if result.get("globally_certified") else "ยังไม่ยืนยันคะแนนสูงสุดทั้งพื้นที่ศึกษา")
             st.write(f"ระยะห่างสูงสุดจากผลเฉพาะที่แต่ละจุดเริ่มต้นถึง Anchor สุดท้าย: "
@@ -3704,6 +3763,9 @@ def perform_automated_anchor() -> None:
                 random_seed=context["random_seed"], restarts=context["restarts"],
             )
             result.update(context=context, graph_cached=cached,
+                          graph_source_endpoint=graph.graph.get(
+                              "overpass_endpoint", "disk-cache" if cached else "unknown"
+                          ),
                           total_seconds=time.perf_counter() - started)
             samples = StateManager.get_rent_samples()
             first = result["restarts"][0]["seed"]

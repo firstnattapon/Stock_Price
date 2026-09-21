@@ -13,6 +13,29 @@ Only road data are used. There are no POI, population, commerce, or zoning queri
 Optional rent observations already supported by the page are used only to fit
 and compare the rent model; they never affect the anchor score.
 
+## Overpass reliability and configuration
+
+The road download first checks the graph disk cache. On a cache miss it tries
+each server once by default, then fails over in this order:
+
+1. endpoints supplied through `OVERPASS_ENDPOINTS` (comma-separated base URLs),
+2. the current `osmnx.settings.overpass_url`,
+3. `overpass-api.de`, the VK Maps instance, and `overpass.private.coffee`.
+
+Use base API URLs such as `https://example.org/api`; a trailing `/interpreter`
+is accepted and removed because OSMnx appends the request path. Downloads are
+serialized while changing OSMnx's process-global endpoint, then the original
+setting is restored. This prevents concurrent Streamlit sessions from sending
+requests to one another's selected server. A successful graph records the
+serving endpoint and is persisted to the existing disk cache.
+
+If all servers fail, the UI lists every attempted endpoint and its shortened
+error. Connection refusal, timeout, invalid HTTP response, and server-status
+errors trigger failover. A valid empty OSM response or invalid graph request
+does not waste calls on the remaining servers. Public Overpass servers are
+shared services: keep caching enabled and configure a self-hosted/paid endpoint
+first for sustained or commercial traffic.
+
 ## Search and scoring
 
 1. Download one fixed OSM road graph around the study circle with a **20% radial
@@ -97,6 +120,8 @@ global certification, larger-graph disclosure, disconnected components,
 shortest paths through the buffer, invalid input, resource limits, missing
 SciPy, anchor precedence, rent without isochrones, config round trips, actual
 Streamlit button execution/invalidation/failure, and the dark-blue map marker.
+They also simulate connection refusal, retry/failover, cache reuse, custom
+endpoint precedence, bounded all-server diagnostics, and global setting restore.
 
 ## Accuracy and limitations
 
