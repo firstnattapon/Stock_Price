@@ -38,11 +38,17 @@ def main():
     if args.graphml:
         graph = ox.load_graphml(args.graphml)
         provenance = str(args.graphml)
+        graph_cached = True
     else:
         footprint = page.anchor_study_polygon(args.lat, args.lon, args.radius_km * 1000)
-        graph = ox.graph_from_polygon(footprint, network_type=args.network_type,
-                                      retain_all=True, truncate_by_edge=True)
-        provenance = "OpenStreetMap via OSMnx/Overpass (local OSMnx cache may be reused)"
+        graph, graph_cached, error = page._fetch_osm_graph(
+            footprint.wkt, args.network_type
+        )
+        if error or graph is None:
+            raise RuntimeError(error or "OSM graph download returned no data")
+        provenance = graph.graph.get(
+            "overpass_endpoint", "disk-cache" if graph_cached else "unknown"
+        )
     load_seconds = time.perf_counter() - started
     if args.save_graphml:
         args.save_graphml.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +61,8 @@ def main():
     pairwise = max(page.calculate_distance_meters(a["lat"], a["lon"], b["lat"], b["lon"])
                    for a in anchors for b in anchors)
     result["audit"] = {
-        "provenance": provenance, "network_type": args.network_type,
+        "provenance": provenance, "graph_cached": graph_cached,
+        "network_type": args.network_type,
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "python": platform.python_version(), "platform": platform.platform(),
         "osmnx": ox.__version__, "load_seconds": load_seconds,
