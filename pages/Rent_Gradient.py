@@ -617,11 +617,17 @@ def automated_coarse_to_fine_anchor(
     and reverse edges use minimum length. Destinations and anchors lie inside
     the study circle; paths may use buffer nodes. Junctions have >=3 distinct
     neighbours; density counts them within 500 metric metres (no POI data).
-    Seeds/probes/anchors use junctions when available, otherwise road nodes
-    with an explicit warning. All inside road nodes remain destinations.
+    All inside road nodes remain shortest-path destinations.
 
-    Score = .5*C/(C+1/study_radius) + .3*degree/max_degree
-            + .2*density/max_density. Normalisers are fixed across all probes.
+    objective="composite" preserves the original candidate/scoring behaviour:
+    junctions are preferred (road-node fallback only when none exist), with
+    Score = .5*C_norm + .3*degree_norm + .2*density_norm.
+
+    objective="closeness" is the second Closeness-100% anchor: every inside
+    road node is a candidate and Score = C_norm. Degree and density are retained
+    only as diagnostics. C_norm = C/(C+1/study_radius) is strictly monotone in C,
+    so it selects exactly the same winner as raw length-weighted closeness.
+    Normalisers and destinations are fixed across all probes.
     Each seeded restart scans eight bearings, climbs strictly uphill, then
     halves the radius on a plateau. The final neighbourhood is evaluated
     exhaustively with exact shortest paths. If every eligible node fits the
