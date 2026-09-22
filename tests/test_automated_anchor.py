@@ -41,6 +41,23 @@ def search(graph=None, **kwargs):
     return page.automated_coarse_to_fine_anchor(road_grid() if graph is None else graph, **options)
 
 
+def road_with_off_center_junction():
+    """A degree-2 network median plus one off-centre degree-3 junction."""
+    graph = nx.MultiDiGraph(crs="EPSG:4326")
+    projection = page._anchor_projection(*CENTER)
+    coords = {
+        0: (-300, 0), 1: (-200, 0), 2: (-100, 0), 3: (0, 0),
+        4: (100, 0), 5: (200, 0), 6: (300, 0), 7: (-200, 100),
+    }
+    for node, (x, y) in coords.items():
+        lon, lat = projection.transform(x, y, direction=TransformDirection.INVERSE)
+        graph.add_node(node, x=lon, y=lat)
+    for u, v in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (1, 7)]:
+        graph.add_edge(u, v, length=100.0)
+        graph.add_edge(v, u, length=100.0)
+    return graph
+
+
 def test_exact_scores_match_networkx_and_fixed_objective():
     graph = road_grid()
     result = search(graph)
@@ -53,6 +70,26 @@ def test_exact_scores_match_networkx_and_fixed_objective():
     assert result["converged"]
     assert result["density_source"] == "road-junctions-only"
     json.dumps(result, allow_nan=False)
+
+
+def test_second_anchor_is_closeness_100_and_uses_all_inside_road_nodes():
+    graph = road_with_off_center_junction()
+    composite = search(graph, restarts=4)
+    closeness = search(graph, restarts=4, objective="closeness")
+
+    # Composite keeps the original junction-only candidate rule.
+    assert composite["anchor"]["node_id"] == "1"
+    assert composite["candidate_nodes"] == 1
+
+    # Closeness 100% searches every inside road node and can select degree-2.
+    assert closeness["objective"] == "closeness"
+    assert closeness["method"] == "arps-exact-scipy-closeness-100"
+    assert closeness["candidate_nodes"] == closeness["destination_nodes"] == 8
+    assert closeness["globally_certified"]
+    assert closeness["anchor"]["node_id"] == "2"
+    assert closeness["anchor"]["degree"] == 2
+    assert closeness["anchor"]["score"] == pytest.approx(closeness["anchor"]["closeness_norm"])
+    assert closeness["anchor"]["source"] == "Automated CBD Anchor — Closeness 100%"
 
 
 def test_parallel_reverse_edges_take_minimum_not_sum():
@@ -151,6 +188,8 @@ def test_bad_graphs_and_resource_limits(monkeypatch):
         search(nx.MultiDiGraph())
     with pytest.raises(ValueError, match="budget"):
         search(max_evaluations=1)
+    with pytest.raises(ValueError, match="objective"):
+        search(objective="not-a-real-objective")
     result = search(max_iterations=1)
     assert not result["converged"]
     assert any("best-so-far" in w for w in result["warnings"])
@@ -192,14 +231,18 @@ def test_state_roundtrip_and_full_clear(monkeypatch):
     state = dict(page.StateManager._DEFAULTS)
     state["markers"] = []
     state["automated_anchor_data"] = search()
+    state["automated_anchor_closeness_data"] = search(objective="closeness")
     monkeypatch.setattr(page.st, "session_state", state)
     exported = json.loads(page.StateManager.export_config())
     page.StateManager.clear_results()
     assert state["automated_anchor_data"] is None
+    assert state["automated_anchor_closeness_data"] is None
     page.StateManager.import_config(exported)
     assert state["automated_anchor_data"]["anchor"]["node_id"] == "60"
+    assert state["automated_anchor_closeness_data"]["anchor"]["node_id"] == "60"
     page.StateManager.import_config({"markers": []})
     assert state["automated_anchor_data"] is None
+    assert state["automated_anchor_closeness_data"] is None
     assert state["rent_gradient_data"] is None
 
 
@@ -219,9 +262,20 @@ def test_streamlit_search_and_settings_invalidation(monkeypatch):
     assert not at.exception
     assert at.session_state["automated_anchor_data"]["anchor"]["source"] == "Automated CBD Anchor"
     assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
+
+    second = next(b for b in at.button if b.label == "🎯 ค้นหา CBD Anchor — Closeness 100%")
+    second.click().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["automated_anchor_closeness_data"]["anchor"]["source"] == (
+        "Automated CBD Anchor — Closeness 100%"
+    )
+    # The second anchor is comparison-only: it must not silently replace Rent Gradient's anchor.
+    assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
+
     at.number_input(key="anchor_seed").set_value(43).run(timeout=30)
     assert not at.exception
     assert at.session_state["automated_anchor_data"] is None
+    assert at.session_state["automated_anchor_closeness_data"] is None
     assert at.session_state["rent_gradient_data"] is None
 
 
@@ -261,3 +315,32 @@ def test_map_has_one_darkblue_automated_marker(monkeypatch):
     html = rendered[-1].get_root().render()
     assert "Automated CBD Anchor" in html
     assert "Automated Anchor search paths" in html
+
+
+def test_map_shows_second_closeness_anchor_in_green(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    def app():
+        import rent_gradient_test
+        rent_gradient_test.main()
+
+    rendered = []
+    monkeypatch.setattr(page.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
+    monkeypatch.setattr(page, "_fetch_osm_graph", lambda *args: (road_grid(), True, None))
+    monkeypatch.setattr(page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
+    at = AppTest.from_function(app).run(timeout=30)
+    next(
+        b for b in at.button
+        if b.label == "🎯 ค้นหา CBD Anchor — Closeness 100%"
+    ).click().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["automated_anchor_data"] is None
+    second = at.session_state["automated_anchor_closeness_data"]
+    assert second["candidate_nodes"] == second["destination_nodes"] == 121
+
+    markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
+    assert len(markers) == 1
+    assert markers[0].icon.options["marker_color"] == "green"
+    html = rendered[-1].get_root().render()
+    assert "Automated CBD Anchor — Closeness 100%" in html
+    assert "Automated Anchor Closeness 100% search paths" in html
