@@ -227,6 +227,7 @@ RESULT_KEYS_TO_SAVE: List[str] = [
     "network_data",
     "rent_gradient_data",
     "automated_anchor_data",
+    "automated_anchor_closeness_data",
 ]
 
 # GitHub Cache Repository Configuration
@@ -275,6 +276,7 @@ class StateManager:
     K_SHOW_RENT_NODES: str = "show_rent_nodes"
     K_RENT_UNIT: str = "rent_unit_label"
     K_AUTO_ANCHOR: str = "automated_anchor_data"
+    K_AUTO_ANCHOR_CLOSENESS: str = "automated_anchor_closeness_data"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -309,6 +311,7 @@ class StateManager:
         K_SHOW_RENT_NODES: False,
         K_RENT_UNIT: "บาท/ตร.ว./เดือน",
         K_AUTO_ANCHOR: None,
+        K_AUTO_ANCHOR_CLOSENESS: None,
         "anchor_lat": DEFAULT_CONFIG["LAT"],
         "anchor_lon": DEFAULT_CONFIG["LON"],
         "anchor_radius_km": 10.0,
@@ -491,11 +494,13 @@ class StateManager:
                     ``None`` clears all.
         """
         if layers is None:
-            layers = ["isochrone", "intersection", "network", "rent", "anchor"]
+            layers = ["isochrone", "intersection", "network", "rent", "anchor", "anchor_closeness"]
 
         if "anchor" in layers:
             st.session_state[cls.K_AUTO_ANCHOR] = None
             st.session_state[cls.K_RENT_DATA] = None
+        if "anchor_closeness" in layers:
+            st.session_state[cls.K_AUTO_ANCHOR_CLOSENESS] = None
 
         if "isochrone" in layers:
             st.session_state[cls.K_ISOCHRONE] = None
@@ -603,6 +608,7 @@ def automated_coarse_to_fine_anchor(
     final_radius_m: float = 150.0,
     max_iterations: int = 80,
     max_evaluations: int = 2048,
+    objective: str = "composite",
 ) -> Dict[str, Any]:
     """Reproducible ARPS on a fixed buffered WGS84 road graph, without I/O.
 
@@ -634,6 +640,8 @@ def automated_coarse_to_fine_anchor(
     if not (1 <= restarts <= 50 and 1 <= max_iterations <= 500
             and 1 <= max_evaluations <= 10000):
         raise ValueError("Invalid restart, iteration or evaluation limit.")
+    if objective not in {"composite", "closeness"}:
+        raise ValueError("objective must be 'composite' or 'closeness'.")
     if not 2 <= len(graph) <= ANCHOR_CONFIG["max_nodes"]:
         raise ValueError("Road graph must contain 2–100,000 nodes; reduce the study area.")
     if CRS.from_user_input(graph.graph.get("crs", "EPSG:4326")) != CRS.from_epsg(4326):
@@ -675,10 +683,16 @@ def automated_coarse_to_fine_anchor(
         raise ValueError("Fewer than two connected road nodes inside the study circle.")
     degrees = np.array([roads.degree(n) for n in nodes], dtype=float)
     junctions = np.flatnonzero(degrees >= 3)
-    candidates_inside = eligible[degrees[eligible] >= 3]
-    junction_fallback = len(candidates_inside) == 0
-    if junction_fallback:
+    if objective == "closeness":
+        # Closeness 100% is a true network 1-median objective: every inside
+        # road node is eligible, including degree-2 nodes between junctions.
         candidates_inside = eligible
+        junction_fallback = False
+    else:
+        candidates_inside = eligible[degrees[eligible] >= 3]
+        junction_fallback = len(candidates_inside) == 0
+        if junction_fallback:
+            candidates_inside = eligible
     tree = cKDTree(xy[candidates_inside])
     density = np.zeros(len(nodes))
     if len(junctions):
@@ -706,9 +720,13 @@ def automated_coarse_to_fine_anchor(
             closeness = (len(eligible) - 1) / distances[:, eligible].sum(axis=1)
             for i, c in zip(batch, closeness):
                 cn = float(c / (c + 1.0 / study_radius_m))
+                objective_score = (
+                    cn if objective == "closeness"
+                    else 0.50 * cn + 0.30 * float(degree_norm[i])
+                         + 0.20 * float(density_norm[i])
+                )
                 scores[i] = {
-                    "score": 0.50 * cn + 0.30 * float(degree_norm[i])
-                             + 0.20 * float(density_norm[i]),
+                    "score": float(objective_score),
                     "closeness": float(c), "closeness_norm": cn,
                     "degree_norm": float(degree_norm[i]),
                     "density_norm": float(density_norm[i]),
@@ -773,7 +791,11 @@ def automated_coarse_to_fine_anchor(
     # convergence alone establishes seed robustness. Reuse all ARPS distances.
     globally_certified = len(candidates_inside) <= max_evaluations
     winner = best_of(candidates_inside if globally_certified else final_indices)
-    anchor = dict(location(winner), source="Automated CBD Anchor")
+    anchor = dict(
+        location(winner),
+        source=("Automated CBD Anchor — Closeness 100%"
+                if objective == "closeness" else "Automated CBD Anchor"),
+    )
     warnings = []
     if not globally_certified:
         warnings.append("กราฟเกินงบตรวจครบทุกโหนด: ยืนยันได้เฉพาะผลค้นหาเฉพาะที่ ไม่รับรอง global optimum")
@@ -789,7 +811,9 @@ def automated_coarse_to_fine_anchor(
     spread = max(calculate_distance_meters(anchor["lat"], anchor["lon"],
                  o["anchor"]["lat"], o["anchor"]["lon"]) for o in outcomes)
     return {"anchor": anchor, "converged": all(o["converged"] for o in outcomes),
-            "method": "arps-exact-scipy", "density_source": "road-junctions-only",
+            "method": ("arps-exact-scipy-closeness-100"
+                       if objective == "closeness" else "arps-exact-scipy"),
+            "objective": objective, "density_source": "road-junctions-only",
             "globally_certified": globally_certified,
             "certification": "exhaustive-fixed-objective" if globally_certified else "local-only",
             "study_center": list(study_center), "study_radius_m": study_radius_m,
@@ -2575,7 +2599,8 @@ def _anchor_search_context() -> Dict[str, Any]:
     }
 
 
-def _render_sidebar_anchor_panel(locked: bool) -> bool:
+def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
+    """Render the original composite anchor and a second Closeness-100% anchor."""
     with st.expander("🎯 Automated CBD Anchor", expanded=True):
         st.caption("กำหนดพื้นที่ศึกษา แล้วสุ่มจุดบนถนนเพื่อค้นหา 8 ทิศ: 4 กม. → 150 ม.")
         st.number_input("ศูนย์พื้นที่ศึกษา Lat", -85.0, 85.0,
@@ -2587,16 +2612,26 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
         st.number_input("Random seed (ทำซ้ำได้)", 0, 2147483647,
                         key="anchor_seed", disabled=locked)
         st.number_input("จำนวนจุดเริ่มต้น", 1, 50, key="anchor_restarts", disabled=locked)
-        st.caption("คะแนน: 50% Closeness + 30% Degree + 20% ความหนาแน่นทางแยกใน 500 ม. "
-                   "ใช้ถนนแบบไม่แยกทิศทางและ buffer 20%; ไม่ต้องมี Isochrone หรือ API Key")
+
+        context = _anchor_search_context()
         result = st.session_state.get(StateManager.K_AUTO_ANCHOR)
-        if result and result.get("context") != _anchor_search_context():
-            StateManager.clear_results(["anchor"])
+        closeness_result = st.session_state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
+        if ((result and result.get("context") != context)
+                or (closeness_result and closeness_result.get("context") != context)):
+            StateManager.clear_results(["anchor", "anchor_closeness"])
             st.rerun()
-        run = st.button("🎯 ค้นหา CBD Anchor อัตโนมัติ", disabled=locked or not HAS_SCIPY,
-                        use_container_width=True)
+
         if not HAS_SCIPY:
             st.error("กรุณาติดตั้ง scipy และ numpy เพื่อค้นหา Anchor")
+
+        st.markdown("##### ① Composite (เดิม)")
+        st.caption("คะแนน: 50% Closeness + 30% Degree + 20% ความหนาแน่นทางแยกใน 500 ม. "
+                   "ใช้ junction เป็น candidate หลัก")
+        run_composite = st.button(
+            "🎯 ค้นหา CBD Anchor อัตโนมัติ",
+            disabled=locked or not HAS_SCIPY,
+            use_container_width=True,
+        )
         if result:
             anchor = result["anchor"]
             st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
@@ -2607,26 +2642,60 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                 f"แหล่งกราฟ: {result.get('graph_source_endpoint', 'unknown')}"
                 + (" (disk cache)" if result.get("graph_cached") else "")
             )
-            st.caption("ตรวจคะแนนครบทุกโหนด: ยืนยันคะแนนสูงสุดในพื้นที่ศึกษาแล้ว"
+            st.caption("ตรวจคะแนนครบทุก candidate: ยืนยันคะแนนสูงสุดของ objective นี้แล้ว"
                        if result.get("globally_certified") else "ยังไม่ยืนยันคะแนนสูงสุดทั้งพื้นที่ศึกษา")
-            st.write(f"ระยะห่างสูงสุดจากผลเฉพาะที่แต่ละจุดเริ่มต้นถึง Anchor สุดท้าย: "
-                     f"{result['restart_max_distance_m']:.1f} ม.")
             for warning in result["warnings"]:
                 st.warning(warning)
-            st.caption("150 ม. คือรัศมีค้นหาขั้นสุดท้าย ไม่ใช่ค่าความคลาดเคลื่อนที่ยืนยันแล้ว "
-                       "ความหนาแน่นทางแยกเป็นตัวแทนโครงสร้างเมือง; ต้องเทียบ CBD จริงเพื่อวัดความแม่นยำ")
-            fit = result.get("rent_fit_comparison")
-            if fit:
-                st.caption(f"R² ขณะค้นหา (log-rent): จุดสุ่มแรก {fit['seed_r2']:.3f} → "
-                           f"Anchor {fit['anchor_r2']:.3f}; ΔR²={fit['delta_r2']:+.3f} "
-                           "(เป็นการเปรียบเทียบ fit ไม่ใช่การทดสอบนัยสำคัญ)")
-            st.download_button("ดาวน์โหลดผลและเส้นทางค้นหา JSON",
-                               json.dumps(result, ensure_ascii=False, indent=2),
-                               "automated_cbd_anchor.json", "application/json")
-            if st.button("ล้าง Automated Anchor", disabled=locked):
+            st.download_button(
+                "ดาวน์โหลด Composite Anchor JSON",
+                json.dumps(result, ensure_ascii=False, indent=2),
+                "automated_cbd_anchor.json",
+                "application/json",
+            )
+            if st.button("ล้าง Automated Anchor เดิม", disabled=locked):
                 StateManager.clear_results(["anchor"])
                 st.rerun()
-        return run
+
+        st.markdown("##### ② Closeness 100%")
+        st.caption("Score = Closeness เพียงอย่างเดียว (Exact SciPy Dijkstra, ระยะถนนเป็นเมตร) "
+                   "และเปิดทุก road node ในพื้นที่เป็น candidate; Degree/Junction Density แสดงเพื่อวินิจฉัยเท่านั้น")
+        run_closeness = st.button(
+            "🎯 ค้นหา CBD Anchor — Closeness 100%",
+            disabled=locked or not HAS_SCIPY,
+            use_container_width=True,
+        )
+        if closeness_result:
+            anchor = closeness_result["anchor"]
+            st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
+            st.caption(
+                f"Closeness norm {anchor['closeness_norm']:.6f} · "
+                f"Closeness {anchor['closeness']:.8f} 1/m · "
+                f"{closeness_result['candidate_nodes']} road-node candidates"
+            )
+            st.caption(
+                f"Degree {anchor['degree']} · Junctions/500m {anchor['junction_count']} "
+                "(diagnostics only)"
+            )
+            st.caption(f"คำนวณ {closeness_result['compute_seconds']:.2f} วินาที · "
+                       f"รวมโหลดข้อมูล {closeness_result['total_seconds']:.2f} วินาที")
+            st.caption("ตรวจครบทุก road-node candidate: ยืนยัน Closeness สูงสุดในพื้นที่ศึกษาแล้ว"
+                       if closeness_result.get("globally_certified")
+                       else "กราฟใหญ่เกินงบ exhaustive audit: ผลเป็น local-only")
+            for warning in closeness_result["warnings"]:
+                st.warning(warning)
+            st.download_button(
+                "ดาวน์โหลด Closeness 100% Anchor JSON",
+                json.dumps(closeness_result, ensure_ascii=False, indent=2),
+                "automated_cbd_anchor_closeness_100.json",
+                "application/json",
+            )
+            if st.button("ล้าง Closeness 100% Anchor", disabled=locked):
+                StateManager.clear_results(["anchor_closeness"])
+                st.rerun()
+
+        st.caption("ตัวที่ 2 เป็น anchor สำหรับเปรียบเทียบบนแผนที่; "
+                   "Rent Gradient ยังคงใช้ Automated CBD Anchor ตัวเดิมเพื่อไม่เปลี่ยนพฤติกรรมเดิม")
+        return run_composite, run_closeness
 
 
 def _render_sidebar_rent_panel(locked: bool) -> bool:
@@ -2740,13 +2809,13 @@ def _render_sidebar_map_settings(locked: bool) -> None:
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
-def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
+def render_sidebar() -> Tuple[bool, bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     """
     Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
     ① ปักหมุด → ② Isochrone CBD → ③ Network → ④ Rent Gradient → ตั้งค่าแผนที่
 
     Returns:
-        ``(do_calculate, do_network, do_rent, do_anchor, active_markers_list)``
+        ``(do_calculate, do_network, do_rent, do_anchor, do_anchor_closeness, active_markers_list)``
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -2775,9 +2844,9 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         st.markdown("---")
 
         _render_sidebar_map_settings(ui_locked)
-        do_anchor = _render_sidebar_anchor_panel(ui_locked)
+        do_anchor, do_anchor_closeness = _render_sidebar_anchor_panel(ui_locked)
 
-    return do_calc, do_network, do_rent, do_anchor, active_list
+    return do_calc, do_network, do_rent, do_anchor, do_anchor_closeness, active_list
 
 
 def render_map() -> Optional[Dict[str, Any]]:
@@ -2790,8 +2859,11 @@ def render_map() -> Optional[Dict[str, Any]]:
         else [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]]
     )
     automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    automated_closeness = st.session_state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
     if automated:
         center = [automated["anchor"]["lat"], automated["anchor"]["lon"]]
+    elif automated_closeness:
+        center = [automated_closeness["anchor"]["lat"], automated_closeness["anchor"]["lon"]]
 
     m = folium.Map(
         location=center,
@@ -2821,6 +2893,44 @@ def render_map() -> Optional[Dict[str, Any]]:
         folium.Circle(automated["study_center"], radius=automated["study_radius_m"],
                       color="#184f95", fill=False, tooltip="Study boundary").add_to(search_layer)
         search_layer.add_to(m)
+
+    if automated_closeness:
+        anchor = automated_closeness["anchor"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]],
+            tooltip="Automated CBD Anchor — Closeness 100%",
+            popup=folium.Popup(
+                f"<b>Automated CBD Anchor — Closeness 100%</b>"
+                f"<br>Closeness norm: {anchor['closeness_norm']:.6f}"
+                f"<br>Closeness: {anchor['closeness']:.8f} 1/m"
+                f"<br>Degree: {anchor['degree']} (diagnostic)"
+                f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)",
+                max_width=320,
+            ),
+            icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
+        ).add_to(m)
+        closeness_layer = folium.FeatureGroup(
+            name="Automated Anchor Closeness 100% search paths", show=False
+        )
+        for run, outcome in enumerate(automated_closeness["restarts"]):
+            seed = outcome["seed"]
+            points = [[seed["lat"], seed["lon"]]] + [
+                [step["lat"], step["lon"]] for step in automated_closeness["trace"]
+                if step["restart"] == run and step["action"] == "move"
+            ]
+            folium.CircleMarker(
+                points[0], radius=4, tooltip=f"Closeness seed {run + 1}", color="#2A9D8F"
+            ).add_to(closeness_layer)
+            if len(points) > 1:
+                folium.PolyLine(points, color="#2A9D8F", weight=2).add_to(closeness_layer)
+        folium.Circle(
+            automated_closeness["study_center"],
+            radius=automated_closeness["study_radius_m"],
+            color="#2A9D8F",
+            fill=False,
+            tooltip="Closeness 100% study boundary",
+        ).add_to(closeness_layer)
+        closeness_layer.add_to(m)
 
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
@@ -3748,25 +3858,42 @@ def perform_network_analysis() -> None:
             )
 
 
-def perform_automated_anchor() -> None:
-    """Download one buffered graph, search, then publish the result atomically."""
+def perform_automated_anchor(objective: str = "composite") -> None:
+    """Download one buffered graph, search one objective, then publish atomically."""
+    if objective not in {"composite", "closeness"}:
+        raise ValueError("objective must be 'composite' or 'closeness'.")
     context = _anchor_search_context()
     started = time.perf_counter()
+    state_key = (
+        StateManager.K_AUTO_ANCHOR_CLOSENESS
+        if objective == "closeness"
+        else StateManager.K_AUTO_ANCHOR
+    )
+    label = "Closeness 100%" if objective == "closeness" else "Composite"
     try:
-        with st.spinner("กำลังโหลดถนนพร้อม buffer 20% และค้นหา CBD… การโหลด OSM อาจใช้เวลานาน"):
+        with st.spinner(
+            f"กำลังโหลดถนนพร้อม buffer 20% และค้นหา CBD ({label})… การโหลด OSM อาจใช้เวลานาน"
+        ):
             polygon = anchor_study_polygon(*context["study_center"], context["study_radius_m"])
             graph, cached, error = _fetch_osm_graph(polygon.wkt, context["network_type"])
             if error or graph is None:
                 raise ValueError(error or "No road graph returned.")
             result = automated_coarse_to_fine_anchor(
-                graph, tuple(context["study_center"]), context["study_radius_m"],
-                random_seed=context["random_seed"], restarts=context["restarts"],
+                graph,
+                tuple(context["study_center"]),
+                context["study_radius_m"],
+                random_seed=context["random_seed"],
+                restarts=context["restarts"],
+                objective=objective,
             )
-            result.update(context=context, graph_cached=cached,
-                          graph_source_endpoint=graph.graph.get(
-                              "overpass_endpoint", "disk-cache" if cached else "unknown"
-                          ),
-                          total_seconds=time.perf_counter() - started)
+            result.update(
+                context=context,
+                graph_cached=cached,
+                graph_source_endpoint=graph.graph.get(
+                    "overpass_endpoint", "disk-cache" if cached else "unknown"
+                ),
+                total_seconds=time.perf_counter() - started,
+            )
             samples = StateManager.get_rent_samples()
             first = result["restarts"][0]["seed"]
             anchor = result["anchor"]
@@ -3774,14 +3901,17 @@ def perform_automated_anchor() -> None:
             fitted = fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
             if baseline and fitted:
                 result["rent_fit_comparison"] = {
-                    "seed_r2": baseline["r2"], "anchor_r2": fitted["r2"],
-                    "delta_r2": fitted["r2"] - baseline["r2"], "n_samples": fitted["n_samples"],
+                    "seed_r2": baseline["r2"],
+                    "anchor_r2": fitted["r2"],
+                    "delta_r2": fitted["r2"] - baseline["r2"],
+                    "n_samples": fitted["n_samples"],
                 }
-            StateManager.clear_results(["rent"])
-            st.session_state[StateManager.K_AUTO_ANCHOR] = result
-            perform_rent_gradient(quiet=True)
+            st.session_state[state_key] = result
+            if objective == "composite":
+                StateManager.clear_results(["rent"])
+                perform_rent_gradient(quiet=True)
     except Exception as exc:
-        st.error(f"ค้นหา Automated Anchor ไม่สำเร็จ: {exc}")
+        st.error(f"ค้นหา Automated Anchor ({label}) ไม่สำเร็จ: {exc}")
         return
     st.rerun()
 
@@ -3857,7 +3987,7 @@ def main() -> None:
     StateManager.initialize()
 
     # 2. Render Sidebar → capture user intents
-    do_calc, do_net, do_rent, do_anchor, active_list = render_sidebar()
+    do_calc, do_net, do_rent, do_anchor, do_anchor_closeness, active_list = render_sidebar()
 
     # 3. Execute Business Logic (based on user intents)
     if do_calc:
@@ -3870,7 +4000,10 @@ def main() -> None:
         perform_rent_gradient()
 
     if do_anchor:
-        perform_automated_anchor()
+        perform_automated_anchor("composite")
+
+    if do_anchor_closeness:
+        perform_automated_anchor("closeness")
 
     # 4. Render Header + Metrics + Map + Analytics
     render_header()
