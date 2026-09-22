@@ -529,6 +529,14 @@ class StateManager:
             if k in SESSION_KEYS_TO_SAVE:
                 st.session_state[k] = v
 
+        # The combined coordinate widget is UI-only. Keep it synchronized with
+        # the legacy anchor_lat / anchor_lon keys used by saved configurations.
+        if "anchor_lat" in settings or "anchor_lon" in settings:
+            st.session_state["anchor_center_input"] = (
+                f"{float(st.session_state['anchor_lat'])!r}, "
+                f"{float(st.session_state['anchor_lon'])!r}"
+            )
+
         # Start from a clean slate so keys absent from the payload
         # don't keep stale results anchored to the previous CBD.
         cls.clear_results()
@@ -2605,14 +2613,54 @@ def _anchor_search_context() -> Dict[str, Any]:
     }
 
 
+def _parse_anchor_center_input(value: str) -> Tuple[float, float]:
+    """Parse a single "Lat, Lon" text field while preserving legacy state keys."""
+    parts = [part.strip() for part in str(value).split(",")]
+    example = "20.075226819421776, 100.5083729446834"
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(f"กรุณากรอกพิกัดเป็น Lat, Lon เช่น {example}")
+    try:
+        lat, lon = (float(parts[0]), float(parts[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"พิกัดไม่ถูกต้อง กรุณาใช้รูปแบบ Lat, Lon เช่น {example}") from exc
+    if not (-85.0 <= lat <= 85.0):
+        raise ValueError("Lat ต้องอยู่ระหว่าง -85 ถึง 85")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError("Lon ต้องอยู่ระหว่าง -180 ถึง 180")
+    return lat, lon
+
+
 def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
     """Render the original composite anchor and a second Closeness-100% anchor."""
     with st.expander("🎯 Automated CBD Anchor", expanded=True):
         st.caption("กำหนดพื้นที่ศึกษา แล้วสุ่มจุดบนถนนเพื่อค้นหา 8 ทิศ: 4 กม. → 150 ม.")
-        st.number_input("ศูนย์พื้นที่ศึกษา Lat", -85.0, 85.0,
-                        key="anchor_lat", format="%.6f", disabled=locked)
-        st.number_input("ศูนย์พื้นที่ศึกษา Lon", -180.0, 180.0,
-                        key="anchor_lon", format="%.6f", disabled=locked)
+        if "anchor_center_input" not in st.session_state:
+            st.session_state["anchor_center_input"] = (
+                f"{st.session_state.anchor_lat!r}, {st.session_state.anchor_lon!r}"
+            )
+        center_text = st.text_input(
+            "ศูนย์พื้นที่ศึกษา Lat, Lon",
+            key="anchor_center_input",
+            placeholder="20.075226819421776, 100.5083729446834",
+            disabled=locked,
+            help=(
+                "กรอกพิกัดเป็น Lat, Lon ในช่องเดียว เช่น "
+                "20.075226819421776, 100.5083729446834"
+            ),
+        )
+        center_valid = True
+        try:
+            center_lat, center_lon = _parse_anchor_center_input(center_text)
+        except ValueError as exc:
+            center_valid = False
+            st.error(str(exc))
+        else:
+            if (
+                center_lat != st.session_state.anchor_lat
+                or center_lon != st.session_state.anchor_lon
+            ):
+                st.session_state.anchor_lat = center_lat
+                st.session_state.anchor_lon = center_lon
         st.number_input("รัศมีพื้นที่ศึกษา (กม.)", 4.0, 20.0,
                         key="anchor_radius_km", step=1.0, disabled=locked)
         st.number_input("Random seed (ทำซ้ำได้)", 0, 2147483647,
@@ -2635,7 +2683,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
                    "ใช้ junction เป็น candidate หลัก")
         run_composite = st.button(
             "🎯 ค้นหา CBD Anchor อัตโนมัติ",
-            disabled=locked or not HAS_SCIPY,
+            disabled=locked or not HAS_SCIPY or not center_valid,
             use_container_width=True,
         )
         if result:
@@ -2667,7 +2715,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
                    "และเปิดทุก road node ในพื้นที่เป็น candidate; Degree/Junction Density แสดงเพื่อวินิจฉัยเท่านั้น")
         run_closeness = st.button(
             "🎯 ค้นหา CBD Anchor — Closeness 100%",
-            disabled=locked or not HAS_SCIPY,
+            disabled=locked or not HAS_SCIPY or not center_valid,
             use_container_width=True,
         )
         if closeness_result:
