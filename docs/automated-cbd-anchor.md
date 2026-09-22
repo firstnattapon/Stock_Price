@@ -9,6 +9,33 @@ Gradient immediately uses this anchor ahead of the existing centroid fallbacks.
 Changing the study settings clears the previous automatic anchor and rent
 result. JSON/config/bundle exports preserve the result, settings, and trace.
 
+
+## Second anchor: Closeness 100%
+
+The sidebar now keeps the original composite anchor and adds a second,
+independent **🎯 Automated CBD Anchor — Closeness 100%** button. The second
+anchor uses the same fixed buffered road graph and exact SciPy shortest-path
+distances, but its objective contains no degree or density weight:
+
+```text
+C(v) = (M - 1) / sum_u d(v,u)
+C_norm(v) = C(v) / (C(v) + 1 / study_radius_m)
+Score_2(v) = 1.00 * C_norm(v)
+```
+
+Because `C_norm` is strictly increasing in `C`, maximizing `Score_2` selects
+the same node as maximizing raw length-weighted closeness, equivalently the road
+node that minimizes total shortest-path distance to all inside destination
+nodes. Unlike the original composite search, **every inside road node is a
+candidate**, including degree-2 nodes. Degree and 500 m junction density remain
+in the result only as diagnostics and cannot change the winner.
+
+The second anchor is stored separately as `automated_anchor_closeness_data`,
+is shown as a green map marker with its own search-path layer, and is preserved
+by config export/import. It is intentionally comparison-only: the existing
+composite anchor remains the automatic Rent Gradient anchor so adding this
+feature does not silently change prior Rent Gradient behaviour.
+
 Only road data are used. There are no POI, population, commerce, or zoning queries.
 Optional rent observations already supported by the page are used only to fit
 and compare the rent model; they never affect the anchor score.
