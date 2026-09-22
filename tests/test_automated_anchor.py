@@ -246,6 +246,39 @@ def test_state_roundtrip_and_full_clear(monkeypatch):
     assert state["rent_gradient_data"] is None
 
 
+def test_single_coordinate_input_parser():
+    value = "20.075226819421776, 100.5083729446834"
+    assert page._parse_anchor_center_input(value) == (
+        20.075226819421776,
+        100.5083729446834,
+    )
+    assert page._parse_anchor_center_input(" 20.1 , 100.2 ") == (20.1, 100.2)
+    with pytest.raises(ValueError, match="Lat, Lon"):
+        page._parse_anchor_center_input("20.1")
+    with pytest.raises(ValueError, match="Lat"):
+        page._parse_anchor_center_input("90, 100.2")
+    with pytest.raises(ValueError, match="Lon"):
+        page._parse_anchor_center_input("20.1, 181")
+
+
+def test_streamlit_single_coordinate_input_updates_legacy_state(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    def app():
+        import rent_gradient_test
+        rent_gradient_test.main()
+
+    monkeypatch.setattr(page.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
+    at = AppTest.from_function(app).run(timeout=30)
+    assert not at.exception
+
+    center = at.text_input(key="anchor_center_input")
+    center.set_value("20.075226819421776, 100.5083729446834").run(timeout=30)
+    assert not at.exception
+    assert at.session_state["anchor_lat"] == pytest.approx(20.075226819421776)
+    assert at.session_state["anchor_lon"] == pytest.approx(100.5083729446834)
+
+
 def test_streamlit_search_and_settings_invalidation(monkeypatch):
     from streamlit.testing.v1 import AppTest
 
