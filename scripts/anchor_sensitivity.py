@@ -46,17 +46,21 @@ def shifted_center(center, east_m, north_m):
 
 
 def run_sensitivity(graph, center, radius_m, objective="composite", shift_fraction=0.2,
-                    scales=(0.8, 1.2), max_evaluations=2048, reference=None, seed=42):
-    """Anchor drift under +-20% radius and 20%-of-radius centre shifts (pure, no I/O)."""
+                    scales=(0.8, 1.2), max_rows=None, reference=None, cache=None):
+    """Exact anchor drift under rescaled radius and shifted centre (pure, no I/O).
+
+    Every perturbed circle is searched again from scratch with ``find_cbd_anchors``;
+    ``cache`` (a dict) lets two objectives share those searches. Compare with the
+    built-in indicative probe in ``find_cbd_anchors(...)[objective]["stability"]``.
+    """
     extent = graph_extent_m(graph, center)
+    cache = {} if cache is None else cache
 
     def anchor_for(label, c, r, shift_m):
-        result = page.automated_coarse_to_fine_anchor(
-            graph, c, r, random_seed=seed, restarts=1, max_evaluations=max_evaluations,
-            objective=objective,
-            # a shrunken circle (e.g. 0.8 x 4 km) can be smaller than the default 4 km probe
-            initial_radius_m=min(page.ANCHOR_CONFIG["initial_radius_m"], r),
-        )
+        key = (round(c[0], 9), round(c[1], 9), round(r, 6))
+        if key not in cache:
+            cache[key] = page.find_cbd_anchors(graph, c, r, max_rows=max_rows, stability=False)
+        result = cache[key][objective]
         a = result["anchor"]
         reach = shift_m + r  # farthest point of the perturbed circle from the base centre
         return {
@@ -112,24 +116,32 @@ def main():
     parser.add_argument("--radius-km", type=float, default=10.0)
     parser.add_argument("--objective", choices=["composite", "closeness", "both"], default="both")
     parser.add_argument("--shift-fraction", type=float, default=0.2)
-    parser.add_argument("--max-evaluations", type=int, default=2048)
+    parser.add_argument("--max-rows", type=int, help="Override the exact-row budget")
     parser.add_argument("--reference", type=float, nargs=2, metavar=("LAT", "LON"))
     parser.add_argument("--output", type=Path, default=Path("cache/anchor-sensitivity.json"))
     args = parser.parse_args()
 
     graph = load_graph(args.graph)
     objectives = ["composite", "closeness"] if args.objective == "both" else [args.objective]
+    shared: dict = {}
     report = {o: run_sensitivity(
         graph, (args.lat, args.lon), args.radius_km * 1000, objective=o,
-        shift_fraction=args.shift_fraction, max_evaluations=args.max_evaluations,
-        reference=tuple(args.reference) if args.reference else None,
+        shift_fraction=args.shift_fraction, max_rows=args.max_rows,
+        reference=tuple(args.reference) if args.reference else None, cache=shared,
     ) for o in objectives}
+    probe = page.find_cbd_anchors(graph, (args.lat, args.lon), args.radius_km * 1000,
+                                  max_rows=args.max_rows)
+    for o in objectives:  # the in-app indicative probe, next to the exact numbers above
+        report[o]["builtin_probe"] = probe[o]["stability"]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for objective, data in report.items():
         s = data["summary"]
+        indicative = data.get("builtin_probe")
         print(f"[{objective}] max drift {s['max_drift_m']:.0f} m · median {s['median_drift_m']:.0f} m · "
               f"within 150 m: {s['share_within_150m']:.0%}"
+              + (f" · in-app probe: {indicative['level']} (max {indicative['max_drift_m']:.0f} m)"
+                 if indicative else "")
               + (f" · error to reference {s['baseline_error_to_reference_m']:.0f} m"
                  if "baseline_error_to_reference_m" in s else ""))
         for case in data["cases"][1:]:

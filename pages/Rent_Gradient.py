@@ -47,6 +47,7 @@ from pyproj import CRS, Transformer
 try:
     import numpy as np
     from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components as csgraph_components
     from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
     HAS_SCIPY: bool = True
 except Exception:
@@ -147,21 +148,34 @@ NETWORK_CONFIG: Dict[str, Any] = {
 }
 
 ANCHOR_CONFIG: Dict[str, Any] = {
-    "initial_radius_m": 4000.0,
+    # Serve a request from a cached graph whose download footprint fully contains it.
+    "reuse_covering_cache": True,
     "final_radius_m": 150.0,
     "buffer_ratio": 0.20,
     "density_radius_m": 500.0,
-    "max_iterations": 80,
-    "max_evaluations": 2048,
     "max_nodes": 100000,
     "batch_size": 16,
+    # Exact Dijkstra rows are the only expensive step: one row costs ~V units, so
+    # the exhaustive budget is max_row_nodes // V rows (V=2k -> 4096, V=40k -> ~750).
+    "max_row_nodes": 30_000_000,
+    "min_rows": 64,
+    "max_rows": 4096,
     # Fixed, seed-independent reference sample of destinations. Its exact closeness
-    # values calibrate the composite normaliser, and its distance rows drive the
-    # pivot screening used when the exhaustive audit does not fit the budget.
-    # These rows are extra to (not counted in) ``max_evaluations``.
+    # values calibrate the composite normaliser, and its distance rows rank every
+    # candidate when the exhaustive pass does not fit the budget. These rows are
+    # extra to the row budget and are never recomputed.
     "reference_nodes": 256,
     "reference_seed": 0,
     "screen_top_k": 256,
+    "refine_iterations": 40,
+    "boundary_warn_ratio": 0.40,
+    # Indicative stability probe: how far does the anchor move if the user's circle
+    # is rescaled / shifted? Drift is judged against the study radius.
+    "stability_scales": (0.8, 1.2),
+    "stability_shift": 0.20,
+    "stability_top_m": 16,
+    "stability_ok_ratio": 0.05,
+    "stability_warn_ratio": 0.15,
 }
 
 # OSMnx uses one process-global Overpass URL. Keep downloads serialized while
@@ -227,7 +241,8 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_traffic", "colors", "show_betweenness", "show_closeness",
     "show_railway", "show_golden_spots",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
-    "anchor_lat", "anchor_lon", "anchor_radius_km", "anchor_seed", "anchor_restarts",
+    "anchor_lat", "anchor_lon", "anchor_radius_km",
+    "anchor_seed", "anchor_restarts",  # legacy: accepted from old configs, no longer used
 ]
 
 # Keys to persist as precomputed outputs (avoid recalculation after import)
@@ -325,8 +340,6 @@ class StateManager:
         "anchor_lat": DEFAULT_CONFIG["LAT"],
         "anchor_lon": DEFAULT_CONFIG["LON"],
         "anchor_radius_km": 10.0,
-        "anchor_seed": 42,
-        "anchor_restarts": 4,
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -616,51 +629,142 @@ def anchor_study_polygon(lat: float, lon: float, radius_m: float):
     return polygon
 
 
-def automated_coarse_to_fine_anchor(
+def _node_sort_key(node: Any) -> Tuple[str, str]:
+    """Type-aware ordering so ties never depend on graph insertion order."""
+    return (type(node).__name__, str(node))
+
+
+def _collapsed_csr(
+    graph: nx.Graph, nodes: List[Any], default_length: Optional[float] = None
+) -> "csr_matrix":
+    """Symmetric CSR of the shortest road length between each pair of ``nodes``.
+
+    Parallel and opposite-direction edges collapse to their minimum length and
+    self loops are dropped. Pure numpy after one pass over the edges; this is the
+    one road-matrix builder shared by the anchor search and network analysis.
+    """
+    index = {node: i for i, node in enumerate(nodes)}
+    us: List[int] = []
+    vs: List[int] = []
+    raw: List[Any] = []
+    for u, v, length in graph.edges(data="length", default=default_length):
+        if u == v or u not in index or v not in index:
+            continue
+        us.append(index[u])
+        vs.append(index[v])
+        raw.append(length)
+    if any(length is None for length in raw):
+        raise ValueError("Every road edge must have length in metres.")
+    try:
+        lengths = np.asarray(raw, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Every road edge must have length in metres.") from exc
+    if len(lengths) and (not np.isfinite(lengths).all() or (lengths <= 0).any()):
+        raise ValueError("Road lengths must be finite and positive.")
+    n = len(nodes)
+    if not len(lengths):
+        return csr_matrix((n, n), dtype=float)
+    a = np.asarray(us, dtype=np.int64)
+    b = np.asarray(vs, dtype=np.int64)
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    pair = lo * n + hi
+    order = np.lexsort((lengths, pair))  # by pair, then shortest length first
+    pair_sorted = pair[order]
+    first = np.concatenate(([True], pair_sorted[1:] != pair_sorted[:-1]))
+    keep = order[first]
+    rows = np.concatenate((lo[keep], hi[keep]))
+    cols = np.concatenate((hi[keep], lo[keep]))
+    vals = np.concatenate((lengths[keep], lengths[keep]))
+    return csr_matrix((vals, (rows, cols)), shape=(n, n))
+
+
+def _dijkstra_batches(matrix: "csr_matrix", sources: Any):
+    """Yield ``(sources_in_batch, rows)`` with at most ``batch_size`` exact rows at once.
+
+    Never materialises an all-pairs matrix: memory stays O(batch_size * V).
+    """
+    size = ANCHOR_CONFIG["batch_size"]
+    for start in range(0, len(sources), size):
+        part = sources[start:start + size]
+        yield part, csgraph_dijkstra(matrix, directed=False, indices=part)
+
+
+def _road_network(graph: nx.Graph) -> Dict[str, Any]:
+    """Largest undirected road component as a CSR matrix plus WGS84 coordinates."""
+    all_nodes = sorted(graph.nodes, key=_node_sort_key)
+    full = _collapsed_csr(graph, all_nodes)
+    n_components, labels = csgraph_components(full, directed=False)
+    sizes = np.bincount(labels, minlength=n_components)
+    first_index = np.full(n_components, len(all_nodes))
+    np.minimum.at(first_index, labels, np.arange(len(all_nodes)))
+    biggest = np.flatnonzero(sizes == sizes.max())
+    component = biggest[np.argmin(first_index[biggest])]  # ties: lowest sorted node
+    keep = np.flatnonzero(labels == component)
+    nodes = [all_nodes[i] for i in keep]
+    if len(nodes) < 2:
+        raise ValueError("No connected roads available in the study area.")
+    try:
+        lonlat = np.array([(float(graph.nodes[n]["x"]), float(graph.nodes[n]["y"]))
+                           for n in nodes])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Every road node requires WGS84 x/y coordinates.") from exc
+    return {"nodes": nodes, "matrix": full[keep][:, keep].tocsr(), "lonlat": lonlat,
+            "components": int(n_components), "total_nodes": len(all_nodes)}
+
+
+def _stability_cases(study_radius_m: float) -> List[Dict[str, Any]]:
+    """Perturbed study circles: rescaled radius, and centre shifted N/E/S/W."""
+    shift = ANCHOR_CONFIG["stability_shift"] * study_radius_m
+    cases: List[Dict[str, Any]] = [
+        {"case": f"radius x{scale:g}", "dx": 0.0, "dy": 0.0, "radius": study_radius_m * scale}
+        for scale in ANCHOR_CONFIG["stability_scales"]
+    ]
+    for name, (ux, uy) in (("N", (0, 1)), ("E", (1, 0)), ("S", (0, -1)), ("W", (-1, 0))):
+        cases.append({"case": f"centre {ANCHOR_CONFIG['stability_shift']:.0%} {name}",
+                      "dx": ux * shift, "dy": uy * shift, "radius": study_radius_m})
+    return cases
+
+
+def find_cbd_anchors(
     graph: nx.MultiDiGraph,
     study_center: Tuple[float, float],
     study_radius_m: float = 10000.0,
-    random_seed: int = 42,
-    restarts: int = 4,
-    initial_radius_m: float = 4000.0,
     final_radius_m: float = 150.0,
-    max_iterations: int = 80,
-    max_evaluations: int = 2048,
-    objective: str = "composite",
+    max_rows: Optional[int] = None,
+    stability: bool = True,
 ) -> Dict[str, Any]:
-    """Reproducible ARPS on a fixed buffered WGS84 road graph, without I/O.
+    """Composite and Closeness-100% anchors from one road graph, without I/O.
 
-    Exact length-weighted SciPy Dijkstra uses the largest undirected component:
-    this is street accessibility, not a driving/one-way routing model. Parallel
-    and reverse edges use minimum length. Destinations and anchors lie inside
-    the study circle; paths may use buffer nodes. Junctions have >=3 distinct
-    neighbours; density counts them within 500 metric metres (no POI data).
-    All inside road nodes remain shortest-path destinations.
+    Deterministic: no seed, no restarts. Exact length-weighted SciPy Dijkstra on
+    the largest undirected component (street accessibility, not one-way routing);
+    parallel and reverse edges use the minimum length. Destinations and anchors
+    lie inside the study circle; paths may use buffer nodes. Junctions have >=3
+    distinct neighbours; density counts them within 500 metric metres.
 
-    objective="composite": junctions are preferred (road-node fallback only when
-    none exist), with Score = .5*C_rank + .3*degree_rank + .2*density_rank. Every
-    component is mapped onto a comparable 0..1 scale before weighting so the
-    nominal weights are the realised weights: degree/density are mid-rank
-    percentiles over the candidate pool, closeness is Phi((C-mean)/std) using
-    the exact closeness of a fixed reference sample. (The earlier bounded
-    transform C/(C+1/R) varied only ~0.25 per relative change of C, which let
-    junction density dominate a nominal 50% closeness weight.) All normalisers
-    are fixed functions of the graph: they never depend on the seed or probes.
+    Both objectives share one distance pass, so each exact row (closeness) is
+    computed once:
 
-    objective="closeness" is the second Closeness-100% anchor: every inside
-    road node is a candidate and Score = C_norm. Degree and density are retained
-    only as diagnostics. C_norm = C/(C+1/study_radius) is strictly monotone in C,
-    so it selects exactly the same winner as raw length-weighted closeness.
-    Normalisers and destinations are fixed across all probes.
-    Each seeded restart scans eight bearings, climbs strictly uphill, then
-    halves the radius on a plateau. The final neighbourhood is evaluated
-    exhaustively with exact shortest paths. If every eligible node fits the
-    evaluation budget, a final exhaustive audit certifies the global score
-    maximum independently of the seed. Otherwise a seed-independent pivot
-    screen ranks every candidate from the reference sample's distances, the
-    top-K are scored exactly and refined by a local exhaustive climb; this is
-    far more stable than the restarts alone but is NOT a global certificate.
-    Neither certificate proves an economic CBD. Resource exhaustion is explicit.
+    * composite - junction candidates (all inside nodes only if none exist),
+      Score = .5*C_rank + .3*degree_rank + .2*density_rank with degree/density
+      as mid-rank percentiles over the candidate pool and C_rank = Phi((C -
+      mean)/std) from the exact closeness of a fixed reference sample.
+    * closeness - every inside node is a candidate, Score = C/(C + 1/R), strictly
+      monotone in C, hence the raw length-weighted 1-median.
+
+    Each objective is exhaustive when its candidate pool fits ``rows_budget``
+    (``max_rows`` or ``max_row_nodes // V`` clamped): the global maximum of the
+    fixed objective is then certified. Otherwise every candidate is ranked with
+    the reference sample's distances (Eppstein-Wang pivots), the top-K are scored
+    exactly and a local exhaustive climb (``final_radius_m``) polishes the best:
+    seed-independent and stable, but not a global certificate. Neither proves an
+    economic CBD.
+
+    ``stability`` adds an *indicative* probe at almost no cost: the pivot rows are
+    also summed per perturbed circle (radius x0.8/x1.2, centre shifted 20% of the
+    radius N/E/S/W), the best few candidates of each case are scored exactly on
+    that case's destinations, and the drift of the best one from the anchor is
+    reported with a stable / check / unstable level. The exact oracle is
+    ``scripts/anchor_sensitivity.py``.
     """
     if not HAS_SCIPY:
         raise RuntimeError("Automated CBD search requires SciPy and NumPy.")
@@ -669,43 +773,18 @@ def automated_coarse_to_fine_anchor(
 
     started = time.perf_counter()
     anchor_study_polygon(*study_center, study_radius_m)
-    if not (0 < final_radius_m <= initial_radius_m <= study_radius_m):
-        raise ValueError("Require 0 < final radius <= initial radius <= study radius.")
-    if not (1 <= restarts <= 50 and 1 <= max_iterations <= 500
-            and 1 <= max_evaluations <= 10000):
-        raise ValueError("Invalid restart, iteration or evaluation limit.")
-    if objective not in {"composite", "closeness"}:
-        raise ValueError("objective must be 'composite' or 'closeness'.")
+    if not 0 < final_radius_m <= study_radius_m:
+        raise ValueError("Require 0 < final radius <= study radius.")
+    if max_rows is not None and not 1 <= max_rows <= 10000:
+        raise ValueError("Invalid row budget.")
     if not 2 <= len(graph) <= ANCHOR_CONFIG["max_nodes"]:
         raise ValueError("Road graph must contain 2–100,000 nodes; reduce the study area.")
     if CRS.from_user_input(graph.graph.get("crs", "EPSG:4326")) != CRS.from_epsg(4326):
         raise ValueError("Road graph must use WGS84 longitude/latitude (EPSG:4326).")
-    roads = nx.Graph()
-    roads.add_nodes_from(graph.nodes(data=True))
-    for u, v, attrs in graph.edges(data=True):
-        if u == v:
-            continue
-        try:
-            length = float(attrs["length"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("Every road edge must have length in metres.") from exc
-        if not np.isfinite(length) or length <= 0:
-            raise ValueError("Road lengths must be finite and positive.")
-        if not roads.has_edge(u, v) or length < roads[u][v]["length"]:
-            roads.add_edge(u, v, length=length)
-    node_key = lambda node: (type(node).__name__, str(node))
-    components = sorted(nx.connected_components(roads),
-                        key=lambda c: (-len(c), min(node_key(n) for n in c)))
-    roads = roads.subgraph(components[0])
-    nodes = sorted(roads, key=node_key)
-    if len(nodes) < 2:
-        raise ValueError("No connected roads available in the study area.")
-    index = {node: i for i, node in enumerate(nodes)}
-    try:
-        lonlat = np.array([(float(roads.nodes[n]["x"]), float(roads.nodes[n]["y"]))
-                           for n in nodes])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("Every road node requires WGS84 x/y coordinates.") from exc
+
+    net = _road_network(graph)
+    nodes, matrix, lonlat = net["nodes"], net["matrix"], net["lonlat"]
+    n = len(nodes)
     if (not np.isfinite(lonlat).all() or (np.abs(lonlat[:, 0]) > 180).any()
             or (np.abs(lonlat[:, 1]) > 90).any()):
         raise ValueError("Invalid road node coordinates.")
@@ -715,290 +794,313 @@ def automated_coarse_to_fine_anchor(
     eligible = np.flatnonzero(radial_distance <= study_radius_m)
     if len(eligible) < 2:
         raise ValueError("Fewer than two connected road nodes inside the study circle.")
-    degrees = np.array([roads.degree(n) for n in nodes], dtype=float)
+    prep_done = time.perf_counter()
+
+    degrees = np.diff(matrix.indptr).astype(float)  # distinct neighbours (no parallels)
     junctions = np.flatnonzero(degrees >= 3)
-    if objective == "closeness":
-        # Closeness 100% is a true network 1-median objective: every inside
-        # road node is eligible, including degree-2 nodes between junctions.
-        candidates_inside = eligible
-        junction_fallback = False
-    else:
-        candidates_inside = eligible[degrees[eligible] >= 3]
-        junction_fallback = len(candidates_inside) == 0
-        if junction_fallback:
-            candidates_inside = eligible
-    tree = cKDTree(xy[candidates_inside])
-    density = np.zeros(len(nodes))
+    composite_pool = eligible[degrees[eligible] >= 3]
+    junction_fallback = len(composite_pool) == 0
+    if junction_fallback:
+        composite_pool = eligible
+    pools = {"composite": composite_pool, "closeness": eligible}
+    density = np.zeros(n)
+    density_nodes = np.arange(n) if stability else eligible  # perturbed circles reach outside
     if len(junctions):
         # Inclusive radius with a sub-micrometre tolerance: lattice points that sit
         # exactly on the circle land at 500 ± 1e-9 m after the CRS round trip, so a
         # bare "<= 500" would depend on pyproj/libm rounding rather than geometry.
-        density = cKDTree(xy[junctions]).query_ball_point(
-            xy, ANCHOR_CONFIG["density_radius_m"] + 1e-6, return_length=True
-        ).astype(float)
+        density[density_nodes] = cKDTree(xy[junctions]).query_ball_point(
+            xy[density_nodes], ANCHOR_CONFIG["density_radius_m"] + 1e-6, return_length=True)
     # Diagnostics (and the Closeness-100% record): share of the inside maximum.
     degree_norm = degrees / max(float(degrees[eligible].max()), 1.0)
     density_norm = density / max(float(density[eligible].max()), 1.0)
 
-    def pool_midrank(values):
-        """Mid-rank percentile of each value within the candidate pool, in (0, 1)."""
-        pool = np.sort(values[candidates_inside])
+    def midrank(values, pool_nodes):
+        """Mid-rank percentile of each value within ``pool_nodes``, in (0, 1)."""
+        pool = np.sort(values[pool_nodes])
         return (np.searchsorted(pool, values, side="left")
                 + np.searchsorted(pool, values, side="right")) / (2.0 * len(pool))
 
-    degree_rank = pool_midrank(degrees)
-    density_rank = pool_midrank(density)
-    rows, cols, values = [], [], []
-    for u, v, attrs in roads.edges(data=True):
-        a, b = index[u], index[v]
-        rows.extend((a, b))
-        cols.extend((b, a))
-        values.extend((attrs["length"], attrs["length"]))
-    matrix = csr_matrix((values, (rows, cols)), shape=(len(nodes), len(nodes)))
-    scores: Dict[int, Dict[str, Any]] = {}
+    degree_rank = midrank(degrees, composite_pool)
+    density_rank = midrank(density, composite_pool)
     weights = {"closeness": 0.50, "degree": 0.30, "density": 0.20}
-    batch_size = ANCHOR_CONFIG["batch_size"]
     n_destinations = len(eligible)
+    rows_budget = int(max_rows) if max_rows else int(np.clip(
+        ANCHOR_CONFIG["max_row_nodes"] // n, ANCHOR_CONFIG["min_rows"], ANCHOR_CONFIG["max_rows"]))
 
-    # Fixed reference sample of destinations: exact closeness calibrates the
-    # composite normaliser and the summed distance rows power the pivot screen.
-    pivots: Dict[str, Any] = {}
+    # Fixed reference sample of destinations (constant seed): exact closeness
+    # calibrates the composite normaliser and the summed distance rows rank every
+    # candidate by pivot closeness. Its rows are shared, never recomputed.
+    n_ref = min(n_destinations, int(ANCHOR_CONFIG["reference_nodes"]))
+    ref_nodes = np.sort(np.random.default_rng(ANCHOR_CONFIG["reference_seed"]).choice(
+        eligible, size=n_ref, replace=False))
+    ref_c = np.empty(n_ref)
+    pivot_sum = np.zeros(n)
+    cases = _stability_cases(study_radius_m) if stability else []
+    case_inside = np.zeros((n, len(cases)), dtype=bool)
+    for k, case in enumerate(cases):
+        case_inside[:, k] = np.hypot(xy[:, 0] - case["dx"], xy[:, 1] - case["dy"]) <= case["radius"]
+    case_float = case_inside.astype(float)
+    case_pivot_sum = np.zeros((n, len(cases)))
+    case_ref_sum = np.zeros((n_ref, len(cases)))
+    # Distances from each exact row to every case's destinations: a by-product of
+    # the base pass, so the probe re-runs Dijkstra only for rows it has not seen.
+    case_sums: Dict[int, np.ndarray] = {}
+    filled = 0
+    for part, rows_d in _dijkstra_batches(matrix, ref_nodes):
+        ref_c[filled:filled + len(part)] = (n_destinations - 1) / rows_d[:, eligible].sum(axis=1)
+        pivot_sum += rows_d.sum(axis=0)
+        if cases:  # per-case sum over the pivots that fall inside that case's circle
+            case_pivot_sum += rows_d.T @ case_float[part]
+            chunk = rows_d @ case_float
+            case_ref_sum[filled:filled + len(part)] = chunk
+            case_sums.update((int(i), row) for i, row in zip(part, chunk))
+        filled += len(part)
+    ref_mean, ref_std = float(ref_c.mean()), float(ref_c.std())
+    # Per-case normaliser: exact closeness of the pivots inside each perturbed circle.
+    case_norm = []
+    for k in range(len(cases)):
+        member = case_inside[ref_nodes, k]
+        c_k = (case_inside[:, k].sum() - 1) / np.maximum(case_ref_sum[member, k], 1e-9)
+        case_norm.append((float(c_k.mean()), float(c_k.std())) if len(c_k) > 1 else (ref_mean, ref_std))
+    exact_c: Dict[int, float] = {int(p): float(c) for p, c in zip(ref_nodes, ref_c)}
+    pivots_done = time.perf_counter()
 
-    def ensure_pivots():
-        if pivots:
-            return pivots
-        n_ref = min(len(eligible), int(ANCHOR_CONFIG["reference_nodes"]))
-        ref_rng = np.random.default_rng(ANCHOR_CONFIG["reference_seed"])
-        ref_nodes = np.sort(ref_rng.choice(eligible, size=n_ref, replace=False))
-        ref_c = np.empty(n_ref)
-        pivot_sum = np.zeros(len(nodes))
-        for start in range(0, n_ref, batch_size):
-            part = ref_nodes[start:start + batch_size]
-            rows_d = csgraph_dijkstra(matrix, directed=False, indices=part)
-            ref_c[start:start + len(part)] = (
-                (n_destinations - 1) / rows_d[:, eligible].sum(axis=1))
-            pivot_sum += rows_d.sum(axis=0)
-        pivots.update(nodes=ref_nodes, c=ref_c, sum=pivot_sum, k=n_ref,
-                      mean=float(ref_c.mean()), std=float(ref_c.std()))
-        return pivots
+    def ensure_exact(candidates):
+        """Exact closeness for every candidate lacking it (one shared row each)."""
+        missing = [int(i) for i in candidates if int(i) not in exact_c]
+        for part, rows_d in _dijkstra_batches(matrix, missing):
+            for i, c in zip(part, (n_destinations - 1) / rows_d[:, eligible].sum(axis=1)):
+                exact_c[int(i)] = float(c)
+            if cases:
+                case_sums.update((int(i), row) for i, row in zip(part, rows_d @ case_float))
+        return len(missing)
 
-    def closeness_component(c):
+    def closeness_component(c, objective, norm=None):
         """Closeness mapped onto 0..1 (scalar or array), fixed for the whole search."""
         if objective == "closeness":
             return c / (c + 1.0 / study_radius_m)
-        ref = ensure_pivots()
-        if ref["std"] <= 0:
+        mean, std = norm if norm is not None else (ref_mean, ref_std)
+        if std <= 0:
             return np.full_like(np.asarray(c, dtype=float), 0.5)
-        return ndtr((c - ref["mean"]) / ref["std"])
+        return ndtr((c - mean) / std)
 
-    if objective == "composite":
-        ensure_pivots()  # normaliser must exist before the first probe
-
-    def evaluate(candidates):
-        missing = sorted(set(int(i) for i in candidates) - scores.keys())
-        if len(scores) + len(missing) > max_evaluations:
-            raise ValueError("Search evaluation budget exceeded; reduce the area or restarts.")
-        for start in range(0, len(missing), batch_size):
-            batch = missing[start:start + batch_size]
-            distances = csgraph_dijkstra(matrix, directed=False, indices=batch)
-            closeness = (n_destinations - 1) / distances[:, eligible].sum(axis=1)
-            for i, c in zip(batch, closeness):
-                cn = float(closeness_component(float(c)))
-                if objective == "closeness":
-                    objective_score, dn, jn = cn, float(degree_norm[i]), float(density_norm[i])
-                else:
-                    dn, jn = float(degree_rank[i]), float(density_rank[i])
-                    objective_score = (weights["closeness"] * cn
-                                       + weights["degree"] * dn + weights["density"] * jn)
-                scores[i] = {
-                    "score": float(objective_score),
-                    "closeness": float(c), "closeness_norm": cn,
-                    "degree_norm": dn, "density_norm": jn,
-                    "degree": int(degrees[i]), "junction_count": int(density[i]),
-                }
-
-    def best_of(candidates):
-        candidates = sorted(set(int(i) for i in candidates))
-        evaluate(candidates)
-        return max(candidates, key=lambda i: (scores[i]["score"], -i))
-
-    def location(i):
-        return {"node_id": str(nodes[i]), "lat": float(lonlat[i, 1]),
-                "lon": float(lonlat[i, 0]), **scores[i]}
-
-    rng = np.random.default_rng(random_seed)
-    seeds = rng.choice(candidates_inside, size=min(restarts, len(candidates_inside)), replace=False)
-    outcomes, trace, final_indices = [], [], []
-    for run, seed in enumerate(seeds):
-        current = int(seed)
-        evaluate([current])
-        radius, converged = float(initial_radius_m), False
-        for iteration in range(max_iterations):
-            previous = current
-            fine = radius <= final_radius_m
-            candidates = [current]
-            if fine:
-                candidates.extend(int(candidates_inside[j]) for j in tree.query_ball_point(
-                    xy[current], final_radius_m))
-            else:
-                for bearing in range(0, 360, 45):
-                    theta = radians(bearing)
-                    target = xy[current] + radius * np.array([sin(theta), cos(theta)])
-                    if np.linalg.norm(target) > study_radius_m:
-                        continue
-                    # Empty probes cannot snap to a distant, unrelated road.
-                    nearby = tree.query_ball_point(target, radius * 0.5)
-                    if nearby:
-                        j = min(nearby, key=lambda j: (
-                            float(np.linalg.norm(xy[candidates_inside[j]] - target)), int(candidates_inside[j])))
-                        candidates.append(int(candidates_inside[j]))
-            winner = best_of(candidates)
-            if scores[winner]["score"] > scores[current]["score"] + 1e-12:
-                current, action = winner, "move"
-            elif fine:
-                action, converged = "converged", True
-            else:
-                action = "contract"
-            trace.append({"restart": run, "iteration": iteration,
-                          "radius_m": radius, "action": action,
-                          "from_node_id": str(nodes[previous]), **location(current)})
-            if converged:
-                break
-            if action == "contract":
-                radius = max(final_radius_m, radius * 0.5)
-        final_indices.append(current)
-        outcomes.append({"seed": location(int(seed)), "anchor": location(current),
-                         "converged": converged, "iterations": iteration + 1,
-                         "final_radius_m": radius})
-    # Real-road trials expose local traps even after radial contraction (the 50
-    # local endpoints of one 10 km study lay up to 18 km apart). For affordable
-    # graphs, certify the objective globally. Beyond the budget, rank every
-    # candidate with the seed-independent pivot sample, score the top-K exactly
-    # and climb locally from the best: stable, but explicitly not certified.
-    def screen_and_refine():
-        ref = ensure_pivots()
-        cand = np.asarray(candidates_inside)
-        # A pivot's own row sums d(p, p) = 0, so it averages over k - 1 others.
-        k_eff = ref["k"] - np.isin(cand, ref["nodes"]).astype(float)
-        approx_c = k_eff / np.maximum(ref["sum"][cand], 1e-9)
+    def components(i, objective):
+        c = exact_c[i]
+        cn = float(closeness_component(c, objective))
         if objective == "closeness":
-            approx_score = approx_c
+            dn, jn = float(degree_norm[i]), float(density_norm[i])
+            score = cn
         else:
-            approx_score = (weights["closeness"] * closeness_component(approx_c)
-                            + weights["degree"] * degree_rank[cand]
-                            + weights["density"] * density_rank[cand])
-        order = np.lexsort((cand, -approx_score))  # score desc, node index asc
-        room = max(0, max_evaluations - len(scores))
-        chosen, fresh = [], 0
-        for j in order[: int(ANCHOR_CONFIG["screen_top_k"])]:
-            node = int(cand[j])
-            if node not in scores:
-                if fresh >= room:
-                    continue  # budget is full; only already-scored nodes may join
-                fresh += 1
-            chosen.append(node)
-        if chosen:
-            evaluate(chosen)
-        current = max(scores, key=lambda i: (scores[i]["score"], -i))
-        refined = False
-        for _ in range(max_iterations):
-            around = [current] + [int(candidates_inside[j]) for j in
-                                  tree.query_ball_point(xy[current], final_radius_m)]
-            if len(scores) + len(set(around) - scores.keys()) > max_evaluations:
-                break
-            best = best_of(around)
-            if scores[best]["score"] > scores[current]["score"] + 1e-12:
-                current = best
+            dn, jn = float(degree_rank[i]), float(density_rank[i])
+            score = (weights["closeness"] * cn
+                     + weights["degree"] * dn + weights["density"] * jn)
+        return {"score": float(score), "closeness": float(c), "closeness_norm": cn,
+                "degree_norm": dn, "density_norm": jn,
+                "degree": int(degrees[i]), "junction_count": int(density[i])}
+
+    def best_of(candidates, objective):
+        return max((int(i) for i in candidates),
+                   key=lambda i: (components(i, objective)["score"], -i))
+
+    def probe(objective, base_winner):
+        """Indicative drift of the anchor under rescaled / shifted study circles."""
+        pool = pools[objective]
+        in_ref = np.isin(pool, ref_nodes)
+        picks: List[np.ndarray] = []
+        case_ranks: List[Tuple[np.ndarray, np.ndarray]] = []
+        for k in range(len(cases)):
+            inside = case_inside[pool, k]
+            cand = pool[inside]
+            if objective == "composite" and len(cand):
+                # degree/density percentiles are re-taken inside each perturbed circle
+                case_ranks.append((midrank(degrees, cand), midrank(density, cand)))
             else:
-                refined = True
-                break
-        return {"pivots": ref["k"], "screened_top_k": len(chosen),
-                "exact_evaluations": len(scores), "refine_converged": refined}
+                case_ranks.append((degree_rank, density_rank))
+            if not len(cand):
+                picks.append(cand)
+                continue
+            k_eff = case_inside[ref_nodes, k].sum() - in_ref[inside].astype(float)
+            approx_c = k_eff / np.maximum(case_pivot_sum[cand, k], 1e-9)
+            if objective == "closeness":
+                approx = approx_c
+            else:
+                approx = (weights["closeness"] * closeness_component(approx_c, objective, case_norm[k])
+                          + weights["degree"] * case_ranks[k][0][cand]
+                          + weights["density"] * case_ranks[k][1][cand])
+            order = np.lexsort((cand, -approx))
+            picks.append(cand[order[:int(ANCHOR_CONFIG["stability_top_m"])]])
+        needed = sorted({int(i) for pick in picks for i in pick} - case_sums.keys())
+        for part, rows_d in _dijkstra_batches(matrix, needed):
+            case_sums.update((int(i), row) for i, row in zip(part, rows_d @ case_float))
+        reach_limit = float(radial_distance.max())
+        out = []
+        for k, case in enumerate(cases):
+            n_dest = int(case_inside[:, k].sum())
+            best, best_key = None, None
+            for i in picks[k]:
+                i = int(i)
+                c = (n_dest - 1) / case_sums[i][k] if case_sums[i][k] > 0 else 0.0
+                if objective == "closeness":
+                    score = c
+                else:
+                    score = (weights["closeness"] * float(closeness_component(c, objective, case_norm[k]))
+                             + weights["degree"] * float(case_ranks[k][0][i])
+                             + weights["density"] * float(case_ranks[k][1][i]))
+                if best_key is None or (score, -i) > best_key:
+                    best, best_key = i, (score, -i)
+            if best is None:
+                out.append({"case": case["case"], "drift_m": None, "node_id": None})
+                continue
+            drift = calculate_distance_meters(
+                lonlat[base_winner, 1], lonlat[base_winner, 0], lonlat[best, 1], lonlat[best, 0])
+            out.append({"case": case["case"], "drift_m": float(drift), "node_id": str(nodes[best]),
+                        "lat": float(lonlat[best, 1]), "lon": float(lonlat[best, 0]),
+                        "covered": bool(np.hypot(case["dx"], case["dy"]) + case["radius"] <= reach_limit)})
+        drifts = [c["drift_m"] for c in out if c["drift_m"] is not None]
+        if not drifts:
+            return None
+        worst = max(drifts)
+        ratio = worst / study_radius_m
+        level = ("stable" if ratio <= ANCHOR_CONFIG["stability_ok_ratio"]
+                 else "check" if ratio <= ANCHOR_CONFIG["stability_warn_ratio"] else "unstable")
+        return {"method": "pivot-screen + exact top-M per case (per-case pivot normaliser)",
+                "indicative": True, "cases": out, "max_drift_m": float(worst),
+                "median_drift_m": float(np.median(drifts)), "max_drift_ratio": float(ratio),
+                "level": level}
 
-    globally_certified = len(candidates_inside) <= max_evaluations
-    screening = None
-    if globally_certified:
-        winner = best_of(candidates_inside)
-    else:
-        screening = screen_and_refine()
-        winner = max(scores, key=lambda i: (scores[i]["score"], -i))
-    anchor = dict(
-        location(winner),
-        source=("Automated CBD Anchor — Closeness 100%"
-                if objective == "closeness" else "Automated CBD Anchor"),
-    )
-    warnings = []
-    if not globally_certified:
-        warnings.append(
-            f"กราฟเกินงบตรวจครบทุกโหนด: คัดผู้สมัครด้วย pivot closeness ({screening['pivots']} จุด) "
-            f"แล้วประเมินแม่นยำ {screening['screened_top_k']} อันดับแรกและไต่ต่อเฉพาะที่ — "
-            "เสถียรกว่าการสุ่มเริ่มต้นเดี่ยว ๆ แต่ไม่รับรอง global optimum")
-    if len(components) > 1:
-        warnings.append(f"ใช้ component ใหญ่ที่สุด; ตัด {len(graph) - len(nodes)} โหนดที่ไม่เชื่อมต่อ")
-    if not all(o["converged"] for o in outcomes):
-        warnings.append("บางจุดเริ่มต้นถึงขีดจำกัดรอบก่อนลู่เข้า; ผลเป็น best-so-far")
-    boundary_margin = float(study_radius_m - radial_distance[winner])
-    if boundary_margin < initial_radius_m:
-        warnings.append("Anchor ใกล้ขอบพื้นที่ศึกษา: ควรขยายพื้นที่แล้วเปรียบเทียบผล")
-    if junction_fallback:
-        warnings.append("ไม่พบทางแยกในพื้นที่ศึกษา: ใช้โหนดถนนทั่วไปเป็นผู้สมัคร Anchor แทน")
-    spread = max(calculate_distance_meters(anchor["lat"], anchor["lon"],
-                 o["anchor"]["lat"], o["anchor"]["lon"]) for o in outcomes)
+    def solve(objective):
+        """Exhaustive when the pool fits the row budget, else screen + refine."""
+        pool = pools[objective]
+        screening = None
+        if len(pool) <= rows_budget:
+            ensure_exact(pool)
+            winner = best_of(pool, objective)
+            certified, refined = True, True
+        else:
+            k_eff = n_ref - np.isin(pool, ref_nodes).astype(float)  # a pivot skips d(p,p)=0
+            approx_c = k_eff / np.maximum(pivot_sum[pool], 1e-9)
+            if objective == "closeness":
+                approx_score = approx_c
+            else:
+                approx_score = (weights["closeness"] * closeness_component(approx_c, objective)
+                                + weights["degree"] * degree_rank[pool]
+                                + weights["density"] * density_rank[pool])
+            top_k = min(int(ANCHOR_CONFIG["screen_top_k"]), rows_budget)
+            order = np.lexsort((pool, -approx_score))  # score desc, node index asc
+            chosen = [int(pool[j]) for j in order[:top_k]]
+            extra = ensure_exact(chosen)
+            tree = cKDTree(xy[pool])
+            pool_set = set(pool.tolist())
+            # every pool node that already has an exact row competes (pivots, and the
+            # other objective's exhaustive pass), not only this objective's own picks
+            scored = [i for i in exact_c if i in pool_set]
+            current = best_of(scored, objective)
+            refined = False
+            for _ in range(int(ANCHOR_CONFIG["refine_iterations"])):
+                around = [current] + [int(pool[j]) for j in
+                                      tree.query_ball_point(xy[current], final_radius_m)]
+                fresh = len([i for i in around if i not in exact_c])
+                if extra + fresh > rows_budget:
+                    break
+                extra += ensure_exact(around)
+                best = best_of(around, objective)
+                if components(best, objective)["score"] > components(current, objective)["score"] + 1e-12:
+                    current = best
+                else:
+                    refined = True
+                    break
+            winner, certified = current, False
+            screening = {"pivots": n_ref, "screened_top_k": len(chosen),
+                         "extra_rows": extra, "refine_converged": refined}
 
-    # Report the weights that actually move the ranking, not only the nominal ones.
-    if objective == "composite":
-        ref = ensure_pivots()
-        spread_c = (float(ndtr((ref["c"] - ref["mean"]) / ref["std"]).std())
-                    if ref["std"] > 0 else 0.0)
-        influence = {
-            "closeness": weights["closeness"] * spread_c,
-            "degree": weights["degree"] * float(degree_rank[candidates_inside].std()),
-            "density": weights["density"] * float(density_rank[candidates_inside].std()),
-        }
-        total_influence = sum(influence.values())
-        effective = {k: (v / total_influence if total_influence > 0 else weights[k])
-                     for k, v in influence.items()}
-        win = scores[winner]
-        contribution = {
-            "closeness": weights["closeness"] * win["closeness_norm"] / win["score"],
-            "degree": weights["degree"] * win["degree_norm"] / win["score"],
-            "density": weights["density"] * win["density_norm"] / win["score"],
-        } if win["score"] > 0 else dict(weights)
-        scoring = "rank-v2"
-        normalisation = {
-            "closeness": {"type": "normal-cdf-z", "mean": ref["mean"], "std": ref["std"],
-                          "reference_nodes": ref["k"]},
-            "degree": {"type": "mid-rank-percentile", "pool": len(candidates_inside)},
-            "density": {"type": "mid-rank-percentile", "pool": len(candidates_inside)},
-        }
-    else:
-        effective = {"closeness": 1.0, "degree": 0.0, "density": 0.0}
-        contribution = dict(effective)
-        scoring = "closeness-bounded"
-        normalisation = {"closeness": {"type": "C/(C+1/study_radius)"}}
+        anchor = dict(
+            {"node_id": str(nodes[winner]), "lat": float(lonlat[winner, 1]),
+             "lon": float(lonlat[winner, 0]), **components(winner, objective)},
+            source=("Automated CBD Anchor — Closeness 100%"
+                    if objective == "closeness" else "Automated CBD Anchor"),
+        )
+        warnings = []
+        if not certified:
+            warnings.append(
+                f"กราฟเกินงบตรวจครบทุกโหนด: คัดผู้สมัครด้วย pivot closeness ({screening['pivots']} จุด) "
+                f"แล้วประเมินแม่นยำ {screening['screened_top_k']} อันดับแรกและไต่ต่อเฉพาะที่ — "
+                "เสถียร (ไม่ขึ้นกับ seed) แต่ไม่รับรอง global optimum")
+        if net["components"] > 1:
+            warnings.append(f"ใช้ component ใหญ่ที่สุด; ตัด {net['total_nodes'] - n} โหนดที่ไม่เชื่อมต่อ")
+        boundary_margin = float(study_radius_m - radial_distance[winner])
+        if boundary_margin < ANCHOR_CONFIG["boundary_warn_ratio"] * study_radius_m:
+            warnings.append("Anchor ใกล้ขอบพื้นที่ศึกษา: ควรขยายพื้นที่แล้วเปรียบเทียบผล")
+        if objective == "composite" and junction_fallback:
+            warnings.append("ไม่พบทางแยกในพื้นที่ศึกษา: ใช้โหนดถนนทั่วไปเป็นผู้สมัคร Anchor แทน")
 
-    method = ("arps-exact-scipy-closeness-100"
-              if objective == "closeness" else "arps-exact-scipy")
-    if screening:
-        method = method.replace("arps-exact-scipy", "arps-pivot-screened-exact-scipy")
-    return {"anchor": anchor, "converged": all(o["converged"] for o in outcomes),
-            "method": method,
+        # Report the weights that actually move the ranking, not only the nominal ones.
+        if objective == "composite":
+            spread_c = (float(ndtr((ref_c - ref_mean) / ref_std).std()) if ref_std > 0 else 0.0)
+            influence = {
+                "closeness": weights["closeness"] * spread_c,
+                "degree": weights["degree"] * float(degree_rank[composite_pool].std()),
+                "density": weights["density"] * float(density_rank[composite_pool].std()),
+            }
+            total_influence = sum(influence.values())
+            effective = {k: (v / total_influence if total_influence > 0 else weights[k])
+                         for k, v in influence.items()}
+            win = components(winner, objective)
+            contribution = {
+                "closeness": weights["closeness"] * win["closeness_norm"] / win["score"],
+                "degree": weights["degree"] * win["degree_norm"] / win["score"],
+                "density": weights["density"] * win["density_norm"] / win["score"],
+            } if win["score"] > 0 else dict(weights)
+            scoring = "rank-v2"
+            nominal = dict(weights)
+            normalisation = {
+                "closeness": {"type": "normal-cdf-z", "mean": ref_mean, "std": ref_std,
+                              "reference_nodes": n_ref},
+                "degree": {"type": "mid-rank-percentile", "pool": len(composite_pool)},
+                "density": {"type": "mid-rank-percentile", "pool": len(composite_pool)},
+            }
+        else:
+            effective = nominal = contribution = {"closeness": 1.0, "degree": 0.0, "density": 0.0}
+            scoring = "closeness-bounded"
+            normalisation = {"closeness": {"type": "C/(C+1/study_radius)"}}
+
+        method = "exact-scipy" if certified else "pivot-screened-exact-scipy"
+        if objective == "closeness":
+            method += "-closeness-100"
+        stability_result = probe(objective, winner) if cases else None
+        if stability_result and stability_result["level"] != "stable":
+            warnings.append(
+                f"Anchor ขยับได้ถึง {stability_result['max_drift_m']:.0f} ม. "
+                f"({stability_result['max_drift_ratio']:.0%} ของรัศมี) เมื่อวงศึกษาเปลี่ยน ±20% — "
+                "ผลขึ้นกับวงที่เลือก (ประมาณการ)")
+        return {
+            "anchor": anchor, "converged": bool(refined), "method": method,
             "objective": objective, "density_source": "road-junctions-only",
-            "globally_certified": globally_certified,
-            "certification": ("exhaustive-fixed-objective" if globally_certified
+            "globally_certified": certified,
+            "certification": ("exhaustive-fixed-objective" if certified
                               else "pivot-screened-exact-top-k"),
-            "screening": screening, "scoring": scoring,
-            "nominal_weights": dict(weights) if objective == "composite"
-                               else {"closeness": 1.0, "degree": 0.0, "density": 0.0},
-            "effective_weights": effective, "winner_contribution": contribution,
+            "screening": screening, "scoring": scoring, "nominal_weights": dict(nominal),
+            "effective_weights": dict(effective), "winner_contribution": dict(contribution),
             "normalisation": normalisation,
             "study_center": list(study_center), "study_radius_m": study_radius_m,
-            "random_seed": int(random_seed), "restarts": outcomes, "trace": trace,
-            "evaluated_nodes": len(scores), "graph_nodes": len(nodes),
-            "candidate_nodes": len(candidates_inside), "junction_fallback": junction_fallback,
-            "destination_nodes": len(eligible), "boundary_margin_m": boundary_margin,
-            "restart_max_distance_m": spread, "warnings": warnings,
-            "compute_seconds": time.perf_counter() - started}
+            "evaluated_nodes": int(sum(1 for i in pool if int(i) in exact_c)),
+            "graph_nodes": n, "candidate_nodes": int(len(pool)),
+            "junction_fallback": bool(objective == "composite" and junction_fallback),
+            "destination_nodes": int(n_destinations), "boundary_margin_m": boundary_margin,
+            "warnings": warnings, "stability": stability_result,
+        }
+
+    results = {objective: solve(objective) for objective in ("composite", "closeness")}
+    finished = time.perf_counter()
+    timings = {"prep_s": prep_done - started, "pivots_s": pivots_done - prep_done,
+               "exact_s": finished - pivots_done, "compute_s": finished - started}
+    for result in results.values():
+        result["compute_seconds"] = timings["compute_s"]
+        result["timings"] = timings
+    return {**results, "timings": timings, "rows_budget": rows_budget,
+            "graph": {"nodes": n, "edges": int(matrix.nnz // 2),
+                      "dropped_nodes": net["total_nodes"] - n},
+            "study_center": list(study_center), "study_radius_m": study_radius_m}
 
 
 def get_fill_color(minutes: float, colors_config: Dict[str, str]) -> str:
@@ -2026,19 +2128,115 @@ def load_graph_from_cache(cache_key: str) -> Optional[nx.MultiDiGraph]:
     return None
 
 
-def save_graph_to_cache(cache_key: str, graph: nx.MultiDiGraph) -> None:
-    """Persist an OSM graph to disk atomically so readers never see a partial file."""
-    cache_file = CACHE_DIR / f"osm_graph_{cache_key}.pkl"
-    tmp_file = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+def _atomic_write(path: Path, data: bytes) -> None:
+    tmp_file = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        with open(tmp_file, "wb") as f:
-            pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp_file, cache_file)
+        tmp_file.write_bytes(data)
+        os.replace(tmp_file, path)
     except Exception:
         try:
             tmp_file.unlink()
         except OSError:
-            pass  # Caching is best-effort
+            pass
+        raise
+
+
+def save_graph_to_cache(
+    cache_key: str,
+    graph: nx.MultiDiGraph,
+    footprint_wkt: Optional[str] = None,
+    network_type: Optional[str] = None,
+) -> None:
+    """Persist an OSM graph atomically so readers never see a partial file.
+
+    With ``footprint_wkt`` and ``network_type`` a small JSON sidecar records which
+    polygon the graph covers, so a later request wholly inside it can be served
+    from this entry instead of downloading again (see ``_reuse_covering_graph``).
+    """
+    cache_file = CACHE_DIR / f"osm_graph_{cache_key}.pkl"
+    try:
+        _atomic_write(cache_file, pickle.dumps(graph, protocol=pickle.HIGHEST_PROTOCOL))
+    except Exception:
+        return  # Caching is best-effort
+    if footprint_wkt and network_type:
+        try:
+            footprint = wkt.loads(footprint_wkt)
+            meta = {
+                "version": 1, "network_type": network_type,
+                "footprint_wkt": wkt.dumps(footprint, rounding_precision=6),
+                "bounds": list(footprint.bounds), "nodes": len(graph),
+                "edges": graph.number_of_edges(),
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "endpoint": graph.graph.get("overpass_endpoint"),
+            }
+            _atomic_write(cache_file.with_suffix(".json"),
+                          json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            pass  # a missing sidecar only disables reuse of this entry
+
+
+def find_covering_cache_key(polygon_wkt_str: str, network_type: str) -> Optional[str]:
+    """Key of the smallest cached graph of ``network_type`` whose footprint contains the polygon.
+
+    Reads only the tiny sidecars. Partial coverage is never used (it would bias the
+    analysis near the boundary) and entries without a sidecar are not indexed.
+    """
+    if not ANCHOR_CONFIG["reuse_covering_cache"] or not CACHE_DIR.exists():
+        return None
+    try:
+        requested = wkt.loads(polygon_wkt_str)
+    except (ValueError, TypeError):
+        return None
+    rx0, ry0, rx1, ry1 = requested.bounds
+    best: Optional[Tuple[float, str]] = None
+    for sidecar in CACHE_DIR.glob("osm_graph_*.json"):
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            if meta.get("version") != 1 or meta.get("network_type") != network_type:
+                continue
+            x0, y0, x1, y1 = meta["bounds"]
+            if not (x0 <= rx0 and y0 <= ry0 and x1 >= rx1 and y1 >= ry1):
+                continue  # cheap reject before parsing the footprint
+            if not sidecar.with_suffix(".pkl").exists():
+                continue
+            footprint = wkt.loads(meta["footprint_wkt"])
+            if not footprint.is_valid:
+                footprint = footprint.buffer(0)
+            if footprint.contains(requested) and (best is None or footprint.area < best[0]):
+                best = (footprint.area, sidecar.stem[len("osm_graph_"):])
+        except Exception:
+            continue  # corrupt sidecar: ignore, never fail the request
+    return best[1] if best else None
+
+
+def cached_graph_available(polygon_wkt_str: str, network_type: str) -> bool:
+    """True when a request can be served without Overpass (exact or covering cache)."""
+    key = get_cache_key(polygon_wkt_str, network_type)
+    return ((CACHE_DIR / f"osm_graph_{key}.pkl").exists()
+            or find_covering_cache_key(polygon_wkt_str, network_type) is not None)
+
+
+def _reuse_covering_graph(
+    polygon_wkt_str: str, polygon_geom: Any, network_type: str, cache_key: str
+) -> Optional[nx.MultiDiGraph]:
+    """Crop a covering cached graph to the polygon (same rule as ``graph_from_polygon``)."""
+    source_key = find_covering_cache_key(polygon_wkt_str, network_type)
+    if source_key is None or source_key == cache_key:
+        return None
+    superset = load_graph_from_cache(source_key)
+    if superset is None:
+        return None
+    try:
+        cropped = ox.truncate.truncate_graph_polygon(superset, polygon_geom, truncate_by_edge=True)
+        cropped = ox.truncate.largest_component(cropped, strongly=False)
+    except Exception:
+        return None  # e.g. no nodes inside the polygon: fall back to a real download
+    if len(cropped) < 2:
+        return None
+    cropped.graph["reused_from"] = source_key
+    cropped.graph["osm_source"] = "cache-crop"
+    save_graph_to_cache(cache_key, cropped, polygon_wkt_str, network_type)
+    return cropped
 
 
 def get_cache_stats() -> Dict[str, Any]:
@@ -2259,9 +2457,13 @@ def _fetch_osm_graph(
     attempts = max(1, int(OVERPASS_CONFIG["attempts_per_endpoint"]))
     failures: List[str] = []
 
-    # Fast path outside the lock: a cache hit must not queue behind another
-    # session's (possibly minutes-long) download.
+    # Fast paths outside the lock: a cache hit (exact, or a cached graph that fully
+    # covers this polygon) must not queue behind another session's download.
     G = load_graph_from_cache(cache_key)
+    if G is not None:
+        G.graph["osm_source"] = "cache"
+        return G, True, None
+    G = _reuse_covering_graph(polygon_wkt_str, polygon_geom, network_type, cache_key)
     if G is not None:
         return G, True, None
 
@@ -2270,6 +2472,7 @@ def _fetch_osm_graph(
         # Re-check: a session that held the lock may have just filled the cache.
         G = load_graph_from_cache(cache_key)
         if G is not None:
+            G.graph["osm_source"] = "cache"
             return G, True, None
 
         endpoints: List[str] = []
@@ -2289,7 +2492,8 @@ def _fetch_osm_graph(
                             truncate_by_edge=True,
                         )
                         G.graph["overpass_endpoint"] = endpoint
-                        save_graph_to_cache(cache_key, G)
+                        G.graph["osm_source"] = "download"
+                        save_graph_to_cache(cache_key, G, polygon_wkt_str, network_type)
                         return G, False, None
                     except ox._errors.InsufficientResponseError:
                         return None, False, (
@@ -2355,36 +2559,24 @@ def compute_weighted_closeness(
         closeness.update(nx.closeness_centrality(G_lcc, distance="length"))
         return closeness, "networkx-fallback"
 
-    # สร้าง sparse adjacency (เก็บ min length เมื่อมี parallel edges)
+    # sparse adjacency (min length เมื่อมี parallel/reverse edges) — ตัวสร้างเดียวกับ anchor search
     nodelist = list(G_lcc.nodes)
-    idx = {node: i for i, node in enumerate(nodelist)}
-    best_len: Dict[Tuple[int, int], float] = {}
-    for u, v, length in G_lcc.edges(data="length", default=1.0):
-        if u == v:
-            continue
-        a, b = idx[u], idx[v]
-        if a > b:
-            a, b = b, a
-        L = float(length)
-        if L < best_len.get((a, b), float("inf")):
-            best_len[(a, b)] = L
-
-    rows = np.fromiter((k[0] for k in best_len), dtype=np.int32, count=len(best_len))
-    cols = np.fromiter((k[1] for k in best_len), dtype=np.int32, count=len(best_len))
-    vals = np.fromiter(best_len.values(), dtype=np.float64, count=len(best_len))
-    csr = csr_matrix((vals, (rows, cols)), shape=(n, n))
+    csr = _collapsed_csr(G_lcc, nodelist, default_length=1.0)
 
     if n <= NETWORK_CONFIG["closeness_exact_threshold"]:
-        dist = csgraph_dijkstra(csr, directed=False)
-        sums = dist.sum(axis=1)
+        # all-pairs ที่ n <= 3000 (<= ~72 MB); แถวต่อแถวผ่านตัวช่วยเดียวกับ anchor search
+        sums = np.empty(n)
+        for part, rows_d in _dijkstra_batches(csr, np.arange(n)):
+            sums[part] = rows_d.sum(axis=1)
         k_eff = n - 1
         method = "exact-scipy"
     else:
         k = min(NETWORK_CONFIG["closeness_k_pivots"], n)
         rng = np.random.default_rng(42)
         pivots = rng.choice(n, size=k, replace=False)
-        dist = csgraph_dijkstra(csr, directed=False, indices=pivots)
-        sums = dist.sum(axis=0)
+        sums = np.zeros(n)
+        for _part, rows_d in _dijkstra_batches(csr, pivots):
+            sums += rows_d.sum(axis=0)
         k_eff = k
         method = "pivot-approx"
 
@@ -3036,14 +3228,24 @@ def _sync_rent_samples_from_editor(edited_df: "pd.DataFrame") -> None:
         StateManager.set_rent_samples(new_samples)
 
 
+_ANCHOR_CONTEXT_KEYS = ("study_center", "study_radius_m", "network_type")
+
+
 def _anchor_search_context() -> Dict[str, Any]:
     return {
         "study_center": [st.session_state.anchor_lat, st.session_state.anchor_lon],
         "study_radius_m": st.session_state.anchor_radius_km * 1000,
-        "random_seed": st.session_state.anchor_seed,
-        "restarts": st.session_state.anchor_restarts,
         "network_type": TRAVEL_MODE_TO_NETWORK_TYPE.get(StateManager.get_travel_mode(), "drive"),
     }
+
+
+def _anchor_context_matches(saved: Optional[Dict[str, Any]], current: Dict[str, Any]) -> bool:
+    """Compare only the inputs that change the answer.
+
+    Results saved by the earlier seeded search also carry ``random_seed`` and
+    ``restarts``; those no longer matter and must not invalidate a saved result.
+    """
+    return bool(saved) and all(saved.get(k) == current.get(k) for k in _ANCHOR_CONTEXT_KEYS)
 
 
 def _parse_anchor_center_input(value: str) -> Tuple[float, float]:
@@ -3063,14 +3265,47 @@ def _parse_anchor_center_input(value: str) -> Tuple[float, float]:
     return lat, lon
 
 
-def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
-    """Render the original composite anchor and a second Closeness-100% anchor."""
+def _anchor_summary(label: str, result: Dict[str, Any], diagnostics: bool = False) -> None:
+    """Compact, identical presentation for the composite and the Closeness-100% anchor."""
+    anchor = result["anchor"]
+    st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
+    st.caption(f"Score {anchor['score']:.4f} · {result['evaluated_nodes']} โหนดที่ประเมินแม่นยำ "
+               f"จาก {result['candidate_nodes']} candidates")
+    if diagnostics:
+        st.caption(f"Closeness {anchor['closeness']:.8f} 1/m · Degree {anchor['degree']} · "
+                   f"Junctions/500m {anchor['junction_count']} (diagnostics only)")
+    st.caption("ตรวจคะแนนครบทุก candidate: ยืนยันคะแนนสูงสุดของ objective นี้แล้ว"
+               if result.get("globally_certified")
+               else "คัดด้วย pivot closeness แล้วประเมินแม่นยำ — ไม่รับรอง global optimum")
+    effective = result.get("effective_weights")
+    if effective and result.get("scoring") == "rank-v2":
+        contribution = result["winner_contribution"]
+        st.caption(
+            "น้ำหนักที่มีผลจริงต่อการจัดอันดับ — "
+            f"Closeness {effective['closeness']:.0%} · Degree {effective['degree']:.0%} · "
+            f"Density {effective['density']:.0%} (ประกาศ 50/30/20); "
+            f"สัดส่วนคะแนนที่ผู้ชนะ — {contribution['closeness']:.0%} / "
+            f"{contribution['degree']:.0%} / {contribution['density']:.0%}"
+        )
+    stability = result.get("stability")
+    if stability:
+        badge = {"stable": "🟢 นิ่ง", "check": "🟡 ควรตรวจ", "unstable": "🔴 ไม่นิ่ง"}[stability["level"]]
+        st.caption(
+            f"ความนิ่งเมื่อวงศึกษาเปลี่ยน ±20% (ประมาณการ): {badge} — ขยับสูงสุด "
+            f"{stability['max_drift_m']:.0f} ม. ({stability['max_drift_ratio']:.0%} ของรัศมี)"
+        )
+    for warning in result.get("warnings", []):
+        st.warning(warning)
+
+
+def _render_sidebar_anchor_panel(locked: bool) -> bool:
+    """One button, one road download, both anchors (Composite + Closeness 100%)."""
     with st.expander("🎯 Automated CBD Anchor", expanded=True):
-        st.caption("กำหนดพื้นที่ศึกษา แล้วสุ่มจุดบนถนนเพื่อค้นหา 8 ทิศ: 4 กม. → 150 ม.")
+        st.caption("กำหนดพื้นที่ศึกษา แล้วค้นหาจุดศูนย์กลางเชิงโครงข่ายถนน (ไม่ใช้ seed — ผลซ้ำได้เสมอ)")
         st.info(
             "ผลลัพธ์คือ **ศูนย์กลางเชิงโครงข่ายถนน** ของพื้นที่ที่เลือก (ขึ้นกับจุดศูนย์กลาง/รัศมี) "
-            "ยังไม่ได้พิสูจน์ว่าตรงกับ CBD เชิงเศรษฐกิจ — ตรวจความไวด้วย "
-            "`scripts/anchor_sensitivity.py` และเทียบกับจุดที่ทราบก่อนใช้ตัดสินใจ",
+            "ยังไม่ได้พิสูจน์ว่าตรงกับ CBD เชิงเศรษฐกิจ — ดูป้ายความนิ่งด้านล่าง "
+            "และเทียบกับจุดที่ทราบก่อนใช้ตัดสินใจ",
             icon="ℹ️",
         )
         if "anchor_center_input" not in st.session_state:
@@ -3102,105 +3337,56 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
                 st.session_state.anchor_lon = center_lon
         st.number_input("รัศมีพื้นที่ศึกษา (กม.)", 4.0, 20.0,
                         key="anchor_radius_km", step=1.0, disabled=locked)
-        st.number_input("Random seed (ทำซ้ำได้)", 0, 2147483647,
-                        key="anchor_seed", disabled=locked)
-        st.number_input("จำนวนจุดเริ่มต้น", 1, 50, key="anchor_restarts", disabled=locked)
 
         context = _anchor_search_context()
         result = st.session_state.get(StateManager.K_AUTO_ANCHOR)
         closeness_result = st.session_state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
-        if ((result and result.get("context") != context)
-                or (closeness_result and closeness_result.get("context") != context)):
+        if ((result and not _anchor_context_matches(result.get("context"), context))
+                or (closeness_result
+                    and not _anchor_context_matches(closeness_result.get("context"), context))):
             StateManager.clear_results(["anchor", "anchor_closeness"])
             st.rerun()
 
         if not HAS_SCIPY:
             st.error("กรุณาติดตั้ง scipy และ numpy เพื่อค้นหา Anchor")
 
-        st.markdown("##### ① Composite (เดิม)")
-        st.caption("คะแนน: 50% Closeness + 30% Degree + 20% ความหนาแน่นทางแยกใน 500 ม. "
-                   "(แต่ละตัวแปลงเป็นอันดับ/percentile 0–1 ก่อนถ่วงน้ำหนัก เพื่อให้น้ำหนักมีผลจริง) "
-                   "ใช้ junction เป็น candidate หลัก")
-        run_composite = st.button(
+        run_anchor = st.button(
             "🎯 ค้นหา CBD Anchor อัตโนมัติ",
             disabled=locked or not HAS_SCIPY or not center_valid,
             use_container_width=True,
         )
+
         if result:
-            anchor = result["anchor"]
-            st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
-            st.caption(f"Score {anchor['score']:.4f} · {result['evaluated_nodes']} โหนดที่ประเมิน · "
-                       f"คำนวณ {result['compute_seconds']:.2f} วินาที · "
-                       f"รวมโหลดข้อมูล {result['total_seconds']:.2f} วินาที")
-            st.caption(
-                f"แหล่งกราฟ: {result.get('graph_source_endpoint', 'unknown')}"
-                + (" (disk cache)" if result.get("graph_cached") else "")
-            )
-            st.caption("ตรวจคะแนนครบทุก candidate: ยืนยันคะแนนสูงสุดของ objective นี้แล้ว"
-                       if result.get("globally_certified") else "ยังไม่ยืนยันคะแนนสูงสุดทั้งพื้นที่ศึกษา")
-            effective = result.get("effective_weights")
-            if effective and result.get("scoring") == "rank-v2":
-                st.caption(
-                    "น้ำหนักที่มีผลจริงต่อการจัดอันดับ — "
-                    f"Closeness {effective['closeness']:.0%} · Degree {effective['degree']:.0%} · "
-                    f"Density {effective['density']:.0%} (ประกาศ 50/30/20); "
-                    "สัดส่วนคะแนนที่ผู้ชนะ — "
-                    f"{result['winner_contribution']['closeness']:.0%} / "
-                    f"{result['winner_contribution']['degree']:.0%} / "
-                    f"{result['winner_contribution']['density']:.0%}"
-                )
-            for warning in result["warnings"]:
-                st.warning(warning)
-            st.download_button(
-                "ดาวน์โหลด Composite Anchor JSON",
-                json.dumps(result, ensure_ascii=False, indent=2),
-                "automated_cbd_anchor.json",
-                "application/json",
-            )
-            if st.button("ล้าง Automated Anchor เดิม", disabled=locked):
-                StateManager.clear_results(["anchor"])
-                st.rerun()
-
-        st.markdown("##### ② Closeness 100%")
-        st.caption("Score = Closeness เพียงอย่างเดียว (Exact SciPy Dijkstra, ระยะถนนเป็นเมตร) "
-                   "และเปิดทุก road node ในพื้นที่เป็น candidate; Degree/Junction Density แสดงเพื่อวินิจฉัยเท่านั้น")
-        run_closeness = st.button(
-            "🎯 ค้นหา CBD Anchor — Closeness 100%",
-            disabled=locked or not HAS_SCIPY or not center_valid,
-            use_container_width=True,
-        )
+            st.markdown("##### ① Composite (ใช้กับ Rent Gradient)")
+            st.caption("Closeness 50% + Degree 30% + ความหนาแน่นทางแยกใน 500 ม. 20% "
+                       "(แต่ละตัวแปลงเป็นอันดับ 0–1 ก่อนถ่วงน้ำหนัก) — junction เป็น candidate หลัก")
+            _anchor_summary("composite", result)
         if closeness_result:
-            anchor = closeness_result["anchor"]
-            st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
+            st.markdown("##### ② Closeness 100% (เปรียบเทียบเท่านั้น)")
+            st.caption("Score = Closeness อย่างเดียว (ระยะถนนเป็นเมตร) ทุก road node เป็น candidate; "
+                       "Rent Gradient ยังคงใช้ตัวที่ ①")
+            _anchor_summary("closeness", closeness_result, diagnostics=True)
+        shown = result or closeness_result
+        if shown:
+            timings = shown.get("timings", {})
+            graph_info = shown.get("graph", {})
             st.caption(
-                f"Closeness norm {anchor['closeness_norm']:.6f} · "
-                f"Closeness {anchor['closeness']:.8f} 1/m · "
-                f"{closeness_result['candidate_nodes']} road-node candidates"
+                f"โหลดข้อมูลถนน {shown.get('load_seconds', 0.0):.2f} วินาที"
+                f" ({graph_info.get('source', 'unknown')}) · คำนวณ {shown['compute_seconds']:.2f} วินาที"
+                + (f" (เตรียม {timings['prep_s']:.2f} · pivot {timings['pivots_s']:.2f} · "
+                   f"exact {timings['exact_s']:.2f})" if timings else "")
             )
-            st.caption(
-                f"Degree {anchor['degree']} · Junctions/500m {anchor['junction_count']} "
-                "(diagnostics only)"
-            )
-            st.caption(f"คำนวณ {closeness_result['compute_seconds']:.2f} วินาที · "
-                       f"รวมโหลดข้อมูล {closeness_result['total_seconds']:.2f} วินาที")
-            st.caption("ตรวจครบทุก road-node candidate: ยืนยัน Closeness สูงสุดในพื้นที่ศึกษาแล้ว"
-                       if closeness_result.get("globally_certified")
-                       else "กราฟใหญ่เกินงบ exhaustive audit: คัดด้วย pivot closeness แล้วประเมินแม่นยำ — ไม่รับรอง global optimum")
-            for warning in closeness_result["warnings"]:
-                st.warning(warning)
             st.download_button(
-                "ดาวน์โหลด Closeness 100% Anchor JSON",
-                json.dumps(closeness_result, ensure_ascii=False, indent=2),
-                "automated_cbd_anchor_closeness_100.json",
+                "ดาวน์โหลด Anchor JSON",
+                json.dumps({"composite": result, "closeness": closeness_result},
+                           ensure_ascii=False, indent=2),
+                "automated_cbd_anchors.json",
                 "application/json",
             )
-            if st.button("ล้าง Closeness 100% Anchor", disabled=locked):
-                StateManager.clear_results(["anchor_closeness"])
+            if st.button("ล้าง Anchor ที่ค้นหาไว้", disabled=locked):
+                StateManager.clear_results(["anchor", "anchor_closeness"])
                 st.rerun()
-
-        st.caption("ตัวที่ 2 เป็น anchor สำหรับเปรียบเทียบบนแผนที่; "
-                   "Rent Gradient ยังคงใช้ Automated CBD Anchor ตัวเดิมเพื่อไม่เปลี่ยนพฤติกรรมเดิม")
-        return run_composite, run_closeness
+        return run_anchor
 
 
 def _render_sidebar_rent_panel(locked: bool) -> bool:
@@ -3323,13 +3509,13 @@ def _render_sidebar_map_settings(locked: bool) -> None:
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
-def render_sidebar() -> Tuple[bool, bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
+def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     """
     Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
     ① ปักหมุด → ② Isochrone CBD → ③ Network → ④ Rent Gradient → ตั้งค่าแผนที่
 
     Returns:
-        ``(do_calculate, do_network, do_rent, do_anchor, do_anchor_closeness, active_markers_list)``
+        ``(do_calculate, do_network, do_rent, do_anchor, active_markers_list)``
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -3358,9 +3544,17 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, bool, List[Tuple[int, Dict
         st.markdown("---")
 
         _render_sidebar_map_settings(ui_locked)
-        do_anchor, do_anchor_closeness = _render_sidebar_anchor_panel(ui_locked)
+        do_anchor = _render_sidebar_anchor_panel(ui_locked)
 
-    return do_calc, do_network, do_rent, do_anchor, do_anchor_closeness, active_list
+    return do_calc, do_network, do_rent, do_anchor, active_list
+
+
+def _stability_popup(result: Dict[str, Any]) -> str:
+    stability = result.get("stability")
+    if not stability:
+        return ""
+    return (f"<br>Stability: {stability['level']} "
+            f"(max drift {stability['max_drift_m']:.0f} m, indicative)")
 
 
 def render_map() -> Optional[Dict[str, Any]]:
@@ -3390,23 +3584,14 @@ def render_map() -> Optional[Dict[str, Any]]:
         folium.Marker(
             [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor",
             popup=folium.Popup(f"<b>Automated CBD Anchor</b><br>Score: {anchor['score']:.4f}"
-                               f"<br>Junctions / 500 m: {anchor['junction_count']}", max_width=280),
+                               f"<br>Junctions / 500 m: {anchor['junction_count']}"
+                               + _stability_popup(automated), max_width=280),
             icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
         ).add_to(m)
-        search_layer = folium.FeatureGroup(name="Automated Anchor search paths", show=False)
-        for run, outcome in enumerate(automated["restarts"]):
-            seed = outcome["seed"]
-            points = [[seed["lat"], seed["lon"]]] + [
-                [step["lat"], step["lon"]] for step in automated["trace"]
-                if step["restart"] == run and step["action"] == "move"
-            ]
-            folium.CircleMarker(points[0], radius=4, tooltip=f"Random seed {run + 1}",
-                                color="#184f95").add_to(search_layer)
-            if len(points) > 1:
-                folium.PolyLine(points, color="#184f95", weight=2).add_to(search_layer)
+        boundary_layer = folium.FeatureGroup(name="Automated Anchor study boundary", show=False)
         folium.Circle(automated["study_center"], radius=automated["study_radius_m"],
-                      color="#184f95", fill=False, tooltip="Study boundary").add_to(search_layer)
-        search_layer.add_to(m)
+                      color="#184f95", fill=False, tooltip="Study boundary").add_to(boundary_layer)
+        boundary_layer.add_to(m)
 
     if automated_closeness:
         anchor = automated_closeness["anchor"]
@@ -3418,33 +3603,12 @@ def render_map() -> Optional[Dict[str, Any]]:
                 f"<br>Closeness norm: {anchor['closeness_norm']:.6f}"
                 f"<br>Closeness: {anchor['closeness']:.8f} 1/m"
                 f"<br>Degree: {anchor['degree']} (diagnostic)"
-                f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)",
+                f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)"
+                + _stability_popup(automated_closeness),
                 max_width=320,
             ),
             icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
         ).add_to(m)
-        closeness_layer = folium.FeatureGroup(
-            name="Automated Anchor Closeness 100% search paths", show=False
-        )
-        for run, outcome in enumerate(automated_closeness["restarts"]):
-            seed = outcome["seed"]
-            points = [[seed["lat"], seed["lon"]]] + [
-                [step["lat"], step["lon"]] for step in automated_closeness["trace"]
-                if step["restart"] == run and step["action"] == "move"
-            ]
-            folium.CircleMarker(
-                points[0], radius=4, tooltip=f"Closeness seed {run + 1}", color="#2A9D8F"
-            ).add_to(closeness_layer)
-            if len(points) > 1:
-                folium.PolyLine(points, color="#2A9D8F", weight=2).add_to(closeness_layer)
-        folium.Circle(
-            automated_closeness["study_center"],
-            radius=automated_closeness["study_radius_m"],
-            color="#2A9D8F",
-            fill=False,
-            tooltip="Closeness 100% study boundary",
-        ).add_to(closeness_layer)
-        closeness_layer.add_to(m)
 
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
@@ -4299,8 +4463,7 @@ def _run_network_analysis_with_progress(
         progress_bar.progress(0.05)
 
         # Stage 2: Check cache
-        cache_key = get_cache_key(polygon_wkt_str, network_type)
-        is_cached = load_graph_from_cache(cache_key) is not None
+        is_cached = cached_graph_available(polygon_wkt_str, network_type)
 
         if is_cached:
             status_container.success("✅ **พบข้อมูลใน Cache!** กำลังโหลด...")
@@ -4390,60 +4553,55 @@ def perform_network_analysis() -> None:
             )
 
 
-def perform_automated_anchor(objective: str = "composite") -> None:
-    """Download one buffered graph, search one objective, then publish atomically."""
-    if objective not in {"composite", "closeness"}:
-        raise ValueError("objective must be 'composite' or 'closeness'.")
+def perform_automated_anchor() -> None:
+    """Download one buffered graph, find both anchors in one pass, publish atomically."""
     context = _anchor_search_context()
     started = time.perf_counter()
-    state_key = (
-        StateManager.K_AUTO_ANCHOR_CLOSENESS
-        if objective == "closeness"
-        else StateManager.K_AUTO_ANCHOR
-    )
-    label = "Closeness 100%" if objective == "closeness" else "Composite"
     try:
         with st.spinner(
-            f"กำลังโหลดถนนพร้อม buffer 20% และค้นหา CBD ({label})… การโหลด OSM อาจใช้เวลานาน"
+            "กำลังโหลดถนนพร้อม buffer 20% และค้นหา CBD… การโหลด OSM อาจใช้เวลานาน"
         ):
             polygon = anchor_study_polygon(*context["study_center"], context["study_radius_m"])
+            fetch_started = time.perf_counter()
             graph, cached, error = _fetch_osm_graph(polygon.wkt, context["network_type"])
+            load_seconds = time.perf_counter() - fetch_started
             if error or graph is None:
                 raise ValueError(error or "No road graph returned.")
-            result = automated_coarse_to_fine_anchor(
-                graph,
-                tuple(context["study_center"]),
-                context["study_radius_m"],
-                random_seed=context["random_seed"],
-                restarts=context["restarts"],
-                objective=objective,
-            )
-            result.update(
-                context=context,
-                graph_cached=cached,
-                graph_source_endpoint=graph.graph.get(
-                    "overpass_endpoint", "disk-cache" if cached else "unknown"
-                ),
-                total_seconds=time.perf_counter() - started,
-            )
+            found = find_cbd_anchors(
+                graph, tuple(context["study_center"]), context["study_radius_m"])
+            source = graph.graph.get("osm_source", "cache" if cached else "download")
+            endpoint = graph.graph.get("overpass_endpoint", "disk-cache" if cached else "unknown")
             samples = StateManager.get_rent_samples()
-            first = result["restarts"][0]["seed"]
-            anchor = result["anchor"]
-            baseline = fit_rent_gradient_from_samples(samples, first["lat"], first["lon"])
-            fitted = fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
-            if baseline and fitted:
-                result["rent_fit_comparison"] = {
-                    "seed_r2": baseline["r2"],
-                    "anchor_r2": fitted["r2"],
-                    "delta_r2": fitted["r2"] - baseline["r2"],
-                    "n_samples": fitted["n_samples"],
-                }
-            st.session_state[state_key] = result
-            if objective == "composite":
-                StateManager.clear_results(["rent"])
-                perform_rent_gradient(quiet=True)
+            published = {}
+            for objective, state_key in (
+                ("composite", StateManager.K_AUTO_ANCHOR),
+                ("closeness", StateManager.K_AUTO_ANCHOR_CLOSENESS),
+            ):
+                result = found[objective]
+                result.update(
+                    context=context,
+                    graph_cached=cached,
+                    graph_source_endpoint=endpoint,
+                    graph={**found["graph"], "source": source, "endpoint": endpoint},
+                    load_seconds=load_seconds,
+                    total_seconds=time.perf_counter() - started,
+                )
+                anchor = result["anchor"]
+                baseline = fit_rent_gradient_from_samples(samples, *context["study_center"])
+                fitted = fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
+                if baseline and fitted:
+                    result["rent_fit_comparison"] = {
+                        "center_r2": baseline["r2"],
+                        "anchor_r2": fitted["r2"],
+                        "delta_r2": fitted["r2"] - baseline["r2"],
+                        "n_samples": fitted["n_samples"],
+                    }
+                published[state_key] = result
+            st.session_state.update(published)  # both anchors become visible together
+            StateManager.clear_results(["rent"])
+            perform_rent_gradient(quiet=True)
     except Exception as exc:
-        st.error(f"ค้นหา Automated Anchor ({label}) ไม่สำเร็จ: {exc}")
+        st.error(f"ค้นหา Automated Anchor ไม่สำเร็จ: {exc}")
         return
     st.rerun()
 
@@ -4524,7 +4682,7 @@ def main() -> None:
     StateManager.initialize()
 
     # 2. Render Sidebar → capture user intents
-    do_calc, do_net, do_rent, do_anchor, do_anchor_closeness, active_list = render_sidebar()
+    do_calc, do_net, do_rent, do_anchor, active_list = render_sidebar()
 
     # 3. Execute Business Logic (based on user intents)
     if do_calc:
@@ -4537,10 +4695,7 @@ def main() -> None:
         perform_rent_gradient()
 
     if do_anchor:
-        perform_automated_anchor("composite")
-
-    if do_anchor_closeness:
-        perform_automated_anchor("closeness")
+        perform_automated_anchor()
 
     # 4. Render Header + Metrics + Map + Analytics
     render_header()

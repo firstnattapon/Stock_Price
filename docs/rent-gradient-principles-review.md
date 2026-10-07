@@ -64,7 +64,7 @@ flowchart TD
         direction LR
         MK["หมุด / พิกัดศึกษา<br/>study centre + radius"]
         ISO["Isochrone จาก Geoapify<br/>perform_calculation<br/>[OPEN] F8 API key ค้างในซอร์ส — คงเดิมตามเจ้าของ"]
-        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>ผ่าน Overpass + pkl cache<br/>[FIXED] F9 allow-list unpickler · F10 lock แคบลง"]
+        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>Overpass → cache หรือ cache-crop (footprint ครอบคลุมครบ)<br/>[FIXED] F9 allow-list unpickler · F10 lock แคบลง · ใช้ซ้ำแคช"]
         OSMN["OSM roads: union ของ isochrone<br/>perform_network_analysis<br/>[FIXED] F12 เก็บ coverage polygon"]
         SMP["ตัวอย่างราคาจริง (ถ้ามี)<br/>lat, lon, rent"]
     end
@@ -75,18 +75,20 @@ flowchart TD
     %% ---------------- หลักการ 1: ตำแหน่ง CBD ----------------
     subgraph P1["หลักการ 1 — จุดยึด CBD (anchor)"]
         direction TB
-        A0["Composite anchor — rank-v2<br/>0.5·C_rank + 0.3·D_rank + 0.2·J_rank<br/>[FIXED] F3 น้ำหนักจริงใกล้ 50/30/20 และรายงานใน UI"]
-        CERT{"candidates ≤ 2048 ?"}
+        A0["find_cbd_anchors — ปุ่มเดียว ไม่มี seed<br/>Composite (rank-v2) + Closeness 100% จากแถว Dijkstra ชุดเดียว<br/>[FIXED] F3 น้ำหนักจริงใกล้ 50/30/20 และรายงานใน UI"]
+        CERT{"pool ≤ rows budget<br/>(3e7 // V) ?"}
         EX["exhaustive audit<br/>certified เฉพาะ objective + กราฟนี้<br/>[OK] ผลไม่ขึ้นกับ seed"]
-        LO["pivot-screened + exact top-K + local climb<br/>ไม่ใช่ certificate<br/>[FIXED] F16 seed-stable บนกราฟจริง"]
+        LO["pivot-screened + exact top-K + local climb<br/>ไม่ใช่ certificate ไม่มี budget error<br/>[FIXED] F16 ผลเท่ากับ exhaustive บนกราฟจริง"]
         A1["Closeness 100%<br/>network 1-median ทุกโหนด<br/>[OK] สมการสะอาด — ใช้เทียบเท่านั้น"]
         A2["CBD Zone centroid<br/>จุดตัด isochrone"]
         A3["Integration Center<br/>top node closeness"]
         A4["centroid Travel Areas<br/>หรือ ค่าเฉลี่ยหมุด"]
         RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ<br/>UI เตือน + scripts/anchor_sensitivity.py · ground truth [OPEN]"]
+        PROBE["Stability probe (ประมาณการ)<br/>วงศึกษา ×0.8/×1.2, ศูนย์ ±20% 4 ทิศ — ไม่เพิ่ม Dijkstra<br/>[FIXED] F2 ระดับ stable / check / unstable"]
         A0 --> CERT
         CERT -- "ใช่" --> EX
         CERT -- "ไม่" --> LO
+        A0 -.-> PROBE
     end
 
     OSMA --> A0
@@ -160,7 +162,7 @@ flowchart TD
     classDef plain fill:#f5f5f5,stroke:#8a8a8a,color:#222
 
     class EX,CL,A1 ok
-    class A0,LO,BT,GL,OLS,RRP,VG,GS,OSMA,OSMN fixed
+    class A0,LO,PROBE,BT,GL,OLS,RRP,VG,GS,OSMA,OSMN fixed
     class DM,ISO open
     class RES,IDX,MOD assume
     class MK,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
@@ -469,6 +471,23 @@ lookup : [0.5, 0.5, 0.5]                                                      # 
 - ตัวเลข "ก่อน/หลัง" ของ F3 และ F16 วัดบนกราฟถนนจริงเพียง 2 ชุดใน repo (เชียงของ) — ไม่ได้พิสูจน์ว่าได้ผลเท่ากันกับเมืองอื่น
 - ผล benchmark เดิมใน `docs/cbd-anchor-benchmark.json` บันทึกก่อนเปลี่ยน scoring และไม่มีกราฟต้นทางใน repo จึงยังไม่ได้ทำซ้ำ (ระบุไว้ในไฟล์แล้ว)
 - ยังไม่ได้รัน UI จริงกับ Overpass/Geoapify; ทดสอบ UI ด้วย `streamlit.testing` และกราฟจำลอง/กราฟในแคชเท่านั้น
+
+---
+
+## 9. ต่อยอด Automated CBD Anchor: simple · stable · fast
+
+งานต่อยอดจากข้อ F2/F3/F16 โดยใช้ทรัพยากรที่มีอยู่แล้ว (SciPy/NumPy/osmnx/แคชบนดิสก์ — ไม่เพิ่ม dependency หรือ service)
+รายละเอียดอัลกอริทึมอยู่ที่ [`automated-cbd-anchor.md`](automated-cbd-anchor.md)
+
+| มิติ | สิ่งที่เปลี่ยน | หลักฐาน |
+| --- | --- | --- |
+| **Simple** | เอา ARPS (restarts, seed, 8 ทิศ, trace, เส้นทางบนแผนที่) ออก → `find_cbd_anchors` ทำ "pivot screen → exact → ไต่เฉพาะที่" แบบเดียว; **ปุ่มเดียว** ได้ทั้ง Composite และ Closeness 100% จากการโหลดถนนครั้งเดียวและแถว Dijkstra ชุดเดียว; ตัวสร้างเมทริกซ์ถนนเดียว (`_collapsed_csr`) ใช้ทั้ง anchor และ Network Analysis | โหนด/คะแนนของ anchor ที่ certified **ตรงกับโค้ดเดิมทุกกรณี** (กราฟจริง 2 ชุด 3 การตั้งค่า × 2 objective + กริดจำลอง 2 ชุด) และ test ปักค่าผู้ชนะเดิมไว้; ผลไม่ขึ้นกับลำดับ insert |
+| **Stable** | ไม่มี seed ⇒ ผลซ้ำได้เสมอ; ไม่มี budget error (เกินงบ → คัดแล้ว exact); ป้ายความนิ่ง: ขยับวงศึกษาแล้ว anchor ขยับเท่าไร (stable ≤ 5% ของรัศมี / check ≤ 15% / unstable) พร้อมคำเตือนใน UI | เทียบกับการรันค้นหาเต็มซ้ำทุกวง: ระดับตรงกัน 8/8, drift รายวงเท่ากันเป๊ะ 44/48; กราฟจริง 8 km: composite ขยับ ≤ 379 m (นิ่ง) ส่วน Closeness 100% ≤ 2.3 km (ไม่นิ่ง) |
+| **Fast** | prep แบบ vectorised (เดิม ~4 s ของ Python บนกราฟ 40k โหนด → ~0.2 s); ไม่มีแถว Dijkstra ที่ ARPS เสียไป; ใช้แถวร่วมกันสอง objective + probe; **ใช้ซ้ำแคชที่ footprint ครอบพื้นที่ใหม่ครบ** (crop แทนการดาวน์โหลด); แสดงเวลาโหลด/คำนวณแยก | กราฟจำลอง 10k โหนด 2.4 → ~0.8 s, 40k โหนด 9.1 → ~4 s (ได้ทั้งสอง anchor + probe); กราฟจริง 12 km ได้สอง anchor ใน ~0.25–0.3 s (เดิม ~0.57 s รวมสองครั้ง); crop แคชกราฟ 1,648 โหนด ~0.12 s |
+
+ข้อจำกัดที่ต้องรู้: เวลาดาวน์โหลดจาก Overpass วัดไม่ได้ใน sandbox นี้ (เข้าไม่ถึง) — ประโยชน์ส่วนนี้เกิดเฉพาะเมื่อมีแคชที่ footprint ครอบคลุมเท่านั้น
+(แคชเก่าที่ไม่มี sidecar ไม่ถูกจัดเข้าดัชนี) และตอนนี้ UI แสดงเวลาโหลดจริงให้ผู้ใช้เห็นแล้ว; ป้ายความนิ่งเป็นค่าประมาณ ไม่ได้ยืนยันว่า anchor ตรงกับ CBD จริง;
+ผล benchmark 2026-09-20 ใน `docs/` ยังเป็นของ scoring เดิม
 
 อ้างอิงทฤษฎี: Alonso (1964), Mills (1967), Muth (1969) — ต้นกำเนิดโมเดล Bid-Rent แบบ monocentric;
 Eppstein & Wang (2004) — การประมาณ closeness ด้วย pivot sampling
