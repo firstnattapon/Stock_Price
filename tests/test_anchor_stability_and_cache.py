@@ -220,3 +220,126 @@ def test_anchor_pipeline_reports_the_cache_source(cache_env):
     assert second.graph["osm_source"] == "cache-crop"
     result = page.find_cbd_anchors(second, CENTER, 1000.0)
     assert result["composite"]["anchor"]["node_id"]
+
+
+# ------------------------------------------------------------ audit fixes (A1-A5)
+def test_a1_exact_key_hit_is_checked_against_the_recorded_footprint(cache_env):
+    from shapely.geometry import box
+
+    tmp_path, downloads = cache_env
+    circle_poly = Polygon(page._geodesic_circle_coords(*CENTER, 1.5, 96))
+    square = box(*circle_poly.bounds)  # same bounds -> same 3-dp cache key, but 27% more area
+    assert page.get_cache_key(circle_poly.wkt, "drive") == page.get_cache_key(square.wkt, "drive")
+
+    _, cached, _ = page._fetch_osm_graph(circle_poly.wkt, "drive")
+    assert not cached and len(downloads) == 1
+    again, cached, _ = page._fetch_osm_graph(circle_poly.wkt, "drive")      # same shape: still a hit
+    assert cached and again.graph["osm_source"] == "cache" and len(downloads) == 1
+    assert page.cached_graph_available(circle_poly.wkt, "drive")
+
+    assert not page.cached_graph_available(square.wkt, "drive")
+    _, cached, _ = page._fetch_osm_graph(square.wkt, "drive")                # different shape: downloads
+    assert not cached and len(downloads) == 2
+    _, cached, _ = page._fetch_osm_graph(square.wkt, "drive")                # and is now remembered
+    assert cached and len(downloads) == 2
+
+
+def test_a1_entries_without_a_footprint_are_used_but_labelled_unverified(cache_env):
+    tmp_path, downloads = cache_env
+    poly = circle(*CENTER, 1.5)
+    page._fetch_osm_graph(poly, "drive")
+    for sidecar in tmp_path.glob("osm_graph_*.json"):
+        sidecar.unlink()
+    graph, cached, error = page._fetch_osm_graph(poly, "drive")
+    assert cached and error is None and len(downloads) == 1
+    assert graph.graph["osm_source"] == "cache (footprint unverified)"
+    assert page.cached_graph_available(poly, "drive")
+
+
+def _symmetric_path(n=10, step=120.0):
+    graph = nx.MultiDiGraph(crs="EPSG:4326")
+    projection = page._anchor_projection(*CENTER)
+    for i in range(n):
+        lon, lat = projection.transform((i - n // 2) * step, 0, direction=TransformDirection.INVERSE)
+        graph.add_node(i, x=lon, y=lat)
+    for i in range(n - 1):
+        graph.add_edge(i, i + 1, length=step)
+        graph.add_edge(i + 1, i, length=step)
+    return graph
+
+
+def test_a2_ties_are_explicit_and_survive_one_ulp_noise(monkeypatch):
+    graph = _symmetric_path()  # nodes 4 and 5 are exactly tied for the 1-median
+    clean = page.find_cbd_anchors(graph, CENTER, 4000.0, stability=False)["closeness"]["anchor"]
+    assert clean["node_id"] == "4"
+    real = page.csgraph_dijkstra
+    row_sums = {}
+
+    def noisy(matrix, directed, indices):
+        rows = real(matrix, directed=directed, indices=indices)
+        for k, source in enumerate(indices):
+            if int(source) == 5:  # make the tied node look ~1e-15 closer
+                rows[k] *= 1 - 1e-15
+            row_sums[int(source)] = float(rows[k].sum())
+        return rows
+
+    monkeypatch.setattr(page, "csgraph_dijkstra", noisy)
+    result = page.find_cbd_anchors(graph, CENTER, 4000.0, stability=False)["closeness"]["anchor"]
+    assert row_sums[5] < row_sums[4]          # a raw float comparison would now pick node 5 ...
+    assert result["node_id"] == "4"           # ... but the tie is explicit: the lowest index wins
+
+
+def _cluster(graph, cx, cy, size, spacing, base):
+    projection = page._anchor_projection(*CENTER)
+    for x in range(size):
+        for y in range(size):
+            lon, lat = projection.transform(cx + (x - size // 2) * spacing, cy + (y - size // 2) * spacing,
+                                            direction=TransformDirection.INVERSE)
+            graph.add_node(base + x * size + y, x=lon, y=lat)
+            for dx, dy in ((-1, 0), (0, -1)):
+                if x + dx >= 0 and y + dy >= 0:
+                    other = base + (x + dx) * size + y + dy
+                    graph.add_edge(base + x * size + y, other, length=float(spacing))
+                    graph.add_edge(other, base + x * size + y, length=float(spacing))
+    return graph
+
+
+def test_a3_probe_sees_candidates_outside_the_base_circle():
+    """Dumbbell: a small cluster inside R = 4000 m, a bigger one wholly outside it but inside 1.2 R."""
+    graph = nx.MultiDiGraph(crs="EPSG:4326")
+    projection = page._anchor_projection(*CENTER)
+    _cluster(graph, -2500, 0, 7, 100, base=0)        # A: 49 nodes, x in [-2800, -2200]
+    _cluster(graph, 4500, 0, 9, 100, base=1000)      # B: 81 nodes, x in [4100, 4900] -> outside R, 8 columns inside 1.2 R
+    previous = 0 * 7 * 7 + 6 * 7 + 3                  # A's east-middle node
+    for k in range(1, 63):                           # a straight road of degree-2 nodes from x = -2100 to 4000
+        lon, lat = projection.transform(-2100 + 100 * (k - 1), 0, direction=TransformDirection.INVERSE)
+        graph.add_node(5000 + k, x=lon, y=lat)
+        graph.add_edge(previous, 5000 + k, length=100.0)
+        graph.add_edge(5000 + k, previous, length=100.0)
+        previous = 5000 + k
+    west_middle_of_b = 1000 + 0 * 9 + 4
+    graph.add_edge(previous, west_middle_of_b, length=100.0)
+    graph.add_edge(west_middle_of_b, previous, length=100.0)
+
+    result = page.find_cbd_anchors(graph, CENTER, 4000.0)
+    assert int(result["composite"]["anchor"]["node_id"]) < 1000            # base anchor is in A
+    cases = {c["case"]: c for c in result["composite"]["stability"]["cases"]}
+    wide = cases["radius x1.2"]
+    assert int(wide["node_id"]) >= 1000, wide                              # the probe moved into B ...
+    assert wide["drift_m"] > 5000, wide                                    # ... which is > 5 km away
+    assert result["composite"]["stability"]["level"] == "unstable"
+
+
+def test_a4_reference_sample_depends_on_graph_size_not_on_the_run_budget(monkeypatch):
+    def reference_nodes(**kw):
+        result = page.find_cbd_anchors(road_grid(21), CENTER, 4000.0, stability=False, **kw)
+        return result["composite"]["normalisation"]["closeness"]["reference_nodes"]
+
+    assert reference_nodes() == reference_nodes(max_rows=60) == 256
+    monkeypatch.setitem(page.ANCHOR_CONFIG, "reference_shrink_above_nodes", 100)
+    shrunk = round(max(96, 256 * (100 / 441) ** 0.5))
+    assert reference_nodes() == reference_nodes(max_rows=60) == shrunk < 256
+
+
+def test_a5_dead_config_key_is_gone():
+    assert "final_radius_m" not in page.ANCHOR_CONFIG

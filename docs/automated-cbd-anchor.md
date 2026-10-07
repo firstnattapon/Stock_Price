@@ -66,7 +66,10 @@ first for sustained or commercial traffic.
 5. **Reference sample.** Up to 256 destinations chosen with a constant seed (all
    of them when there are fewer). Their exact Dijkstra rows give (a) the exact
    closeness of each pivot, which calibrates the composite normaliser, and (b) a
-   pivot closeness `k / sum_p d(v,p)` for *every* node.
+   pivot closeness `k / sum_p d(v,p)` for *every* node. The sample size depends
+   only on the graph (it shrinks as `1/sqrt(V)` above 25,000 nodes, to at least
+   96, because pivot rows are the dominant cost there) — never on the run's row
+   budget, otherwise a certified and a screened run would use different objectives.
 6. **Exact rows, once.** Each exact row serves both objectives. If a candidate
    pool fits the row budget — `rows_budget = clamp(3e7 // V, 64, 4096)`, so about
    4,096 rows at 7k nodes and 750 at 40k — **every candidate is scored** and the
@@ -90,7 +93,9 @@ Closeness100 = C(v) / (C(v) + 1 / study_radius_m)     # strictly monotone in C
 mid-rank percentiles use exact counts over the candidate pool; all three
 composite components therefore span a comparable 0..1 range and the nominal
 50/30/20 weights are close to the weights that actually order the candidates.
-Normalisers and destinations depend only on the graph. Every result reports
+Normalisers and destinations depend only on the graph. Scores are compared after
+rounding to 12 decimals, so mathematically tied nodes (e.g. the two middle nodes
+of a path) stay tied whatever the summation order and the lowest node index wins. Every result reports
 `nominal_weights`, `effective_weights` (`w_i * std_i`, normalised over the pool)
 and `winner_contribution`; the sidebar shows them. On the two real road graphs in
 `Geoapify_Map/osmnx_cache.zip` the earlier bounded transform `C/(C+1/R)` gave
@@ -113,10 +118,14 @@ The anchor is the centre of the road network *inside the circle you choose*, so
 it can move with that circle. The search therefore measures it at almost no cost:
 while the pivot rows stream through, they are also summed per perturbed circle —
 radius ×0.8 and ×1.2, and the centre shifted by 20% of the radius north, east,
-south and west. For each circle the best 16 candidates (by pivot closeness) are
-scored exactly on that circle's destinations (reusing rows already computed;
-degree/density re-ranked inside the circle; normaliser from the pivots inside it)
-and the best one's drift from the anchor is reported:
+south and west. A ×1.2 or shifted circle pulls in roads *outside* the study circle,
+so destinations are sampled in two strata — the study circle (the usual pivots) and
+the ring up to 1.2 R outside it (96 extra pivot rows, probe only; the anchors never
+depend on them) — and combined with a stratified estimate. For each circle the best
+16 junctions *anywhere inside that circle* (by that estimate) are scored exactly on
+the circle's destinations (reusing rows already computed; degree/density re-ranked
+inside the circle; normaliser from the pivots inside it) and the best one's drift
+from the anchor is reported:
 
 | Level | Max drift |
 | --- | --- |
@@ -128,8 +137,10 @@ The result carries `stability = {cases, max_drift_m, median_drift_m,
 max_drift_ratio, level}`, the sidebar shows a badge and a warning when the level is
 not *stable*, and the map popups repeat it. It is **indicative**: it uses pivot
 sums and the top 16 candidates. Against exact re-runs of the full search on the
-real graphs (4 radii/graphs × 2 objectives) the level agreed in 8 of 8 cases and
-44 of 48 per-circle drifts were identical. `scripts/anchor_sensitivity.py`
+real graphs (6 graph/radius settings × 2 objectives) the level agreed in 12 of 12
+cases and 70 of 72 per-circle drifts were identical; on a synthetic "dumbbell"
+(a second cluster wholly outside the circle) the probe reports the true 6.7 km
+move where a base-circle-only sample reported 0. `scripts/anchor_sensitivity.py`
 remains the exact check and prints the in-app probe next to its own numbers. On
 the larger real graph (8 km radius) the composite anchor moved at most 379 m
 (stable) while the Closeness-100% anchor moved up to 2.3 km (unstable) — one
@@ -142,13 +153,19 @@ recorded run). Two things are done with resources that are already there:
 
 - **Covering cache.** Every cached graph now has a small JSON sidecar
   (`osm_graph_<key>.json`: network type, footprint polygon, bounds, size). When a
-  request is not in the cache, the smallest cached graph of the same network type
+  request is not in the cache — or the exact-key entry's recorded footprint does
+  not contain it (the key is the md5 of bounds rounded to 3 decimals, so a
+  different shape with the same bounds shares it; a circle's graph used to be
+  served for a same-bbox square, silently missing a quarter of the area) — the
+  smallest cached graph of the same network type
   whose footprint **fully contains** the requested polygon is loaded and cropped
   with the same rules as `osmnx.graph_from_polygon` (`truncate_by_edge`, largest
   weakly connected component), then stored under its own key. Partial coverage is
   never used (it would bias the result near the boundary); entries cached before
   this version have no sidecar and are simply not indexed; a missing or corrupt
-  sidecar is ignored. It applies to both the anchor search and Network Analysis,
+  sidecar is ignored. Exact-key entries that have no sidecar (imported bundles,
+  older caches) cannot be checked: they are still used but labelled
+  `cache (footprint unverified)`. It applies to both the anchor search and Network Analysis,
   so running the anchor first lets a later, smaller isochrone union reuse it.
   Disable with `ANCHOR_CONFIG["reuse_covering_cache"] = False`. A cropped graph is
   not byte-identical to a fresh download at the boundary (edge simplification).
@@ -160,12 +177,14 @@ Measured on synthetic road-like graphs (both anchors and the stability probe):
 
 | Nodes | Previous (ARPS, two searches) | Now |
 | --- | --- | --- |
-| 10,000 | 2.4 s (one objective) | ≈0.8 s (both) |
-| 40,000 | 9.1 s (one objective) | ≈4 s (both) |
+| 10,000 | 2.4 s (one objective) | ≈0.8 s (both), ≈0.9 s with the stability probe |
+| 40,000 | 9.1 s (one objective) | ≈4.2 s (both), ≈5.6 s with the stability probe |
+| 100,000 (the limit) | — | ≈16 s before the pivot shrink, ≈640 MB peak process memory with the graph |
 
 For 40,000 nodes the split is roughly 0.2 s preparation (previously ≈4 s of Python
-graph rebuilding), 1.8 s pivot rows and 1.8 s exact rows. These are observations
-on one machine, not latency promises, and exclude the Overpass download.
+graph rebuilding), 1.8 s pivot rows and 1.8 s exact rows; the probe's extra ring
+pivots add ≈1.4 s there. These are observations on one machine, not latency
+promises, and exclude the Overpass download.
 
 ## Reproduce the checks
 

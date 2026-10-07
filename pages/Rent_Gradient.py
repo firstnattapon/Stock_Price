@@ -150,7 +150,6 @@ NETWORK_CONFIG: Dict[str, Any] = {
 ANCHOR_CONFIG: Dict[str, Any] = {
     # Serve a request from a cached graph whose download footprint fully contains it.
     "reuse_covering_cache": True,
-    "final_radius_m": 150.0,
     "buffer_ratio": 0.20,
     "density_radius_m": 500.0,
     "max_nodes": 100000,
@@ -165,6 +164,8 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     # candidate when the exhaustive pass does not fit the budget. These rows are
     # extra to the row budget and are never recomputed.
     "reference_nodes": 256,
+    "reference_shrink_above_nodes": 25_000,  # beyond this the sample shrinks ~ 1/sqrt(V)
+    "reference_min_nodes": 96,
     "reference_seed": 0,
     "screen_top_k": 256,
     "refine_iterations": 40,
@@ -174,6 +175,9 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     "stability_scales": (0.8, 1.2),
     "stability_shift": 0.20,
     "stability_top_m": 16,
+    # Probe-only second stratum of pivots drawn from the ring outside the study circle
+    # (the perturbed circles reach up to 1.2 R); the base anchor never depends on it.
+    "stability_outer_nodes": 96,
     "stability_ok_ratio": 0.05,
     "stability_warn_ratio": 0.15,
 }
@@ -831,7 +835,15 @@ def find_cbd_anchors(
     # Fixed reference sample of destinations (constant seed): exact closeness
     # calibrates the composite normaliser and the summed distance rows rank every
     # candidate by pivot closeness. Its rows are shared, never recomputed.
-    n_ref = min(n_destinations, int(ANCHOR_CONFIG["reference_nodes"]))
+    # The sample size is a property of the graph, not of the run: it fixes the composite
+    # normaliser, so it must not move with ``max_rows`` or the objective would change
+    # between a certified run and a screened one. Huge graphs use fewer pivots (their
+    # rows cost the most) — at 100k nodes that is ~half of the previous pivot time.
+    ref_target = float(ANCHOR_CONFIG["reference_nodes"])
+    if n > ANCHOR_CONFIG["reference_shrink_above_nodes"]:
+        ref_target = max(float(ANCHOR_CONFIG["reference_min_nodes"]),
+                         ref_target * (ANCHOR_CONFIG["reference_shrink_above_nodes"] / n) ** 0.5)
+    n_ref = min(n_destinations, int(round(ref_target)))
     ref_nodes = np.sort(np.random.default_rng(ANCHOR_CONFIG["reference_seed"]).choice(
         eligible, size=n_ref, replace=False))
     ref_c = np.empty(n_ref)
@@ -841,28 +853,72 @@ def find_cbd_anchors(
     for k, case in enumerate(cases):
         case_inside[:, k] = np.hypot(xy[:, 0] - case["dx"], xy[:, 1] - case["dy"]) <= case["radius"]
     case_float = case_inside.astype(float)
-    case_pivot_sum = np.zeros((n, len(cases)))
-    case_ref_sum = np.zeros((n_ref, len(cases)))
+    # Two strata of destinations for the perturbed circles: the base circle (the pivots
+    # above) and the ring just outside it, which a x1.2 or shifted circle pulls in. Sampling
+    # only the base circle would leave mass outside it invisible to the probe.
+    outer_pool = (np.flatnonzero((radial_distance > study_radius_m) & case_inside.any(axis=1))
+                  if cases else np.empty(0, dtype=int))
+    n_out = min(len(outer_pool), int(ANCHOR_CONFIG["stability_outer_nodes"]))
+    out_nodes = (np.sort(np.random.default_rng(ANCHOR_CONFIG["reference_seed"] + 1).choice(
+        outer_pool, size=n_out, replace=False)) if n_out else np.empty(0, dtype=int))
+    sources = np.concatenate((ref_nodes, out_nodes)).astype(int)
+    case_pivot_sum = np.zeros((n, len(cases)))   # S1: sum over base pivots inside each circle
+    case_outer_sum = np.zeros((n, len(cases)))   # S2: same over ring pivots
+    case_ref_sum = np.zeros((len(sources), len(cases)))
     # Distances from each exact row to every case's destinations: a by-product of
     # the base pass, so the probe re-runs Dijkstra only for rows it has not seen.
     case_sums: Dict[int, np.ndarray] = {}
     filled = 0
-    for part, rows_d in _dijkstra_batches(matrix, ref_nodes):
-        ref_c[filled:filled + len(part)] = (n_destinations - 1) / rows_d[:, eligible].sum(axis=1)
-        pivot_sum += rows_d.sum(axis=0)
-        if cases:  # per-case sum over the pivots that fall inside that case's circle
-            case_pivot_sum += rows_d.T @ case_float[part]
+    for part, rows_d in _dijkstra_batches(matrix, sources):
+        position = np.arange(filled, filled + len(part))
+        is_base = position < n_ref
+        if is_base.any():
+            ref_c[position[is_base]] = (n_destinations - 1) / rows_d[is_base][:, eligible].sum(axis=1)
+            pivot_sum += rows_d[is_base].sum(axis=0)
+        if cases:  # per-case sums over the pivots that fall inside each perturbed circle
+            if is_base.any():
+                case_pivot_sum += rows_d[is_base].T @ case_float[part[is_base]]
+            if (~is_base).any():
+                case_outer_sum += rows_d[~is_base].T @ case_float[part[~is_base]]
             chunk = rows_d @ case_float
-            case_ref_sum[filled:filled + len(part)] = chunk
+            case_ref_sum[position] = chunk
             case_sums.update((int(i), row) for i, row in zip(part, chunk))
         filled += len(part)
     ref_mean, ref_std = float(ref_c.mean()), float(ref_c.std())
-    # Per-case normaliser: exact closeness of the pivots inside each perturbed circle.
+
+    # Stratified (Horvitz-Thompson) estimate of the summed distance to each case's
+    # destinations: sum_u d(v,u) ~ (n1/k1) S1 + (n2/k2) S2, with n_j the nodes of stratum
+    # j inside the circle and k_j the pivots of that stratum inside it.
+    case_sum_hat = np.zeros((n, len(cases)))
     case_norm = []
     for k in range(len(cases)):
-        member = case_inside[ref_nodes, k]
-        c_k = (case_inside[:, k].sum() - 1) / np.maximum(case_ref_sum[member, k], 1e-9)
-        case_norm.append((float(c_k.mean()), float(c_k.std())) if len(c_k) > 1 else (ref_mean, ref_std))
+        n1c = int(case_inside[eligible, k].sum())
+        n2c = int(case_inside[outer_pool, k].sum()) if len(outer_pool) else 0
+        k1c = int(case_inside[ref_nodes, k].sum())
+        k2c = int(case_inside[out_nodes, k].sum()) if n_out else 0
+        w1 = n1c / k1c if k1c else 0.0
+        w2 = n2c / k2c if k2c else 0.0
+        if n2c and not k2c and k1c:       # no ring pivot inside: borrow the base mean distance
+            w2 = n2c / k1c
+            case_sum_hat[:, k] = w1 * case_pivot_sum[:, k] + w2 * case_pivot_sum[:, k]
+        elif n1c and not k1c and k2c:
+            w1 = n1c / k2c
+            case_sum_hat[:, k] = w1 * case_outer_sum[:, k] + w2 * case_outer_sum[:, k]
+        else:
+            case_sum_hat[:, k] = w1 * case_pivot_sum[:, k] + w2 * case_outer_sum[:, k]
+        # Per-case normaliser: exact closeness of the pivots inside the circle, weighted by
+        # how many destinations each one represents.
+        members = np.concatenate((ref_nodes[case_inside[ref_nodes, k]], out_nodes[case_inside[out_nodes, k]]))
+        weights_k = np.concatenate((np.full(k1c, w1), np.full(k2c, w2)))
+        pos_k = np.concatenate((np.flatnonzero(case_inside[ref_nodes, k]),
+                                n_ref + np.flatnonzero(case_inside[out_nodes, k]))) if len(members) else np.empty(0, int)
+        if len(members) > 1 and weights_k.sum() > 0:
+            c_k = (n1c + n2c - 1) / np.maximum(case_ref_sum[pos_k, k], 1e-9)
+            mu = float(np.average(c_k, weights=weights_k))
+            var = float(np.average((c_k - mu) ** 2, weights=weights_k))
+            case_norm.append((mu, var ** 0.5))
+        else:
+            case_norm.append((ref_mean, ref_std))
     exact_c: Dict[int, float] = {int(p): float(c) for p, c in zip(ref_nodes, ref_c)}
     pivots_done = time.perf_counter()
 
@@ -900,13 +956,18 @@ def find_cbd_anchors(
                 "degree": int(degrees[i]), "junction_count": int(density[i])}
 
     def best_of(candidates, objective):
+        # Scores are quantised so mathematically tied nodes stay tied whatever the
+        # summation order or library version; the lowest node index then wins.
         return max((int(i) for i in candidates),
-                   key=lambda i: (components(i, objective)["score"], -i))
+                   key=lambda i: (round(components(i, objective)["score"], 12), -i))
 
     def probe(objective, base_winner):
         """Indicative drift of the anchor under rescaled / shifted study circles."""
-        pool = pools[objective]
-        in_ref = np.isin(pool, ref_nodes)
+        # Candidates are every junction (all nodes for Closeness 100%) inside each
+        # perturbed circle, not just those of the base circle: a x1.2 or shifted circle
+        # can have its best node outside the base one.
+        pool = (np.flatnonzero(degrees >= 3)
+                if objective == "composite" and not junction_fallback else np.arange(n))
         picks: List[np.ndarray] = []
         case_ranks: List[Tuple[np.ndarray, np.ndarray]] = []
         for k in range(len(cases)):
@@ -920,8 +981,8 @@ def find_cbd_anchors(
             if not len(cand):
                 picks.append(cand)
                 continue
-            k_eff = case_inside[ref_nodes, k].sum() - in_ref[inside].astype(float)
-            approx_c = k_eff / np.maximum(case_pivot_sum[cand, k], 1e-9)
+            n_case = int(case_inside[:, k].sum())
+            approx_c = (n_case - 1) / np.maximum(case_sum_hat[cand, k], 1e-9)
             if objective == "closeness":
                 approx = approx_c
             else:
@@ -947,8 +1008,8 @@ def find_cbd_anchors(
                     score = (weights["closeness"] * float(closeness_component(c, objective, case_norm[k]))
                              + weights["degree"] * float(case_ranks[k][0][i])
                              + weights["density"] * float(case_ranks[k][1][i]))
-                if best_key is None or (score, -i) > best_key:
-                    best, best_key = i, (score, -i)
+                if best_key is None or (round(score, 12), -i) > best_key:
+                    best, best_key = i, (round(score, 12), -i)
             if best is None:
                 out.append({"case": case["case"], "drift_m": None, "node_id": None})
                 continue
@@ -2175,6 +2236,30 @@ def save_graph_to_cache(
             pass  # a missing sidecar only disables reuse of this entry
 
 
+def _read_cache_sidecar(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Footprint metadata of a cache entry, or ``None`` (legacy entry / corrupt sidecar)."""
+    try:
+        meta = json.loads(
+            (CACHE_DIR / f"osm_graph_{cache_key}.json").read_text(encoding="utf-8"))
+        return meta if meta.get("version") == 1 and meta.get("footprint_wkt") else None
+    except Exception:
+        return None
+
+
+def _footprint_covers(meta: Dict[str, Any], requested: Any) -> bool:
+    """True when the cached download footprint contains the requested polygon.
+
+    The stored footprint is rounded to 1e-6 degrees, so allow ~1 m of slack.
+    """
+    try:
+        footprint = wkt.loads(meta["footprint_wkt"])
+        if not footprint.is_valid:
+            footprint = footprint.buffer(0)
+        return bool(footprint.buffer(1e-5).contains(requested))
+    except Exception:
+        return False
+
+
 def find_covering_cache_key(polygon_wkt_str: str, network_type: str) -> Optional[str]:
     """Key of the smallest cached graph of ``network_type`` whose footprint contains the polygon.
 
@@ -2212,8 +2297,14 @@ def find_covering_cache_key(polygon_wkt_str: str, network_type: str) -> Optional
 def cached_graph_available(polygon_wkt_str: str, network_type: str) -> bool:
     """True when a request can be served without Overpass (exact or covering cache)."""
     key = get_cache_key(polygon_wkt_str, network_type)
-    return ((CACHE_DIR / f"osm_graph_{key}.pkl").exists()
-            or find_covering_cache_key(polygon_wkt_str, network_type) is not None)
+    if (CACHE_DIR / f"osm_graph_{key}.pkl").exists():
+        meta = _read_cache_sidecar(key)
+        try:
+            if meta is None or _footprint_covers(meta, wkt.loads(polygon_wkt_str)):
+                return True
+        except (ValueError, TypeError):
+            return False
+    return find_covering_cache_key(polygon_wkt_str, network_type) is not None
 
 
 def _reuse_covering_graph(
@@ -2457,11 +2548,30 @@ def _fetch_osm_graph(
     attempts = max(1, int(OVERPASS_CONFIG["attempts_per_endpoint"]))
     failures: List[str] = []
 
+    def exact_hit() -> Optional[nx.MultiDiGraph]:
+        """Exact-key entry, trusted only if its recorded footprint covers the request.
+
+        The key is the md5 of bounds rounded to 3 dp, so a differently shaped polygon
+        with the same bounds shares it. Entries without a sidecar (imported bundles,
+        caches from before footprints were recorded) cannot be checked and are used as
+        before, but labelled so the UI does not claim more than is known.
+        """
+        graph = load_graph_from_cache(cache_key)
+        if graph is None:
+            return None
+        meta = _read_cache_sidecar(cache_key)
+        if meta is None:
+            graph.graph["osm_source"] = "cache (footprint unverified)"
+            return graph
+        if not _footprint_covers(meta, polygon_geom):
+            return None  # same key, different shape: fall through to crop / download
+        graph.graph["osm_source"] = "cache"
+        return graph
+
     # Fast paths outside the lock: a cache hit (exact, or a cached graph that fully
     # covers this polygon) must not queue behind another session's download.
-    G = load_graph_from_cache(cache_key)
+    G = exact_hit()
     if G is not None:
-        G.graph["osm_source"] = "cache"
         return G, True, None
     G = _reuse_covering_graph(polygon_wkt_str, polygon_geom, network_type, cache_key)
     if G is not None:
@@ -2470,9 +2580,8 @@ def _fetch_osm_graph(
     with _OVERPASS_LOCK:
         original_url = ox.settings.overpass_url
         # Re-check: a session that held the lock may have just filled the cache.
-        G = load_graph_from_cache(cache_key)
+        G = exact_hit()
         if G is not None:
-            G.graph["osm_source"] = "cache"
             return G, True, None
 
         endpoints: List[str] = []
