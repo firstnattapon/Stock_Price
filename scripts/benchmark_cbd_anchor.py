@@ -1,7 +1,13 @@
-"""Reproducible road-only ARPS audit; OSM download time is reported separately.
+"""Reproducible, seed-free audit of the road-only CBD anchors; OSM download time is separate.
 
-python scripts/benchmark_cbd_anchor.py --restarts 50 --output cache/cbd-audit.json
+python scripts/benchmark_cbd_anchor.py --repeat 3 --output cache/cbd-audit.json
 Optional ground truth is LAT LON; never infer truth from the algorithm's output.
+
+One call finds both anchors (Composite and Closeness 100%) from one road graph.
+The audit records the compute split (prepare / pivot rows / exact rows), whether
+repeated runs return the identical anchors, each objective's certification and
+the built-in (indicative) stability probe. Use scripts/anchor_sensitivity.py for
+the exact perturbation check.
 """
 import argparse
 import importlib.util
@@ -17,16 +23,18 @@ spec = importlib.util.spec_from_file_location("rent_gradient", ROOT / "pages/Ren
 page = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(page)
 
+OBJECTIVES = ("composite", "closeness")
+
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--lat", type=float, default=20.219443)
     parser.add_argument("--lon", type=float, default=100.403630)
     parser.add_argument("--radius-km", type=float, default=10.0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--restarts", type=int, default=50)
-    parser.add_argument("--independent-seeds", type=int, default=0,
-                        help="Additionally rerun the full search with seeds 0..N-1 (e.g. 50)")
+    parser.add_argument("--repeat", type=int, default=3,
+                        help="Run the search this many times and require identical anchors")
+    parser.add_argument("--max-rows", type=int, help="Override the exact-row budget (default: from graph size)")
     parser.add_argument("--network-type", choices=["drive", "walk", "bike"], default="drive")
     parser.add_argument("--graphml", type=Path, help="Reuse a local buffered OSM graph instead of downloading")
     parser.add_argument("--save-graphml", type=Path)
@@ -53,65 +61,61 @@ def main():
     if args.save_graphml:
         args.save_graphml.parent.mkdir(parents=True, exist_ok=True)
         ox.save_graphml(graph, args.save_graphml)
-    result = page.automated_coarse_to_fine_anchor(
-        graph, (args.lat, args.lon), args.radius_km * 1000,
-        random_seed=args.seed, restarts=args.restarts,
+
+    center = (args.lat, args.lon)
+    runs = [page.find_cbd_anchors(graph, center, args.radius_km * 1000, max_rows=args.max_rows)
+            for _ in range(max(1, args.repeat))]
+    result = runs[0]
+    identical = all(
+        run[o]["anchor"]["node_id"] == result[o]["anchor"]["node_id"]
+        and run[o]["anchor"]["score"] == result[o]["anchor"]["score"]
+        for run in runs for o in OBJECTIVES
     )
-    anchors = [r["anchor"] for r in result["restarts"]]
-    pairwise = max(page.calculate_distance_meters(a["lat"], a["lon"], b["lat"], b["lon"])
-                   for a in anchors for b in anchors)
+    compute = [run["timings"]["compute_s"] for run in runs]
     result["audit"] = {
         "provenance": provenance, "graph_cached": graph_cached,
         "network_type": args.network_type,
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "python": platform.python_version(), "platform": platform.platform(),
         "osmnx": ox.__version__, "load_seconds": load_seconds,
-        "total_seconds": load_seconds + result["compute_seconds"],
-        "unique_seed_nodes": len({r["seed"]["node_id"] for r in result["restarts"]}),
-        "local_max_pairwise_anchor_distance_m": pairwise,
-        "local_spread_within_50m": pairwise <= 50,
-        "compute_within_10s": result["compute_seconds"] <= 10,
-        "total_within_10s": load_seconds + result["compute_seconds"] <= 10,
+        "total_seconds": load_seconds + compute[0],
+        "repeat_runs": len(runs), "repeat_identical": identical,
+        "compute_seconds_per_run": compute,
+        "compute_within_10s": max(compute) <= 10,
+        "total_within_10s": load_seconds + max(compute) <= 10,
+        "certification": {o: result[o]["certification"] for o in OBJECTIVES},
+        "stability": {o: (result[o]["stability"] or {}).get("level") for o in OBJECTIVES},
         "ground_truth_error_m": None,
         "ground_truth_within_150m": None,
         "rent_fit_comparison": None,
     }
-    if args.independent_seeds:
-        independent = [page.automated_coarse_to_fine_anchor(
-            graph, (args.lat, args.lon), args.radius_km * 1000,
-            random_seed=seed, restarts=1,
-        ) for seed in range(args.independent_seeds)]
-        spread = max(page.calculate_distance_meters(
-            a["anchor"]["lat"], a["anchor"]["lon"], b["anchor"]["lat"], b["anchor"]["lon"])
-            for a in independent for b in independent)
-        result["audit"]["independent_seed_audit"] = {
-            "runs": len(independent), "max_pairwise_anchor_distance_m": spread,
-            "spread_within_50m": spread <= 50,
-            "max_compute_seconds": max(r["compute_seconds"] for r in independent),
-            "all_globally_certified": all(r["globally_certified"] for r in independent),
-            "anchors": [r["anchor"]["node_id"] for r in independent],
-        }
-    anchor = result["anchor"]
     if args.ground_truth:
-        error = page.calculate_distance_meters(*args.ground_truth, anchor["lat"], anchor["lon"])
-        result["audit"].update(ground_truth_error_m=error, ground_truth_within_150m=error <= 150)
+        errors = {o: page.calculate_distance_meters(
+            *args.ground_truth, result[o]["anchor"]["lat"], result[o]["anchor"]["lon"])
+            for o in OBJECTIVES}
+        result["audit"].update(
+            ground_truth_error_m=errors,
+            ground_truth_within_150m={o: e <= 150 for o, e in errors.items()})
     if args.samples:
         samples = json.loads(args.samples.read_text(encoding="utf-8"))
-        first = result["restarts"][0]["seed"]
-        baseline = page.fit_rent_gradient_from_samples(samples, first["lat"], first["lon"])
+        anchor = result["composite"]["anchor"]
+        baseline = page.fit_rent_gradient_from_samples(samples, *center)
         fitted = page.fit_rent_gradient_from_samples(samples, anchor["lat"], anchor["lon"])
         if baseline and fitted:
             result["audit"]["rent_fit_comparison"] = {
-                "seed_r2": baseline["r2"], "anchor_r2": fitted["r2"],
+                "center_r2": baseline["r2"], "anchor_r2": fitted["r2"],
                 "delta_r2": fitted["r2"] - baseline["r2"],
                 "note": "Log-rent in-sample fit comparison, not a significance test",
             }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False),
                            encoding="utf-8")
-    print(json.dumps({"anchor": anchor, "audit": result["audit"],
-                      "warnings": result["warnings"], "output": str(args.output)},
-                     indent=2, ensure_ascii=True))
+    print(json.dumps({
+        "anchors": {o: result[o]["anchor"] for o in OBJECTIVES},
+        "timings": result["timings"], "audit": result["audit"],
+        "warnings": {o: result[o]["warnings"] for o in OBJECTIVES},
+        "output": str(args.output),
+    }, indent=2, ensure_ascii=True))
 
 
 if __name__ == "__main__":

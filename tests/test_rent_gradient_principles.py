@@ -398,22 +398,21 @@ def test_weighted_closeness_exact_matches_networkx_and_pivot_ranks_agree(monkeyp
 
 
 # ------------------------------------------------------------------------ F3/F16
-def test_composite_normalisers_are_seed_independent_and_weights_are_reported():
-    runs = [page.automated_coarse_to_fine_anchor(road_grid(), CENTER, 4000.0, random_seed=s, restarts=2)
-            for s in (1, 2, 3)]
-    assert len({str(r["normalisation"]) for r in runs}) == 1
-    assert len({r["anchor"]["node_id"] for r in runs}) == 1
-    result = runs[0]
+def test_composite_normalisers_are_fixed_and_weights_are_reported():
+    runs = [page.find_cbd_anchors(road_grid(), CENTER, 4000.0) for _ in range(3)]
+    assert len({str(r["composite"]["normalisation"]) for r in runs}) == 1
+    assert len({r["composite"]["anchor"]["node_id"] for r in runs}) == 1
+    result = runs[0]["composite"]
     assert result["scoring"] == "rank-v2" and result["nominal_weights"]["closeness"] == 0.5
     assert sum(result["effective_weights"].values()) == pytest.approx(1.0)
     assert sum(result["winner_contribution"].values()) == pytest.approx(1.0)
-    for step in result["trace"]:
-        assert 0.0 < step["degree_norm"] < 1.0 and 0.0 < step["density_norm"] < 1.0
-        assert 0.0 <= step["closeness_norm"] <= 1.0
+    anchor = result["anchor"]
+    assert 0.0 < anchor["degree_norm"] < 1.0 and 0.0 < anchor["density_norm"] < 1.0
+    assert 0.0 <= anchor["closeness_norm"] <= 1.0
 
 
 def test_closeness_objective_scoring_is_unchanged():
-    result = page.automated_coarse_to_fine_anchor(road_grid(), CENTER, 4000.0, objective="closeness")
+    result = page.find_cbd_anchors(road_grid(), CENTER, 4000.0)["closeness"]
     anchor = result["anchor"]
     assert anchor["score"] == pytest.approx(anchor["closeness_norm"])
     assert anchor["closeness_norm"] == pytest.approx(
@@ -422,10 +421,30 @@ def test_closeness_objective_scoring_is_unchanged():
     assert result["effective_weights"] == {"closeness": 1.0, "degree": 0.0, "density": 0.0}
 
 
+# Certified winners of the previous (ARPS + exhaustive audit) implementation on the real
+# road graphs in the repo; the seed-free search must reproduce them exactly.
+REAL_EXPECTED = [
+    (12000.0, "composite", "2227109156", 0.925662),
+    (12000.0, "closeness", "2431645447", 0.634651),
+    (8000.0, "composite", "2227109156", 0.919497),
+    (8000.0, "closeness", "2421755420", 0.574818),
+]
+
+
+@needs_real_graph
+@pytest.mark.parametrize("radius,objective,node,score", REAL_EXPECTED)
+def test_real_roads_reproduce_the_previous_certified_winners(real_graph, radius, objective, node, score):
+    graph, center = real_graph
+    result = page.find_cbd_anchors(graph, center, radius, stability=False)[objective]
+    assert result["globally_certified"]
+    assert result["anchor"]["node_id"] == node
+    assert result["anchor"]["score"] == pytest.approx(score, abs=1e-6)
+
+
 @needs_real_graph
 def test_real_roads_composite_closeness_weight_is_no_longer_swamped(real_graph):
     graph, center = real_graph
-    result = page.automated_coarse_to_fine_anchor(graph, center, 12000.0, restarts=1, max_evaluations=4000)
+    result = page.find_cbd_anchors(graph, center, 12000.0, stability=False)["composite"]
     effective = result["effective_weights"]
     # Measured on this graph before the fix: closeness ~27% vs nominal 50%, density ~50% vs 20%.
     assert effective["closeness"] > 0.40
@@ -434,29 +453,22 @@ def test_real_roads_composite_closeness_weight_is_no_longer_swamped(real_graph):
 
 
 @needs_real_graph
-def test_over_budget_search_is_seed_stable_and_matches_the_exhaustive_anchor(real_graph):
+@pytest.mark.parametrize("budget", [60, 150, 300])
+def test_over_budget_search_matches_the_exhaustive_anchor_for_both_objectives(real_graph, budget):
     graph, center = real_graph
-    exhaustive = page.automated_coarse_to_fine_anchor(
-        graph, center, 12000.0, restarts=1, max_evaluations=4000)
-    assert exhaustive["globally_certified"]
-    screened = [
-        page.automated_coarse_to_fine_anchor(
-            graph, center, 12000.0, random_seed=seed, restarts=1, max_evaluations=150)
-        for seed in range(8)
-    ]
-    assert all(not r["globally_certified"] for r in screened)
-    assert {r["certification"] for r in screened} == {"pivot-screened-exact-top-k"}
-    assert all(r["evaluated_nodes"] <= 150 for r in screened)
-    # Before the fix 20 single-start seeds gave 10 different anchors up to 15.7 km apart.
-    assert {r["anchor"]["node_id"] for r in screened} == {exhaustive["anchor"]["node_id"]}
+    exhaustive = page.find_cbd_anchors(graph, center, 12000.0, stability=False)
+    screened = page.find_cbd_anchors(graph, center, 12000.0, max_rows=budget, stability=False)
+    for objective in ("composite", "closeness"):
+        assert exhaustive[objective]["globally_certified"]
+        assert screened[objective]["certification"] == "pivot-screened-exact-top-k"
+        assert screened[objective]["screening"]["extra_rows"] <= budget
+        assert screened[objective]["anchor"]["node_id"] == exhaustive[objective]["anchor"]["node_id"]
 
 
-def test_over_budget_screen_on_synthetic_grid_finds_the_centre_for_every_seed():
+def test_over_budget_screen_on_synthetic_grid_finds_the_centre_for_every_budget():
     anchors = {
-        page.automated_coarse_to_fine_anchor(
-            road_grid(size=21), CENTER, 4000.0, random_seed=seed, restarts=1, max_evaluations=120
-        )["anchor"]["node_id"]
-        for seed in range(6)
+        page.find_cbd_anchors(road_grid(size=21), CENTER, 4000.0, max_rows=budget)[o]["anchor"]["node_id"]
+        for budget in (40, 80, 120) for o in ("composite", "closeness")
     }
     assert anchors == {str(10 * 21 + 10)}
 
