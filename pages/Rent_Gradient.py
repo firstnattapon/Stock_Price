@@ -26,7 +26,8 @@ import networkx as nx
 import osmnx as ox
 import matplotlib
 import matplotlib.colors as colors
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 import time
 import hashlib
 import pickle
@@ -170,6 +171,7 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     "reference_seed": 0,
     "screen_top_k": 256,
     "refine_iterations": 40,
+    "candidate_export": 20,   # top nodes of each objective handed to the evidence stage
     "boundary_warn_ratio": 0.40,
     # Indicative stability probe: how far does the anchor move if the user's circle
     # is rescaled / shifted? Drift is judged against the study radius.
@@ -1153,6 +1155,28 @@ def find_cbd_anchors(
         }
 
     results = {objective: solve(objective) for objective in ("composite", "closeness")}
+
+    def top_nodes(objective: str, limit: int) -> List[int]:
+        in_pool = set(pools[objective].tolist())
+        ranked = sorted((i for i in exact_c if i in in_pool),
+                        key=lambda i: (round(components(i, objective)["score"], 12), -i), reverse=True)
+        return ranked[:limit]
+
+    candidate_nodes: List[int] = []
+    for i in top_nodes("composite", ANCHOR_CONFIG["candidate_export"]) + top_nodes(
+            "closeness", ANCHOR_CONFIG["candidate_export"]):
+        if i not in candidate_nodes:
+            candidate_nodes.append(i)
+    composite_pool_set = set(composite_pool.tolist())
+    evidence_candidates = []
+    for i in candidate_nodes:
+        comp = components(i, "composite")
+        evidence_candidates.append({
+            "node_id": str(nodes[i]), "lat": float(lonlat[i, 1]), "lon": float(lonlat[i, 0]),
+            "composite_score": comp["score"], "closeness_norm": comp["closeness_norm"],
+            "degree": int(degrees[i]), "junction_count": int(density[i]),
+            "in_composite_pool": bool(i in composite_pool_set),
+        })
     finished = time.perf_counter()
     timings = {"prep_s": prep_done - started, "pivots_s": pivots_done - prep_done,
                "exact_s": finished - pivots_done, "compute_s": finished - started}
@@ -1160,6 +1184,7 @@ def find_cbd_anchors(
         result["compute_seconds"] = timings["compute_s"]
         result["timings"] = timings
     return {**results, "timings": timings, "rows_budget": rows_budget,
+            "evidence_candidates": evidence_candidates,
             "graph": {"nodes": n, "edges": int(matrix.nnz // 2),
                       "dropped_nodes": net["total_nodes"] - n},
             "study_center": list(study_center), "study_radius_m": study_radius_m}
@@ -1397,6 +1422,336 @@ def zoning_features(
         "class_shares": {legend[k]["name"]: float(s) for k, s in enumerate(shares) if s > 0},
         "in_commercial": in_commercial, "distance_to_commercial_m": distance,
     }
+
+
+# ------------------------------------------------------------- WMS fetch + evidence runner
+EVIDENCE_CONFIG: Dict[str, Any] = {
+    "candidates": 12,               # road candidates sent to the evidence stage (both road anchors always included)
+    "min_spacing_m": 300.0,         # greedy non-maximum suppression between candidates
+    "px": 1024,
+    "parcel_window_m": 1000.0,      # ~0.98 m/px: 1-2 px boundary lines still leave ตึกแถว lots measurable
+    "plan_window_m": 1500.0,
+    "zoning_radius_m": 300.0,
+    "parcel_layer": "dol",
+    "plan_layer": "cityplan_dpt",
+    "weights": {"road": 0.35, "parcel": 0.35, "zoning": 0.30},
+    "max_requests": 40,
+    "parallel": 4,
+    "timeout_s": 15,
+    "agree_radius_m": 300.0,        # evidence anchor vs a road anchor counts as "agreeing" within this
+    "commercial_near_m": 150.0,     # "in the commercial zone" = inside it or this close
+    "confidence": {"parcel_ok": 0.50, "coverage_min": 0.60, "coverage_medium": 0.40},
+}
+_WEB_MERCATOR = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+
+
+def _wms_window(lat: float, lon: float, window_m: float) -> Tuple[float, float, float, float]:
+    """EPSG:3857 bbox that covers ``window_m`` ground metres around (lat, lon)."""
+    x, y = _WEB_MERCATOR.transform(lon, lat)
+    half = (window_m / 2.0) / max(cos(radians(lat)), 1e-6)  # Mercator metres stretch by 1/cos(lat)
+    return (x - half, y - half, x + half, y + half)
+
+
+def _wms_params(layer: str, bbox: Tuple[float, float, float, float], px: int) -> Dict[str, Any]:
+    return {
+        "service": "WMS", "version": "1.1.1", "request": "GetMap", "layers": layer, "styles": "",
+        "srs": "EPSG:3857", "bbox": ",".join(f"{v:.1f}" for v in bbox),
+        "width": px, "height": px, "format": "image/png", "transparent": "true",
+    }
+
+
+def _wms_cache_file(params: Dict[str, Any]) -> Path:
+    digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:40]
+    return CACHE_DIR / f"wms_{digest}.png"
+
+
+def fetch_wms_image(
+    layer: str, bbox: Tuple[float, float, float, float], px: int
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """RGBA ``(px, px, 4)`` array of a WMS window, from the disk cache or one GetMap request.
+
+    The cache key excludes the API key, so a result is reproducible offline and exports with
+    the cache. Never raises: ``(None, {"error": ...})`` on any failure (HTTP status, XML
+    service exception, undecodable image, timeout).
+    """
+    from PIL import Image
+
+    params = _wms_params(layer, bbox, px)
+    cache_file = _wms_cache_file(params)
+    info: Dict[str, Any] = {"layer": layer, "cache_file": cache_file.name, "from_cache": False}
+    try:
+        if cache_file.exists():
+            image = Image.open(cache_file).convert("RGBA")
+            info["from_cache"] = True
+            return np.asarray(image), info
+    except Exception:
+        pass  # unreadable cache entry: fetch again
+    try:
+        response = requests.get(
+            LONGDO_WMS_URL, params=params, timeout=EVIDENCE_CONFIG["timeout_s"],
+            headers={"User-Agent": "Rent_Gradient-evidence/1.0"},
+        )
+        if response.status_code != 200:
+            return None, {**info, "error": f"HTTP {response.status_code}"}
+        if "image" not in response.headers.get("Content-Type", "image/png"):
+            return None, {**info, "error": "server returned a service exception, not an image"}
+        image = Image.open(io.BytesIO(response.content))
+        image.load()
+        image = image.convert("RGBA")
+        if image.size != (px, px):
+            return None, {**info, "error": f"unexpected image size {image.size}"}
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        try:
+            _atomic_write(cache_file, buffer.getvalue())
+            _atomic_write(cache_file.with_suffix(".json"), json.dumps(
+                {"layer": layer, "bbox": list(bbox), "px": px,
+                 "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}).encode("utf-8"))
+        except Exception:
+            pass  # caching is best-effort
+        return np.asarray(image), info
+    except Exception as exc:
+        return None, {**info, "error": " ".join(str(exc).split())[:160] or type(exc).__name__}
+
+
+def select_evidence_candidates(
+    candidates: List[Dict[str, Any]],
+    anchors: List[Dict[str, Any]],
+    limit: int,
+    min_spacing_m: float,
+) -> List[Dict[str, Any]]:
+    """Both road anchors first, then the best remaining candidates >= ``min_spacing_m`` apart."""
+    by_id = {c["node_id"]: c for c in candidates}
+    ordered: List[Dict[str, Any]] = []
+    for a in anchors:
+        base = dict(by_id.get(a["node_id"], {}))
+        base.update(node_id=a["node_id"], lat=a["lat"], lon=a["lon"])
+        base.setdefault("composite_score", a.get("score", 0.0))
+        ordered.append(base)
+    ranked = sorted(candidates, key=lambda c: (-round(c["composite_score"], 12), str(c["node_id"])))
+    ordered.extend(ranked)
+    chosen: List[Dict[str, Any]] = []
+    for cand in ordered:
+        if len(chosen) >= limit:
+            break
+        if any(cand["node_id"] == c["node_id"] for c in chosen):
+            continue
+        if any(calculate_distance_meters(cand["lat"], cand["lon"], c["lat"], c["lon"]) < min_spacing_m
+               for c in chosen):
+            continue
+        chosen.append(cand)
+    return chosen
+
+
+def fuse_evidence(
+    candidates: List[Dict[str, Any]], weights: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    """Weighted blend over the signals that have data; a missing signal lowers ``coverage``,
+    never the score (no data is not the same as "low"). Sorted best first, ties by node id."""
+    total = sum(weights.values()) or 1.0
+    fused = []
+    for cand in candidates:
+        signals = {
+            "road": cand.get("road_signal"),
+            "parcel": cand["parcel"]["score"] if cand.get("parcel", {}).get("data") else None,
+            "zoning": cand["zoning"]["zoning_intensity"] if cand.get("zoning", {}).get("data") else None,
+        }
+        used = {k: v for k, v in signals.items() if v is not None}
+        weight_used = sum(weights[k] for k in used)
+        score = sum(weights[k] * v for k, v in used.items()) / weight_used if weight_used else None
+        fused.append({**cand, "signals": signals, "coverage": weight_used / total,
+                      "evidence_score": score})
+    fused.sort(key=lambda c: (c["evidence_score"] is None,
+                              -round(c["evidence_score"] or 0.0, 12), str(c["node_id"])))
+    for rank, cand in enumerate(fused, start=1):
+        cand["rank"] = rank
+    return fused
+
+
+def classify_anchor_confidence(
+    winner: Dict[str, Any],
+    road_anchors: List[Dict[str, Any]],
+    stability_level: Optional[str],
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """HIGH needs independent signals to agree: roads (an anchor within ``agree_radius_m``),
+    the official plan (in / next to the commercial zone) and the parcel structure.
+    Reasons are returned in Thai for the UI."""
+    conf = cfg["confidence"]
+    reasons: List[str] = []
+    nearest = min((calculate_distance_meters(winner["lat"], winner["lon"], a["lat"], a["lon"])
+                   for a in road_anchors), default=None)
+    roads_ok = nearest is not None and nearest <= cfg["agree_radius_m"]
+    reasons.append(
+        f"ถนน: anchor ถนนที่ใกล้สุดห่าง {nearest:,.0f} ม." + (" (สอดคล้อง)" if roads_ok else " (ไม่สอดคล้อง)")
+        if nearest is not None else "ถนน: ไม่มี anchor อ้างอิง")
+    zoning = winner.get("zoning") or {}
+    zoning_ok = None
+    if zoning.get("data") or zoning.get("distance_to_commercial_m") is not None:
+        distance = zoning.get("distance_to_commercial_m")
+        zoning_ok = bool(zoning.get("in_commercial")) or (
+            distance is not None and distance <= cfg["commercial_near_m"])
+        if zoning.get("in_commercial"):
+            reasons.append("ผังเมือง: อยู่ในโซนพาณิชยกรรม")
+        elif distance is not None:
+            reasons.append(f"ผังเมือง: ห่างโซนพาณิชยกรรม {distance:,.0f} ม." + ("" if zoning_ok else " (ไกล)"))
+        else:
+            reasons.append("ผังเมือง: ไม่พบโซนพาณิชยกรรมในกรอบภาพ")
+    else:
+        reasons.append("ผังเมือง: ไม่มีข้อมูล (นอกพื้นที่ผังเมืองหรืออ่านภาพไม่ได้)")
+    parcel = winner.get("parcel") or {}
+    parcel_ok = None
+    if parcel.get("data"):
+        parcel_ok = parcel["score"] >= conf["parcel_ok"]
+        reasons.append(
+            f"แปลงที่ดิน: คะแนน {parcel['score']:.2f}, แปลงเล็ก {parcel['small_share']:.0%}, "
+            f"ตึกแถว {parcel['shophouse_share']:.0%}" + ("" if parcel_ok else " (ไม่เด่น)"))
+    else:
+        reasons.append("แปลงที่ดิน: ไม่มีข้อมูล")
+    coverage = winner.get("coverage", 0.0)
+    flags = [roads_ok, zoning_ok, parcel_ok]
+    agreeing = sum(1 for f in flags if f)
+    if stability_level == "unstable":
+        reasons.append("ความนิ่ง: anchor ถนนขยับมากเมื่อวงศึกษาเปลี่ยน (ไม่นิ่ง)")
+    if coverage >= conf["coverage_min"] and agreeing == 3 and stability_level != "unstable":
+        level = "HIGH"
+    elif coverage >= conf["coverage_medium"] and agreeing >= 2:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+    return {"level": level, "reasons": reasons, "coverage": coverage,
+            "signals": {"roads": roads_ok, "zoning": zoning_ok, "parcel": parcel_ok},
+            "nearest_road_anchor_m": nearest}
+
+
+def _largest_commercial_zone(
+    plan: np.ndarray, legend: List[Dict[str, Any]], bbox: Tuple[float, float, float, float]
+) -> Optional[Dict[str, Any]]:
+    """Centroid (lat, lon) and area of the biggest พาณิชยกรรม patch in a city-plan overview."""
+    commercial = [k for k, c in enumerate(legend) if c.get("commercial")]
+    if not commercial:
+        return None
+    cls = _classify_colors(plan, legend, ZONING_COLOR_TOLERANCE)
+    mask = np.isin(cls, commercial)
+    if not mask.any():
+        return None
+    labels, n = ndi.label(mask)
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
+    biggest = int(sizes.argmax()) + 1
+    rows, cols = np.nonzero(labels == biggest)
+    h, w = mask.shape
+    x = bbox[0] + (cols.mean() + 0.5) / w * (bbox[2] - bbox[0])
+    y = bbox[3] - (rows.mean() + 0.5) / h * (bbox[3] - bbox[1])
+    lon, lat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform(x, y)
+    mid_lat = float(lat)
+    ground_per_px = (bbox[2] - bbox[0]) / w * cos(radians(mid_lat))
+    return {"lat": float(lat), "lon": float(lon), "area_km2": float(sizes.max() * ground_per_px ** 2 / 1e6)}
+
+
+def run_evidence_stage(
+    found: Dict[str, Any],
+    study_center: Tuple[float, float],
+    study_radius_m: float,
+    legend: Optional[List[Dict[str, Any]]] = None,
+    legend_source: str = "provisional",
+    fetcher: Callable[..., Tuple[Optional[np.ndarray], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Confirm the road candidates with the city plan and the parcel layer; never raises.
+
+    ``found`` is the result of :func:`find_cbd_anchors`. The returned block carries status
+    (``ok`` / ``partial`` / ``unavailable``), the fused candidate table, the evidence anchor
+    and its confidence. Without evidence the road anchors are left exactly as they are.
+    """
+    cfg = EVIDENCE_CONFIG
+    fetcher = fetcher or fetch_wms_image
+    started = time.perf_counter()
+    base: Dict[str, Any] = {
+        "status": "unavailable", "reason": None, "legend_source": legend_source,
+        "weights": dict(cfg["weights"]), "candidates": [], "evidence_anchor": None,
+        "confidence": None, "commercial_zone": None,
+        "windows": {"parcel_m": cfg["parcel_window_m"], "plan_m": cfg["plan_window_m"], "px": cfg["px"]},
+        "fetch": {"requests": 0, "cache_hits": 0, "errors": [], "seconds": 0.0},
+    }
+    try:
+        legend = legend or load_cityplan_legend()[0]
+        composite, closeness = found["composite"], found["closeness"]
+        picked = select_evidence_candidates(
+            found.get("evidence_candidates", []),
+            [composite["anchor"], closeness["anchor"]],
+            int(cfg["candidates"]), float(cfg["min_spacing_m"]))
+        if not picked:
+            return {**base, "reason": "ไม่มีผู้สมัครจากถนน"}
+        tasks: List[Tuple[str, int, str, Tuple[float, float, float, float]]] = []
+        for index, cand in enumerate(picked):
+            tasks.append(("parcel", index, cfg["parcel_layer"],
+                          _wms_window(cand["lat"], cand["lon"], cfg["parcel_window_m"])))
+            tasks.append(("plan", index, cfg["plan_layer"],
+                          _wms_window(cand["lat"], cand["lon"], cfg["plan_window_m"])))
+        overview_window = 2.0 * study_radius_m
+        overview_bbox = _wms_window(study_center[0], study_center[1], overview_window)
+        tasks.append(("overview", -1, cfg["plan_layer"], overview_bbox))
+        skipped = max(0, len(tasks) - int(cfg["max_requests"]))
+        tasks = tasks[: int(cfg["max_requests"])]
+        images: Dict[Tuple[str, int], Optional[np.ndarray]] = {}
+        errors: List[str] = []
+        hits = 0
+
+        def fetch_one(layer: str, bbox: Tuple[float, float, float, float]):
+            try:
+                return fetcher(layer, bbox, cfg["px"])
+            except Exception as exc:  # one bad window must not cancel the others
+                return None, {"error": f"{type(exc).__name__}: {' '.join(str(exc).split())[:120]}"}
+
+        with ThreadPoolExecutor(max_workers=max(1, int(cfg["parallel"]))) as pool:
+            futures = {pool.submit(fetch_one, layer, bbox): (kind, index)
+                       for kind, index, layer, bbox in tasks}
+            for future, key in futures.items():
+                image, info = future.result()
+                images[key] = image
+                hits += bool(info.get("from_cache"))
+                if image is None:
+                    errors.append(f"{key[0]}#{key[1]}: {info.get('error', 'no image')}")
+        base["fetch"] = {"requests": len(tasks) - hits, "cache_hits": hits, "errors": errors[:10],
+                         "skipped_over_budget": skipped, "seconds": time.perf_counter() - started}
+        records = []
+        for index, cand in enumerate(picked):
+            lat = cand["lat"]
+            parcel_img, plan_img = images.get(("parcel", index)), images.get(("plan", index))
+            parcel = (parcel_features(parcel_img, cfg["parcel_window_m"] / cfg["px"])
+                      if parcel_img is not None else {"data": False})
+            zoning = (zoning_features(plan_img, legend, cfg["plan_window_m"] / cfg["px"],
+                                      radius_m=cfg["zoning_radius_m"])
+                      if plan_img is not None else {"data": False})
+            records.append({
+                "node_id": cand["node_id"], "lat": lat, "lon": cand["lon"],
+                "is_composite_anchor": cand["node_id"] == composite["anchor"]["node_id"],
+                "is_closeness_anchor": cand["node_id"] == closeness["anchor"]["node_id"],
+                "road_signal": float(cand.get("composite_score", 0.0)),
+                "parcel": parcel, "zoning": zoning,
+            })
+        overview = images.get(("overview", -1))
+        if overview is not None:
+            base["commercial_zone"] = _largest_commercial_zone(overview, legend, overview_bbox)
+        fused = fuse_evidence(records, cfg["weights"])
+        have_extra = [c for c in fused if c["parcel"].get("data") or c["zoning"].get("data")]
+        if not have_extra:
+            return {**base, "candidates": fused,
+                    "reason": "ดึงภาพ/อ่านข้อมูลผังเมืองและแปลงที่ดินไม่สำเร็จ — ใช้ผลจากถนนอย่างเดียว"}
+        winner = have_extra[0]  # a road-only candidate never wins by default after a failed fetch
+        stability = (composite.get("stability") or {}).get("level")
+        confidence = classify_anchor_confidence(
+            winner, [composite["anchor"], closeness["anchor"]], stability, cfg)
+        evidence_anchor = {
+            "node_id": winner["node_id"], "lat": winner["lat"], "lon": winner["lon"],
+            "score": winner["evidence_score"], "source": "Automated CBD Anchor — Evidence",
+            "road_signal": winner["road_signal"], "coverage": winner["coverage"],
+        }
+        partial = bool(errors) or skipped > 0 or any(c["coverage"] < 1.0 for c in fused)
+        return {**base, "status": "partial" if partial else "ok", "candidates": fused,
+                "evidence_anchor": evidence_anchor, "confidence": confidence,
+                "fetch": {**base["fetch"], "seconds": time.perf_counter() - started}}
+    except Exception as exc:  # the road result must survive whatever goes wrong here
+        return {**base, "reason": f"{type(exc).__name__}: {' '.join(str(exc).split())[:160]}"}
 
 
 def get_fill_color(minutes: float, colors_config: Dict[str, str]) -> str:

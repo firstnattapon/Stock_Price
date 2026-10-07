@@ -468,3 +468,20 @@ def test_old_saved_results_with_trace_still_render(monkeypatch):
     assert at.session_state["automated_anchor_data"] is not None  # not wiped by the new context rule
     markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
     assert [m.icon.options["marker_color"] for m in markers] == ["darkblue"]
+
+
+def test_road_search_exports_candidates_for_the_evidence_stage():
+    found = find()
+    candidates = found["evidence_candidates"]
+    assert 1 <= len(candidates) <= 2 * page.ANCHOR_CONFIG["candidate_export"]
+    ids = [c["node_id"] for c in candidates]
+    assert len(ids) == len(set(ids))
+    for key in ("node_id", "lat", "lon", "composite_score", "closeness_norm", "degree", "junction_count"):
+        assert all(key in c for c in candidates)
+    # both road winners are among the exported candidates, with their exact composite score
+    by_id = {c["node_id"]: c for c in candidates}
+    for objective in ("composite", "closeness"):
+        assert str(found[objective]["anchor"]["node_id"]) in by_id
+    best = max(candidates, key=lambda c: c["composite_score"])
+    assert str(found["composite"]["anchor"]["node_id"]) == best["node_id"]
+    json.dumps(candidates)                                             # JSON-safe
