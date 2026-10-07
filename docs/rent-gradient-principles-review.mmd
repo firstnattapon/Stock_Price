@@ -1,0 +1,111 @@
+---
+title: "Rent_Gradient.py — หลักการ + ผลรีวิว   [OK] ดี · [ASSUME] สมมติฐาน · [RISK] เสี่ยง · [BUG] ผิดจริง"
+---
+%% สอดคล้องกับ docs/rent-gradient-principles-review.md — เลข F# อ้างอิงตารางข้อค้นพบใน .md
+flowchart TD
+
+    %% ---------------- อินพุต ----------------
+    subgraph IN["อินพุต"]
+        direction LR
+        MK["หมุด / พิกัดศึกษา<br/>study centre + radius"]
+        ISO["Isochrone จาก Geoapify<br/>perform_calculation"]
+        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>ผ่าน Overpass + pkl cache"]
+        OSMN["OSM roads: union ของ isochrone<br/>perform_network_analysis"]
+        SMP["ตัวอย่างราคาจริง (ถ้ามี)<br/>lat, lon, rent"]
+    end
+
+    MK --> ISO
+    MK --> OSMA
+
+    %% ---------------- หลักการ 1: ตำแหน่ง CBD ----------------
+    subgraph P1["หลักการ 1 — จุดยึด CBD (anchor)"]
+        direction TB
+        A0["Composite anchor<br/>0.5·C_norm + 0.3·D_norm + 0.2·J_norm<br/>[RISK] F3 น้ำหนักจริงของ closeness ต่ำกว่า 50%"]
+        CERT{"candidates ≤ 2048 ?"}
+        EX["exhaustive audit<br/>certified เฉพาะ objective + กราฟนี้<br/>[OK] ผลไม่ขึ้นกับ seed"]
+        LO["local-only<br/>pattern search 8 ทิศ + halve radius<br/>[RISK] F16 ผลขึ้นกับ seed"]
+        A1["Closeness 100%<br/>network 1-median ทุกโหนด<br/>[OK] สมการสะอาด — ใช้เทียบเท่านั้น"]
+        A2["CBD Zone centroid<br/>จุดตัด isochrone"]
+        A3["Integration Center<br/>top node closeness"]
+        A4["centroid Travel Areas<br/>หรือ ค่าเฉลี่ยหมุด"]
+        RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ"]
+        A0 --> CERT
+        CERT -- "ใช่" --> EX
+        CERT -- "ไม่" --> LO
+    end
+
+    OSMA --> A0
+    OSMA --> A1
+    ISO --> A2
+    ISO --> A4
+    MK --> A4
+    EX --> RES
+    LO --> RES
+    A2 --> RES
+    A3 --> RES
+    A4 --> RES
+
+    %% ---------------- หลักการ 3: Network ----------------
+    subgraph P3["หลักการ 3 — Network analysis (OSM)"]
+        direction TB
+        CL["Weighted closeness บน LCC<br/>exact ≤ 3000 โหนด / pivot k=600<br/>[OK] seed คงที่ ทำซ้ำได้"]
+        BT["Edge betweenness<br/>exact ≤ 2000 / sample k=400<br/>[BUG] F1 key (u,v,k) ไม่ตรง (u,v) → ค่า 0 ทุกเส้น"]
+        GL["Golden Land score<br/>0.5·C + 0.3·D + 0.2·(1 − B)<br/>[BUG] F1 เทอม (1 − B) คงที่ = 1"]
+        CL --> GL
+        BT --> GL
+    end
+
+    OSMN --> CL
+    OSMN --> BT
+    CL -. "top node" .-> A3
+
+    %% ---------------- หลักการ 2: Bid-Rent ----------------
+    subgraph P2["หลักการ 2 — Bid-Rent (Alonso–Muth–Mills)"]
+        direction TB
+        DM["d_max จาก bbox corners ของ isochrone<br/>[RISK] F6 เกินจริงได้ถึง √2 เท่า"]
+        FIT{"ตัวอย่าง ≥ 2 จุด<br/>และระยะต่างกัน ?"}
+        OLS["log-linear OLS<br/>ln R = ln R0 − λ·d<br/>[RISK] F4 n = 2 ได้ R² = 1 เสมอ"]
+        IDX["โหมดดัชนี<br/>R0 = 100, λ = ln 4 / d_max<br/>[ASSUME] ไม่ได้ calibrate จากข้อมูล"]
+        MOD["R(d) = R0 · e^(−λ·d)   d½ = ln 2 / λ<br/>d = haversine จาก anchor<br/>[ASSUME] F7 ระยะเส้นตรง, monocentric"]
+        DM --> IDX
+        FIT -- "ใช่" --> OLS
+        FIT -- "ไม่" --> IDX
+        OLS --> MOD
+        IDX --> MOD
+    end
+
+    RES --> DM
+    RES --> MOD
+    SMP --> FIT
+
+    %% ---------------- เอาต์พุต ----------------
+    subgraph OUT["เอาต์พุต"]
+        direction TB
+        CRV["Bid-Rent Curve<br/>+ เส้น d½"]
+        RNG["Rent Rings + Rent Heat<br/>6 วงระยะเท่ากัน สีตามค่า ณ กึ่งกลางวง"]
+        RRP["Ring Report<br/>[RISK] F12 โหนด/km² หารด้วยพื้นที่วงเต็ม"]
+        VG["Value Gap = C̄ − R(d)/R0<br/>[RISK] F5 คนละสเกล, โหมดดัชนีเอนเอียงออกนอก"]
+        GS["Golden Spots top 10<br/>[RISK] F13 ไม่มี spatial dedup"]
+    end
+
+    MOD --> CRV
+    MOD --> RNG
+    MOD --> RRP
+    MOD --> VG
+    CL --> RRP
+    CL --> VG
+    GL --> GS
+    GS --> VG
+
+    %% ---------------- สไตล์ ----------------
+    classDef ok fill:#e6f4ea,stroke:#1e7a3c,color:#0b3d1e
+    classDef risk fill:#fff4d6,stroke:#b27a00,color:#4a3300
+    classDef bug fill:#fde7e9,stroke:#c0262d,color:#5c0a0e
+    classDef assume fill:#e8eefc,stroke:#3b5bb5,color:#14264f
+    classDef plain fill:#f5f5f5,stroke:#8a8a8a,color:#222
+
+    class EX,CL,A1 ok
+    class A0,LO,DM,OLS,RRP,VG,GS risk
+    class BT,GL bug
+    class RES,IDX,MOD assume
+    class MK,ISO,OSMA,OSMN,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
