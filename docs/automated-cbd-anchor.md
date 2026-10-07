@@ -89,29 +89,57 @@ first for sustained or commercial traffic.
    resolves ties reproducibly, including after graph insertion order changes.
 7. Road trials showed that local convergence can still trap different starts
    in different centres. If all candidate junctions fit the evaluation budget,
-   **audit every candidate** after ARPS and select the globally highest score.
-   This certificate applies to the fixed objective and graph, not to the real
-   economic CBD. Larger graphs return an explicit `local-only` certificate.
+   **audit every candidate** after ARPS and select the globally highest score
+   (`certification = exhaustive-fixed-objective`). This certificate applies to
+   the fixed objective and graph, not to the real economic CBD.
+8. Larger graphs are **screened, not certified** (`certification =
+   pivot-screened-exact-top-k`, `method = arps-pivot-screened-exact-scipy`).
+   A fixed, seed-independent sample of up to 256 destinations gives every
+   candidate an approximate closeness `k / sum_p d(v,p)` (unbiased; a pivot
+   excludes its own zero distance). Candidates are ranked with the same
+   composite, the top 256 are scored exactly within the evaluation budget, and
+   a local exhaustive climb (150 m neighbourhoods) polishes the best. The
+   screen does not depend on the random seed, so it is far more stable than
+   restarts alone, but it is not a global certificate: the final anchor can
+   still be beaten by a candidate the screen ranked outside the top 256. The
+   reference rows are extra to `max_evaluations`.
 
 For `M` inside destination nodes and exact shortest road distance `d(v,u)`:
 
 ```text
-C(v) = (M - 1) / sum_u d(v,u)
-C_norm(v) = C(v) / (C(v) + 1 / study_radius_m)
-D_norm(v) = distinct_neighbour_degree(v) / max_inside_degree
-J_norm(v) = junction_count_500m(v) / max_inside_junction_count_500m
-Score(v) = 0.50*C_norm(v) + 0.30*D_norm(v) + 0.20*J_norm(v)
+C(v)      = (M - 1) / sum_u d(v,u)
+C_rank(v) = Phi((C(v) - mean_ref) / std_ref)          # Phi = normal CDF
+D_rank(v) = mid-rank percentile of distinct-neighbour degree among candidates
+J_rank(v) = mid-rank percentile of junction_count_500m among candidates
+Score(v)  = 0.50*C_rank(v) + 0.30*D_rank(v) + 0.20*J_rank(v)
 ```
 
-Zero maxima use a denominator of one. Normalisers and destinations stay fixed
-across probes, scales, and starts. The bounded closeness transform avoids
-sample-dependent min/max normalisation, which would otherwise change the
-objective while climbing. The final audit certifies the highest **composite
-score**, not closeness alone.
+`mean_ref`/`std_ref` come from the exact closeness of a fixed reference sample of
+up to 256 destinations chosen with a constant seed (all destinations when
+`M <= 256`). Mid-rank percentiles use exact counts over the candidate pool.
+All three components therefore span a comparable 0..1 range, so the nominal
+50/30/20 weights are close to the weights that actually order the candidates.
+Normalisers and destinations stay fixed across probes, scales, starts and
+seeds; they depend only on the graph. The final audit certifies the highest
+**composite score**, not closeness alone.
+
+**Why not `C/(C+1/R)` any more.** The earlier bounded transform
+`x/(1+x)` with `x = R*C` moves only ~0.25 per relative change of `C` when
+`x ~ 1` (the recorded winner had `x = 0.99`). On the two real road graphs in
+`Geoapify_Map/osmnx_cache.zip` the effective weight (`w_i * std_i`, normalised
+over the candidate pool) of closeness was about 27% against a nominal 50%, while
+junction density carried 45-49% against 20%. After the change the larger graph
+gives about 56/21/23 (`closeness/degree/density`). Every result reports
+`nominal_weights`, `effective_weights` (same definition) and
+`winner_contribution` (each term's share of the winner's score); the sidebar
+shows them. The `Closeness 100%` objective is unchanged (`C_norm` is monotone in
+`C`, so it still selects the raw 1-median), and `scoring` records `rank-v2` or
+`closeness-bounded` so older exports stay interpretable.
 
 SciPy CSR Dijkstra uses a symmetric matrix and at most 16 source rows per batch.
 It never allocates an all-pairs distance matrix. A search evaluates at most
-2,048 distinct candidates by default and admits at most 100,000 graph nodes.
+2,048 distinct candidates by default (plus the fixed reference rows) and admits
+at most 100,000 graph nodes.
 Each restart has an 80-iteration limit. Exhausting the evaluation budget raises
 a visible error; an iteration limit returns `converged=false` with a warning.
 The pure function accepts explicit budgets for offline analysis. Road downloads
@@ -149,6 +177,12 @@ SciPy, anchor precedence, rent without isochrones, config round trips, actual
 Streamlit button execution/invalidation/failure, and the dark-blue map marker.
 They also simulate connection refusal, retry/failover, cache reuse, custom
 endpoint precedence, bounded all-server diagnostics, and global setting restore.
+`tests/test_rent_gradient_principles.py` adds regressions for the review fixes:
+betweenness keys on multigraphs, fit standard errors against
+`scipy.stats.linregress`, index-mode Value Gap, restricted unpickling and
+bundle-import hardening, the narrow Overpass lock, coverage-aware ring density,
+Golden Spot spacing, rank-normalised weights, and seed stability of the pivot
+screen on the repository's real road graphs.
 
 ## Accuracy and limitations
 
@@ -168,12 +202,26 @@ endpoint precedence, bounded all-server diagnostics, and global setting restore.
   searches have no global-optimum or cross-seed stability guarantee.
 - Ground-truth CBD error and improved rent-fit significance have **not** been
   established from roads alone. These draft targets require independent data.
+- The anchor is the centre of the road network *inside the circle you choose*, so
+  it can move with that circle. `scripts/anchor_sensitivity.py` re-runs a fixed
+  graph with the radius scaled by 0.8/1.2 and the centre shifted by 20% of the
+  radius in four directions and reports the drift. On the larger real graph in
+  the repository (8 km radius) the composite anchor moved at most 379 m while
+  the pure `Closeness 100%` anchor moved up to 2.3 km — one graph, so treat it as
+  a prompt to check your own area, not as a general result.
 
 Implementation references: [OSMnx API](https://osmnx.readthedocs.io/en/stable/user-reference.html)
 and [SciPy sparse graph algorithms](https://docs.scipy.org/doc/scipy/reference/sparse.csgraph.html).
 OpenStreetMap road data are © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright).
 
 ## Recorded real-road run (2026-09-20)
+
+> Recorded with the original scoring (`C/(C+1/R)`, divided-by-maximum degree and
+> density). The composite objective now uses rank-normalised components, so the
+> winning node and score below will differ when the run is repeated; the
+> Closeness-100% anchor, timings and the 18 km local-endpoint observation are
+> unaffected. The OSM graph itself is not stored in the repository — re-run the
+> commands above to refresh these numbers.
 
 See [the machine-readable benchmark](cbd-anchor-benchmark.json). Chiang Khong,
 Thailand, centre `(20.219443, 100.403630)`, 10 km study radius, drive roads:
