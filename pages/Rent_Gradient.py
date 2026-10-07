@@ -49,6 +49,7 @@ try:
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components as csgraph_components
     from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
+    from scipy import ndimage as ndi
     HAS_SCIPY: bool = True
 except Exception:
     HAS_SCIPY = False
@@ -1162,6 +1163,240 @@ def find_cbd_anchors(
             "graph": {"nodes": n, "edges": int(matrix.nnz // 2),
                       "dropped_nodes": net["total_nodes"] - n},
             "study_center": list(study_center), "study_radius_m": study_radius_m}
+
+
+# ----------------------------------------------------------------------------
+# Evidence stage: official city plan (ผังเมืองรวม) + parcel layer (รูปแปลงที่ดิน)
+# ----------------------------------------------------------------------------
+# Roads find candidates; the DPT zoning colours and the DOL parcel structure confirm them.
+# In Thai towns the commercial core is ตึกแถว (shophouse) strips: narrow lots of roughly
+# 16-40 ตร.ว. (64-160 m²) whose boundary lines cover a large share of the picture, usually
+# inside the พาณิชยกรรม (red) zone. These functions measure that from WMS images; they are
+# pure (image in, numbers out) so they are testable without a network.
+
+PARCEL_CONFIG: Dict[str, Any] = {
+    "alpha_threshold": 32,            # pixel counts as a drawn line above this alpha
+    "opaque_bg_tolerance": 60,        # opaque images: colour distance from the dominant colour
+    "closing_size": 1,                # >1 bridges gaps in boundary lines; off by default: a 3x3 closing
+                                      # also fills real 2-px-wide cells (ตึกแถว at ~1.5 m/px)
+    "speck_px": 6,                    # cells smaller than this are label clutter
+    "giant_cell_ratio": 0.05,         # a free cell above 5% of the window is "no parcels here"
+    "small_cell_m2": 200.0,           # 50 ตร.ว.
+    "shophouse_area_m2": (40.0, 160.0),
+    "shophouse_min_aspect": 2.5,
+    "min_cells": 10,                  # fewer measurable cells -> no data
+    "min_ink_ratio": 0.002,           # (almost) blank layer -> no data
+    "ink_low": 0.03,                  # ink share that scores 0 / 1 in the blend
+    "ink_high": 0.40,
+    "score_weights": {"shophouse": 0.40, "small": 0.30, "ink": 0.30},
+}
+
+CITYPLAN_LEGEND_FILE: Path = (
+    Path(__file__).resolve().parent.parent / "Geoapify_Map" / "cityplan_legend.json"
+)
+# PROVISIONAL colours after the DPT zoning convention — real tiles have not been compared
+# yet. Replace with Geoapify_Map/cityplan_legend.json (written from the capture script's
+# colour histogram); a wrong colour only lowers plan coverage, which counts as "no data".
+CITYPLAN_PROVISIONAL_LEGEND: List[Dict[str, Any]] = [
+    {"name": "พาณิชยกรรม", "rgb": [255, 0, 0], "weight": 1.00, "commercial": True},
+    {"name": "ที่อยู่อาศัยหนาแน่นมาก", "rgb": [153, 76, 0], "weight": 0.80, "commercial": False},
+    {"name": "ที่อยู่อาศัยหนาแน่นปานกลาง", "rgb": [255, 153, 0], "weight": 0.50, "commercial": False},
+    {"name": "ที่อยู่อาศัยหนาแน่นน้อย", "rgb": [255, 255, 0], "weight": 0.25, "commercial": False},
+    {"name": "สถาบันราชการและสาธารณูปโภค", "rgb": [0, 0, 255], "weight": 0.40, "commercial": False},
+    {"name": "อุตสาหกรรมและคลังสินค้า", "rgb": [153, 51, 255], "weight": 0.10, "commercial": False},
+    {"name": "เกษตรกรรมและชนบท", "rgb": [0, 176, 80], "weight": 0.00, "commercial": False},
+    {"name": "อนุรักษ์และนันทนาการ", "rgb": [0, 100, 0], "weight": 0.00, "commercial": False},
+]
+ZONING_COLOR_TOLERANCE: float = 60.0  # RGB distance to a legend colour; beyond it = label/outline
+
+
+def load_cityplan_legend(path: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], str]:
+    """``(legend, source)``; ``source`` is ``"file"`` or ``"provisional"`` (never raises)."""
+    try:
+        data = json.loads(Path(path or CITYPLAN_LEGEND_FILE).read_text(encoding="utf-8"))
+        classes = data["classes"] if isinstance(data, dict) else data
+        legend = [
+            {"name": str(c["name"]), "rgb": [int(v) for v in c["rgb"]][:3],
+             "weight": float(c.get("weight", 0.0)), "commercial": bool(c.get("commercial", False))}
+            for c in classes
+        ]
+        if legend and all(len(c["rgb"]) == 3 for c in legend):
+            return legend, "file"
+    except Exception:
+        pass
+    return [dict(c) for c in CITYPLAN_PROVISIONAL_LEGEND], "provisional"
+
+
+def wms_meters_per_pixel(bbox_3857: Tuple[float, float, float, float], width_px: int, lat: float) -> float:
+    """Ground metres per pixel of a Web-Mercator window (3857 metres shrink by cos(lat))."""
+    return (bbox_3857[2] - bbox_3857[0]) / max(width_px, 1) * cos(radians(lat))
+
+
+def _ink_mask(rgba: np.ndarray) -> np.ndarray:
+    """Pixels that are drawn lines: alpha when the layer is transparent, else non-background."""
+    alpha = rgba[..., 3]
+    if alpha.min() < 255:
+        return alpha > PARCEL_CONFIG["alpha_threshold"]
+    rgb = rgba[..., :3].astype(np.int32)
+    key = (rgb[..., 0] // 16) * 256 + (rgb[..., 1] // 16) * 16 + (rgb[..., 2] // 16)
+    values, counts = np.unique(key, return_counts=True)
+    background = rgb[key == values[counts.argmax()]].mean(axis=0)
+    return np.abs(rgb - background).sum(axis=-1) > PARCEL_CONFIG["opaque_bg_tolerance"]
+
+
+def _component_axes(labels: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Principal-axis side lengths (major, minor; pixels) of every labelled cell.
+
+    From second moments, so a rotated rectangle keeps its true proportions
+    (a rectangle with sides a >= b has variances a²/12 and b²/12).
+    """
+    flat = labels.ravel()
+    yy, xx = np.indices(labels.shape)
+    count = np.maximum(np.bincount(flat, minlength=n + 1)[1:].astype(float), 1.0)
+
+    def moment(values: np.ndarray) -> np.ndarray:
+        return np.bincount(flat, weights=values.ravel().astype(float), minlength=n + 1)[1:] / count
+
+    mx, my = moment(xx), moment(yy)
+    cxx = moment(xx * xx) - mx ** 2 + 1 / 12  # +1/12: variance of a pixel's own footprint
+    cyy = moment(yy * yy) - my ** 2 + 1 / 12
+    cxy = moment(xx * yy) - mx * my
+    half_trace = (cxx + cyy) / 2
+    spread = np.sqrt(np.maximum(half_trace ** 2 - (cxx * cyy - cxy ** 2), 0.0))
+    major = np.sqrt(12.0 * (half_trace + spread))
+    minor = np.sqrt(12.0 * np.maximum(half_trace - spread, 1e-9))
+    return major, minor
+
+
+def _component_aspect(labels: np.ndarray, n: int) -> np.ndarray:
+    """Principal-axis aspect ratio (>= 1) of every labelled cell; rotation-invariant."""
+    major, minor = _component_axes(labels, n)
+    return major / minor
+
+
+def parcel_features(rgba: np.ndarray, m_per_px: float) -> Dict[str, Any]:
+    """Parcel fragmentation of a DOL window: how thick the lines look and how small the cells are.
+
+    ``ink_ratio`` is the share of the picture covered by boundary lines (the "thick" look);
+    cells are the regions *between* lines (specks and cells cut by
+    the window edge are dropped, a free region above ``giant_cell_ratio`` is "no parcels
+    here"). ``shophouse_share`` counts cells of 40-160 m² with aspect >= 2.5 — the ตึกแถว
+    signature. ``coverage`` is the share of the window that is not blank; a blank or
+    unreadable layer returns ``data = False`` (no data is not the same as "low").
+    """
+    cfg = PARCEL_CONFIG
+    empty = {"data": False, "coverage": 0.0, "score": None, "ink_ratio": 0.0, "cell_count": 0,
+             "median_cell_m2": None, "small_share": None, "shophouse_share": None}
+    if rgba.ndim != 3 or rgba.shape[2] != 4 or m_per_px <= 0:
+        return empty
+    ink = _ink_mask(rgba)
+    ink_ratio = float(ink.mean())
+    if ink_ratio < cfg["min_ink_ratio"]:
+        return {**empty, "ink_ratio": ink_ratio}
+    closed = (ndi.binary_closing(ink, structure=np.ones((cfg["closing_size"],) * 2))
+              if cfg["closing_size"] > 1 else ink)
+    labels, n = ndi.label(~closed)  # 4-connected free cells; 8-connected lines already separate them
+    if n == 0:
+        return {**empty, "ink_ratio": ink_ratio}
+    area_px = np.bincount(labels.ravel(), minlength=n + 1)[1:]
+    edge = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
+    edge = edge[edge > 0] - 1
+    touches_edge = np.zeros(n, dtype=bool)
+    touches_edge[edge] = True
+    giant = area_px > cfg["giant_cell_ratio"] * labels.size
+    keep = ~touches_edge & ~giant & (area_px >= cfg["speck_px"])
+    coverage = float(1.0 - area_px[giant].sum() / labels.size)
+    if int(keep.sum()) < cfg["min_cells"]:
+        return {**empty, "ink_ratio": ink_ratio, "coverage": coverage, "cell_count": int(keep.sum())}
+    # The free cells sit *between* the lines, so they are smaller than the parcels by half a
+    # line width on every side: parcel = (a + t)(b + t) = A + P t/2 + t². The line width t is
+    # recovered from the data (each line borders two cells: t ~ ink / (perimeter / 2)).
+    boundary = ((ndi.minimum_filter(labels, size=3) != labels)
+                | (ndi.maximum_filter(labels, size=3) != labels)) & (labels > 0)
+    perimeter_px = np.bincount(labels[boundary], minlength=n + 1)[1:].astype(float)
+    line_px = float(np.clip(ink.sum() / max(perimeter_px[keep].sum() / 2.0, 1.0), 0.5, 8.0))
+    parcel_px = area_px[keep] + perimeter_px[keep] * line_px / 2.0 + line_px ** 2
+    area_m2 = parcel_px * m_per_px ** 2
+    major, minor = _component_axes(labels, n)
+    aspect = (major[keep] + line_px) / (minor[keep] + line_px)
+    low, high = cfg["shophouse_area_m2"]
+    small_share = float(np.mean(area_m2 < cfg["small_cell_m2"]))
+    shophouse_share = float(np.mean((area_m2 >= low) & (area_m2 <= high)
+                                    & (aspect >= cfg["shophouse_min_aspect"])))
+    ink_scaled = float(np.clip((ink_ratio - cfg["ink_low"]) / (cfg["ink_high"] - cfg["ink_low"]), 0, 1))
+    w = cfg["score_weights"]
+    score = w["shophouse"] * shophouse_share + w["small"] * small_share + w["ink"] * ink_scaled
+    return {"data": True, "coverage": coverage, "score": float(score), "ink_ratio": ink_ratio,
+            "cell_count": int(keep.sum()), "median_cell_m2": float(np.median(area_m2)),
+            "small_share": small_share, "shophouse_share": shophouse_share}
+
+
+def _classify_colors(rgba: np.ndarray, legend: List[Dict[str, Any]], tolerance: float) -> np.ndarray:
+    """Nearest-legend-colour class per pixel (-1 = transparent / no colour within tolerance),
+    then a 3x3 majority vote so thin outlines and text do not count as a class."""
+    h, w = rgba.shape[:2]
+    rgb = rgba[..., :3].astype(np.float32)
+    best = np.full((h, w), np.inf, dtype=np.float32)
+    cls = np.full((h, w), -1, dtype=np.int16)
+    for k, entry in enumerate(legend):
+        dist = np.sqrt(((rgb - np.asarray(entry["rgb"], dtype=np.float32)) ** 2).sum(axis=-1))
+        closer = (dist < best) & (dist <= tolerance)
+        best[closer] = dist[closer]
+        cls[closer] = k
+    cls[rgba[..., 3] <= PARCEL_CONFIG["alpha_threshold"]] = -1
+    votes = np.stack([ndi.uniform_filter((cls == k).astype(np.float32), size=3)
+                      for k in range(len(legend))], axis=0)
+    smoothed = votes.argmax(axis=0).astype(np.int16)
+    smoothed[votes.max(axis=0) < 0.5] = -1
+    return smoothed
+
+
+def zoning_features(
+    rgba: np.ndarray,
+    legend: List[Dict[str, Any]],
+    m_per_px: float,
+    radius_m: float = 300.0,
+    tolerance: float = ZONING_COLOR_TOLERANCE,
+) -> Dict[str, Any]:
+    """Zoning of a city-plan window around its centre (the candidate is the window centre).
+
+    Within ``radius_m``: ``plan_coverage`` (share of the disc painted with a known plan
+    colour — outside the published plan this is ~0 and means *no data*), the share of each
+    class, ``commercial_share`` and ``zoning_intensity = sum(share * class weight)``.
+    Window-wide: ``in_commercial`` (class at the centre) and ``distance_to_commercial_m``
+    (to the nearest พาณิชยกรรม pixel, ``None`` when the window has none).
+    """
+    empty = {"data": False, "plan_coverage": 0.0, "zoning_intensity": None, "commercial_share": None,
+             "class_shares": {}, "in_commercial": None, "distance_to_commercial_m": None}
+    if rgba.ndim != 3 or rgba.shape[2] != 4 or m_per_px <= 0 or not legend:
+        return empty
+    cls = _classify_colors(rgba, legend, tolerance)
+    h, w = cls.shape
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    yy, xx = np.ogrid[:h, :w]
+    disc = (yy - cy) ** 2 + (xx - cx) ** 2 <= (radius_m / m_per_px) ** 2
+    painted = disc & (cls >= 0)
+    plan_coverage = float(painted.sum() / max(int(disc.sum()), 1))
+    commercial_ids = [k for k, c in enumerate(legend) if c.get("commercial")]
+    comm_mask = np.isin(cls, commercial_ids) if commercial_ids else np.zeros_like(cls, dtype=bool)
+    distance = None
+    if comm_mask.any():
+        distance = float(ndi.distance_transform_edt(~comm_mask)[int(round(cy)), int(round(cx))] * m_per_px)
+    centre = cls[max(int(cy) - 1, 0):int(cy) + 2, max(int(cx) - 1, 0):int(cx) + 2]
+    in_commercial = bool(np.isin(centre, commercial_ids).sum() * 2 > centre.size) if commercial_ids else None
+    if not painted.any() or plan_coverage < 0.02:
+        return {**empty, "plan_coverage": plan_coverage, "in_commercial": in_commercial,
+                "distance_to_commercial_m": distance}
+    counts = np.array([(painted & (cls == k)).sum() for k in range(len(legend))], dtype=float)
+    shares = counts / counts.sum()
+    weights = np.array([float(c.get("weight", 0.0)) for c in legend])
+    return {
+        "data": True, "plan_coverage": plan_coverage,
+        "zoning_intensity": float((shares * weights).sum()),
+        "commercial_share": float(shares[commercial_ids].sum()) if commercial_ids else 0.0,
+        "class_shares": {legend[k]["name"]: float(s) for k, s in enumerate(shares) if s > 0},
+        "in_commercial": in_commercial, "distance_to_commercial_m": distance,
+    }
 
 
 def get_fill_color(minutes: float, colors_config: Dict[str, str]) -> str:
