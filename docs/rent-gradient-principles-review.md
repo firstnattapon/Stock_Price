@@ -85,10 +85,12 @@ flowchart TD
         A4["centroid Travel Areas<br/>หรือ ค่าเฉลี่ยหมุด"]
         RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ<br/>UI เตือน + scripts/anchor_sensitivity.py · ground truth [OPEN]"]
         PROBE["Stability probe (ประมาณการ)<br/>วงศึกษา ×0.8/×1.2, ศูนย์ ±20% 4 ทิศ — ไม่เพิ่ม Dijkstra<br/>[FIXED] F2 ระดับ stable / check / unstable"]
+        EVD["Evidence stage (ติ๊กเลือก ค่าเริ่มต้นปิด)<br/>ผู้สมัคร 12 จุด + ผังเมืองรวม cityplan_dpt + รูปแปลง dol<br/>รวมคะแนนเฉพาะสัญญาณที่มีข้อมูล → ความเชื่อมั่น HIGH/MEDIUM/LOW<br/>[ASSUME] สี/threshold ยังเป็นค่าชั่วคราว — รอ fixtures จริง"]
         A0 --> CERT
         CERT -- "ใช่" --> EX
         CERT -- "ไม่" --> LO
         A0 -.-> PROBE
+        A0 -.-> EVD
     end
 
     OSMA --> A0
@@ -163,7 +165,7 @@ flowchart TD
 
     class EX,CL,A1 ok
     class A0,LO,PROBE,BT,GL,OLS,RRP,VG,GS,OSMA,OSMN fixed
-    class DM,ISO open
+    class DM,ISO,EVD open
     class RES,IDX,MOD assume
     class MK,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
 ```
@@ -491,3 +493,22 @@ lookup : [0.5, 0.5, 0.5]                                                      # 
 
 อ้างอิงทฤษฎี: Alonso (1964), Mills (1967), Muth (1969) — ต้นกำเนิดโมเดล Bid-Rent แบบ monocentric;
 Eppstein & Wang (2004) — การประมาณ closeness ด้วย pivot sampling
+
+## 10. ต่อยอด: ผังเมืองรวม + รูปแปลงที่ดิน ยืนยัน anchor (หลักฐานนอกโครงข่ายถนน)
+
+ปิดช่องว่างของ F2 (anchor จากถนนเป็นแค่ proxy) ด้วยสัญญาณ **ทางการ/โครงสร้าง** ที่ผู้ใช้มีเป็นเลเยอร์แผนที่อยู่แล้ว:
+ผังเมืองรวม (`cityplan_dpt`) และรูปแปลงที่ดิน (`dol`) — เส้นแปลงหนาและแปลงเล็กถี่ (ตึกแถว ~64–160 ตร.ม., สัดส่วนยาว ≥ 2.5) คือลายเซ็นของแกนเมืองไทย
+รายละเอียดและวิธี calibrate อยู่ที่ [`automated-cbd-anchor.md`](automated-cbd-anchor.md#evidence-stage-opt-in-city-plan--parcels-confirm-the-road-candidates)
+
+| ด้าน | สิ่งที่ทำ | หลักฐาน / ข้อจำกัด |
+| --- | --- | --- |
+| กระบวนการ | ถนนหาผู้สมัคร (150 โหนด/objective → NMS ≥ 300 ม. → 12 จุด) → ดึงภาพ GetMap dol + cityplan_dpt รอบผู้สมัคร (+ภาพรวมทั้งวง) → คำนวณ parcel/zoning features → รวมคะแนน 0.35/0.35/0.30 เฉพาะสัญญาณที่มีข้อมูล → ความเชื่อมั่น HIGH/MEDIUM/LOW พร้อมเหตุผล | 136 test ผ่านทั้งชุด (+3 รอ fixtures จริง); features ทดสอบบนภาพสังเคราะห์ 4 ฉาก (ตึกแถว/เมือง/ชานเมือง/ชนบท) แยกกันชัด, ทนตัวเลขแปลง/ขอบ anti-alias, หมุนภาพแล้วผลเท่าเดิม |
+| ไม่มีข้อมูล ≠ ต่ำ | ภาพว่าง/นอกพื้นที่ผัง/หยาบเกิน ⇒ `data = False` ลด coverage ไม่ลดคะแนน; ผู้ชนะต้องมีสัญญาณนอกถนนอย่างน้อยหนึ่งตัว | test fusion + partial/unavailable; ดึงภาพไม่ได้ ⇒ ผลถนนเดิมไม่เปลี่ยน |
+| ความเร็ว/แคช | ≤ 4 คำขอขนาน ≤ 40 คำขอ แคชบนดิสก์ (ไม่ใส่ key ในชื่อไฟล์) ⇒ รันซ้ำ 0 คำขอ | features ต่อหน้าต่าง 1024² ≈ 0.1–0.3 s; เวลาเครือข่ายจริงวัดไม่ได้ใน sandbox |
+| ความปลอดภัยของผลเดิม | ติ๊กเลือกเอง (ค่าเริ่มต้นปิด); Rent ยังใช้ Composite เว้นแต่ติ๊กใช้ Evidence Anchor; state ใหม่ `automated_anchor_evidence_data` อยู่ใน config/clear กับ anchor ถนน; config เก่าที่ไม่มีคีย์นี้โหลดได้และไม่ลบผลถนน | test Streamlit + round-trip |
+
+**ยังไม่ได้ยืนยันกับของจริง:** สีผังเมือง, ความหนาเส้นแปลงและป้ายเลขแปลงของ Longdo, ซูมที่เซิร์ฟเวอร์เลิกวาดแปลง — sandbox เข้าถึง Longdo ไม่ได้
+จึงใช้ legend ชั่วคราว (แสดงคำเตือนใน UI) และ threshold จากภาพสังเคราะห์ ต้องรัน `scripts/capture_wms_fixtures.py` บนเครื่องที่เข้าถึง Longdo
+แล้ว commit fixtures เพื่อ calibrate (ดูเอกสาร anchor) ก่อนพิจารณาเปิดตัวเลือกนี้เป็นค่าเริ่มต้น
+ยังเป็นข้อเสนอ: triangulation หลายนิยาม CBD, ถ่วง closeness ด้วยความเข้มผังเมือง, CBD เป็นโซนแทนจุด, polycentric rent, สถานีรถไฟอนาคต
+ส่วน F6/F7/F8/F11 ยังเปิดตามขอบเขตเดิม

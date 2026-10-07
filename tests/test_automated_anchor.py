@@ -468,3 +468,147 @@ def test_old_saved_results_with_trace_still_render(monkeypatch):
     assert at.session_state["automated_anchor_data"] is not None  # not wiped by the new context rule
     markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
     assert [m.icon.options["marker_color"] for m in markers] == ["darkblue"]
+
+
+def test_road_search_exports_candidates_for_the_evidence_stage():
+    found = find()
+    candidates = found["evidence_candidates"]
+    assert 1 <= len(candidates) <= 2 * page.ANCHOR_CONFIG["candidate_export"]
+    ids = [c["node_id"] for c in candidates]
+    assert len(ids) == len(set(ids))
+    for key in ("node_id", "lat", "lon", "composite_score", "closeness_norm", "degree", "junction_count"):
+        assert all(key in c for c in candidates)
+    # both road winners are among the exported candidates, with their exact composite score
+    by_id = {c["node_id"]: c for c in candidates}
+    for objective in ("composite", "closeness"):
+        assert str(found[objective]["anchor"]["node_id"]) in by_id
+    best = max(candidates, key=lambda c: c["composite_score"])
+    assert str(found["composite"]["anchor"]["node_id"]) == best["node_id"]
+    json.dumps(candidates)                                             # JSON-safe
+
+
+# ------------------------------------------------------------- evidence stage in the UI
+def _evidence_images():
+    parcel = np.zeros((1024, 1024, 4), dtype=np.uint8)
+    parcel[::16, :] = (60, 60, 60, 255)            # lot boundaries: 4 px × 16 px cells ≈ ตึกแถว at ~1 m/px
+    parcel[:, ::5] = (60, 60, 60, 255)
+    plan = np.zeros((1024, 1024, 4), dtype=np.uint8)
+    plan[...] = (0, 176, 80, 255)
+    plan[360:664, 360:664] = (255, 0, 0, 255)      # a commercial block around every window centre
+    return parcel, plan
+
+
+@pytest.fixture
+def evidence_env(monkeypatch):
+    parcel, plan = _evidence_images()
+    calls = []
+
+    def fetch(layer, bbox, px):
+        calls.append(layer)
+        return (parcel if layer == "dol" else plan).copy(), {"layer": layer, "from_cache": False}
+
+    monkeypatch.setattr(page, "fetch_wms_image", fetch)
+    monkeypatch.setattr(page, "load_cached_wms_image", lambda layer, bbox, px: parcel)  # thumbnails
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "candidates", 3)
+    return calls
+
+
+def _run_anchor_with_evidence(monkeypatch, tick=True):
+    rendered = []
+    monkeypatch.setattr(page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
+    at = _app_test(monkeypatch)
+    assert at.checkbox(key="anchor_use_evidence").value is False            # opt-in
+    if tick:
+        at.checkbox(key="anchor_use_evidence").check().run(timeout=30)
+    _anchor_button(at).click().run(timeout=60)
+    assert not at.exception
+    return at, rendered
+
+
+def test_streamlit_evidence_is_off_by_default_and_costs_no_request(monkeypatch, evidence_env):
+    at, _ = _run_anchor_with_evidence(monkeypatch, tick=False)
+    assert at.session_state["automated_anchor_data"] is not None
+    assert at.session_state["automated_anchor_evidence_data"] is None
+    assert evidence_env == []
+    assert at.session_state["rent_use_evidence_anchor"] is False
+
+
+def test_streamlit_evidence_adds_a_third_anchor_and_rent_follows_the_opt_in(monkeypatch, evidence_env):
+    at, rendered = _run_anchor_with_evidence(monkeypatch)
+    evidence = at.session_state["automated_anchor_evidence_data"]
+    assert evidence["status"] in ("ok", "partial") and evidence["evidence_anchor"]
+    assert evidence["context"] == at.session_state["automated_anchor_data"]["context"]
+    assert evidence["legend_source"] == "provisional" and "dol" in evidence_env and "cityplan_dpt" in evidence_env
+    captions = " ".join(c.value for c in at.caption)
+    assert "ความเชื่อมั่น" in captions and "ดึงภาพ" in captions
+    assert any("ค่าชั่วคราว" in w.value for w in at.warning)                  # provisional legend is disclosed
+    assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
+    markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
+    assert sorted(m.icon.options["marker_color"] for m in markers) == ["darkblue", "green", "purple"]
+    assert "Evidence candidates" in rendered[-1].get_root().render()
+    # opt in: the rent curve is anchored on the evidence anchor, and back again
+    at.checkbox(key="rent_use_evidence_anchor").check().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor — Evidence"
+    at.checkbox(key="rent_use_evidence_anchor").uncheck().run(timeout=30)
+    assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
+
+
+def test_streamlit_evidence_failure_leaves_the_road_anchors_untouched(monkeypatch, evidence_env):
+    monkeypatch.setattr(page, "fetch_wms_image", lambda layer, bbox, px: (None, {"error": "HTTP 503"}))
+    at, rendered = _run_anchor_with_evidence(monkeypatch)
+    evidence = at.session_state["automated_anchor_evidence_data"]
+    assert evidence["status"] == "unavailable" and evidence["evidence_anchor"] is None
+    assert at.session_state["automated_anchor_data"] and at.session_state["automated_anchor_closeness_data"]
+    assert any("ไม่ได้หลักฐานเสริม" in w.value for w in at.warning)
+    markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
+    assert sorted(m.icon.options["marker_color"] for m in markers) == ["darkblue", "green"]
+    assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
+
+
+def test_streamlit_radius_change_clears_the_evidence_with_the_road_anchors(monkeypatch, evidence_env):
+    at, _ = _run_anchor_with_evidence(monkeypatch)
+    assert at.session_state["automated_anchor_evidence_data"] is not None
+    at.number_input(key="anchor_radius_km").set_value(9.0).run(timeout=30)
+    assert not at.exception
+    assert at.session_state["automated_anchor_evidence_data"] is None
+    assert at.session_state["automated_anchor_data"] is None
+
+
+def test_evidence_state_roundtrips_and_old_configs_without_it_keep_the_road_results(monkeypatch):
+    both = find()
+    evidence = page.run_evidence_stage(
+        both, CENTER, 4000.0, fetcher=lambda layer, bbox, px: (None, {"error": "offline"}))
+    state = dict(page.StateManager._DEFAULTS)
+    state["markers"] = []
+    state["automated_anchor_data"] = both["composite"]
+    state["automated_anchor_closeness_data"] = both["closeness"]
+    state["automated_anchor_evidence_data"] = evidence
+    state["anchor_use_evidence"] = True
+    monkeypatch.setattr(page.st, "session_state", state)
+    exported = json.loads(page.StateManager.export_config())
+    assert exported["settings"]["anchor_use_evidence"] is True
+    assert exported["precomputed_results"]["automated_anchor_evidence_data"]["status"] == "unavailable"
+    page.StateManager.clear_results()
+    assert state["automated_anchor_evidence_data"] is None
+    page.StateManager.import_config(exported)
+    assert state["automated_anchor_evidence_data"]["status"] == "unavailable"
+    legacy = json.loads(json.dumps(exported))
+    legacy["precomputed_results"].pop("automated_anchor_evidence_data")
+    legacy["settings"].pop("anchor_use_evidence")
+    page.StateManager.import_config(legacy)
+    assert state["automated_anchor_evidence_data"] is None            # nothing to restore, nothing broken
+    assert state["automated_anchor_data"]["anchor"]["node_id"] == both["composite"]["anchor"]["node_id"]
+    assert state["anchor_use_evidence"] is True                         # an absent setting is left alone
+    page.StateManager.clear_results(["anchor"])
+    assert state["automated_anchor_evidence_data"] is None             # it confirms a road result that is gone
+
+
+def test_exported_candidates_are_diverse_enough_for_the_evidence_stage_to_pick_a_dozen():
+    found = find(road_grid(size=31, spacing=100), study_radius_m=4000)
+    anchors = [found["composite"]["anchor"], found["closeness"]["anchor"]]
+    picked = page.select_evidence_candidates(found["evidence_candidates"], anchors, 12, 300.0)
+    assert len(picked) == 12                       # 20 nodes of one cluster would give far fewer
+    spread = max(page.calculate_distance_meters(a["lat"], a["lon"], b["lat"], b["lon"])
+                 for a in picked for b in picked)
+    assert spread > 1000

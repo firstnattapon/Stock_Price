@@ -26,7 +26,8 @@ import networkx as nx
 import osmnx as ox
 import matplotlib
 import matplotlib.colors as colors
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 import time
 import hashlib
 import pickle
@@ -49,6 +50,7 @@ try:
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components as csgraph_components
     from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
+    from scipy import ndimage as ndi
     HAS_SCIPY: bool = True
 except Exception:
     HAS_SCIPY = False
@@ -150,7 +152,6 @@ NETWORK_CONFIG: Dict[str, Any] = {
 ANCHOR_CONFIG: Dict[str, Any] = {
     # Serve a request from a cached graph whose download footprint fully contains it.
     "reuse_covering_cache": True,
-    "final_radius_m": 150.0,
     "buffer_ratio": 0.20,
     "density_radius_m": 500.0,
     "max_nodes": 100000,
@@ -165,15 +166,21 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     # candidate when the exhaustive pass does not fit the budget. These rows are
     # extra to the row budget and are never recomputed.
     "reference_nodes": 256,
+    "reference_shrink_above_nodes": 25_000,  # beyond this the sample shrinks ~ 1/sqrt(V)
+    "reference_min_nodes": 96,
     "reference_seed": 0,
     "screen_top_k": 256,
     "refine_iterations": 40,
+    "candidate_export": 150,  # top nodes per objective handed to the evidence stage (it thins them by spacing)
     "boundary_warn_ratio": 0.40,
     # Indicative stability probe: how far does the anchor move if the user's circle
     # is rescaled / shifted? Drift is judged against the study radius.
     "stability_scales": (0.8, 1.2),
     "stability_shift": 0.20,
     "stability_top_m": 16,
+    # Probe-only second stratum of pivots drawn from the ring outside the study circle
+    # (the perturbed circles reach up to 1.2 R); the base anchor never depends on it.
+    "stability_outer_nodes": 96,
     "stability_ok_ratio": 0.05,
     "stability_warn_ratio": 0.15,
 }
@@ -242,6 +249,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_railway", "show_golden_spots",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
     "anchor_lat", "anchor_lon", "anchor_radius_km",
+    "anchor_use_evidence", "rent_use_evidence_anchor",
     "anchor_seed", "anchor_restarts",  # legacy: accepted from old configs, no longer used
 ]
 
@@ -253,6 +261,7 @@ RESULT_KEYS_TO_SAVE: List[str] = [
     "rent_gradient_data",
     "automated_anchor_data",
     "automated_anchor_closeness_data",
+    "automated_anchor_evidence_data",
 ]
 
 # GitHub Cache Repository Configuration
@@ -302,6 +311,7 @@ class StateManager:
     K_RENT_UNIT: str = "rent_unit_label"
     K_AUTO_ANCHOR: str = "automated_anchor_data"
     K_AUTO_ANCHOR_CLOSENESS: str = "automated_anchor_closeness_data"
+    K_AUTO_ANCHOR_EVIDENCE: str = "automated_anchor_evidence_data"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -337,6 +347,9 @@ class StateManager:
         K_RENT_UNIT: "บาท/ตร.ว./เดือน",
         K_AUTO_ANCHOR: None,
         K_AUTO_ANCHOR_CLOSENESS: None,
+        K_AUTO_ANCHOR_EVIDENCE: None,
+        "anchor_use_evidence": False,         # opt-in until real WMS fixtures calibrate the thresholds
+        "rent_use_evidence_anchor": False,    # Rent keeps the composite anchor unless ticked
         "anchor_lat": DEFAULT_CONFIG["LAT"],
         "anchor_lon": DEFAULT_CONFIG["LON"],
         "anchor_radius_km": 10.0,
@@ -517,11 +530,15 @@ class StateManager:
                     ``None`` clears all.
         """
         if layers is None:
-            layers = ["isochrone", "intersection", "network", "rent", "anchor", "anchor_closeness"]
+            layers = ["isochrone", "intersection", "network", "rent", "anchor", "anchor_closeness",
+                      "anchor_evidence"]
 
         if "anchor" in layers:
             st.session_state[cls.K_AUTO_ANCHOR] = None
+            st.session_state[cls.K_AUTO_ANCHOR_EVIDENCE] = None  # it confirms this road result
             st.session_state[cls.K_RENT_DATA] = None
+        if "anchor_evidence" in layers:
+            st.session_state[cls.K_AUTO_ANCHOR_EVIDENCE] = None
         if "anchor_closeness" in layers:
             st.session_state[cls.K_AUTO_ANCHOR_CLOSENESS] = None
 
@@ -831,7 +848,15 @@ def find_cbd_anchors(
     # Fixed reference sample of destinations (constant seed): exact closeness
     # calibrates the composite normaliser and the summed distance rows rank every
     # candidate by pivot closeness. Its rows are shared, never recomputed.
-    n_ref = min(n_destinations, int(ANCHOR_CONFIG["reference_nodes"]))
+    # The sample size is a property of the graph, not of the run: it fixes the composite
+    # normaliser, so it must not move with ``max_rows`` or the objective would change
+    # between a certified run and a screened one. Huge graphs use fewer pivots (their
+    # rows cost the most) — at 100k nodes that is ~half of the previous pivot time.
+    ref_target = float(ANCHOR_CONFIG["reference_nodes"])
+    if n > ANCHOR_CONFIG["reference_shrink_above_nodes"]:
+        ref_target = max(float(ANCHOR_CONFIG["reference_min_nodes"]),
+                         ref_target * (ANCHOR_CONFIG["reference_shrink_above_nodes"] / n) ** 0.5)
+    n_ref = min(n_destinations, int(round(ref_target)))
     ref_nodes = np.sort(np.random.default_rng(ANCHOR_CONFIG["reference_seed"]).choice(
         eligible, size=n_ref, replace=False))
     ref_c = np.empty(n_ref)
@@ -841,28 +866,72 @@ def find_cbd_anchors(
     for k, case in enumerate(cases):
         case_inside[:, k] = np.hypot(xy[:, 0] - case["dx"], xy[:, 1] - case["dy"]) <= case["radius"]
     case_float = case_inside.astype(float)
-    case_pivot_sum = np.zeros((n, len(cases)))
-    case_ref_sum = np.zeros((n_ref, len(cases)))
+    # Two strata of destinations for the perturbed circles: the base circle (the pivots
+    # above) and the ring just outside it, which a x1.2 or shifted circle pulls in. Sampling
+    # only the base circle would leave mass outside it invisible to the probe.
+    outer_pool = (np.flatnonzero((radial_distance > study_radius_m) & case_inside.any(axis=1))
+                  if cases else np.empty(0, dtype=int))
+    n_out = min(len(outer_pool), int(ANCHOR_CONFIG["stability_outer_nodes"]))
+    out_nodes = (np.sort(np.random.default_rng(ANCHOR_CONFIG["reference_seed"] + 1).choice(
+        outer_pool, size=n_out, replace=False)) if n_out else np.empty(0, dtype=int))
+    sources = np.concatenate((ref_nodes, out_nodes)).astype(int)
+    case_pivot_sum = np.zeros((n, len(cases)))   # S1: sum over base pivots inside each circle
+    case_outer_sum = np.zeros((n, len(cases)))   # S2: same over ring pivots
+    case_ref_sum = np.zeros((len(sources), len(cases)))
     # Distances from each exact row to every case's destinations: a by-product of
     # the base pass, so the probe re-runs Dijkstra only for rows it has not seen.
     case_sums: Dict[int, np.ndarray] = {}
     filled = 0
-    for part, rows_d in _dijkstra_batches(matrix, ref_nodes):
-        ref_c[filled:filled + len(part)] = (n_destinations - 1) / rows_d[:, eligible].sum(axis=1)
-        pivot_sum += rows_d.sum(axis=0)
-        if cases:  # per-case sum over the pivots that fall inside that case's circle
-            case_pivot_sum += rows_d.T @ case_float[part]
+    for part, rows_d in _dijkstra_batches(matrix, sources):
+        position = np.arange(filled, filled + len(part))
+        is_base = position < n_ref
+        if is_base.any():
+            ref_c[position[is_base]] = (n_destinations - 1) / rows_d[is_base][:, eligible].sum(axis=1)
+            pivot_sum += rows_d[is_base].sum(axis=0)
+        if cases:  # per-case sums over the pivots that fall inside each perturbed circle
+            if is_base.any():
+                case_pivot_sum += rows_d[is_base].T @ case_float[part[is_base]]
+            if (~is_base).any():
+                case_outer_sum += rows_d[~is_base].T @ case_float[part[~is_base]]
             chunk = rows_d @ case_float
-            case_ref_sum[filled:filled + len(part)] = chunk
+            case_ref_sum[position] = chunk
             case_sums.update((int(i), row) for i, row in zip(part, chunk))
         filled += len(part)
     ref_mean, ref_std = float(ref_c.mean()), float(ref_c.std())
-    # Per-case normaliser: exact closeness of the pivots inside each perturbed circle.
+
+    # Stratified (Horvitz-Thompson) estimate of the summed distance to each case's
+    # destinations: sum_u d(v,u) ~ (n1/k1) S1 + (n2/k2) S2, with n_j the nodes of stratum
+    # j inside the circle and k_j the pivots of that stratum inside it.
+    case_sum_hat = np.zeros((n, len(cases)))
     case_norm = []
     for k in range(len(cases)):
-        member = case_inside[ref_nodes, k]
-        c_k = (case_inside[:, k].sum() - 1) / np.maximum(case_ref_sum[member, k], 1e-9)
-        case_norm.append((float(c_k.mean()), float(c_k.std())) if len(c_k) > 1 else (ref_mean, ref_std))
+        n1c = int(case_inside[eligible, k].sum())
+        n2c = int(case_inside[outer_pool, k].sum()) if len(outer_pool) else 0
+        k1c = int(case_inside[ref_nodes, k].sum())
+        k2c = int(case_inside[out_nodes, k].sum()) if n_out else 0
+        w1 = n1c / k1c if k1c else 0.0
+        w2 = n2c / k2c if k2c else 0.0
+        if n2c and not k2c and k1c:       # no ring pivot inside: borrow the base mean distance
+            w2 = n2c / k1c
+            case_sum_hat[:, k] = w1 * case_pivot_sum[:, k] + w2 * case_pivot_sum[:, k]
+        elif n1c and not k1c and k2c:
+            w1 = n1c / k2c
+            case_sum_hat[:, k] = w1 * case_outer_sum[:, k] + w2 * case_outer_sum[:, k]
+        else:
+            case_sum_hat[:, k] = w1 * case_pivot_sum[:, k] + w2 * case_outer_sum[:, k]
+        # Per-case normaliser: exact closeness of the pivots inside the circle, weighted by
+        # how many destinations each one represents.
+        members = np.concatenate((ref_nodes[case_inside[ref_nodes, k]], out_nodes[case_inside[out_nodes, k]]))
+        weights_k = np.concatenate((np.full(k1c, w1), np.full(k2c, w2)))
+        pos_k = np.concatenate((np.flatnonzero(case_inside[ref_nodes, k]),
+                                n_ref + np.flatnonzero(case_inside[out_nodes, k]))) if len(members) else np.empty(0, int)
+        if len(members) > 1 and weights_k.sum() > 0:
+            c_k = (n1c + n2c - 1) / np.maximum(case_ref_sum[pos_k, k], 1e-9)
+            mu = float(np.average(c_k, weights=weights_k))
+            var = float(np.average((c_k - mu) ** 2, weights=weights_k))
+            case_norm.append((mu, var ** 0.5))
+        else:
+            case_norm.append((ref_mean, ref_std))
     exact_c: Dict[int, float] = {int(p): float(c) for p, c in zip(ref_nodes, ref_c)}
     pivots_done = time.perf_counter()
 
@@ -900,13 +969,18 @@ def find_cbd_anchors(
                 "degree": int(degrees[i]), "junction_count": int(density[i])}
 
     def best_of(candidates, objective):
+        # Scores are quantised so mathematically tied nodes stay tied whatever the
+        # summation order or library version; the lowest node index then wins.
         return max((int(i) for i in candidates),
-                   key=lambda i: (components(i, objective)["score"], -i))
+                   key=lambda i: (round(components(i, objective)["score"], 12), -i))
 
     def probe(objective, base_winner):
         """Indicative drift of the anchor under rescaled / shifted study circles."""
-        pool = pools[objective]
-        in_ref = np.isin(pool, ref_nodes)
+        # Candidates are every junction (all nodes for Closeness 100%) inside each
+        # perturbed circle, not just those of the base circle: a x1.2 or shifted circle
+        # can have its best node outside the base one.
+        pool = (np.flatnonzero(degrees >= 3)
+                if objective == "composite" and not junction_fallback else np.arange(n))
         picks: List[np.ndarray] = []
         case_ranks: List[Tuple[np.ndarray, np.ndarray]] = []
         for k in range(len(cases)):
@@ -920,8 +994,8 @@ def find_cbd_anchors(
             if not len(cand):
                 picks.append(cand)
                 continue
-            k_eff = case_inside[ref_nodes, k].sum() - in_ref[inside].astype(float)
-            approx_c = k_eff / np.maximum(case_pivot_sum[cand, k], 1e-9)
+            n_case = int(case_inside[:, k].sum())
+            approx_c = (n_case - 1) / np.maximum(case_sum_hat[cand, k], 1e-9)
             if objective == "closeness":
                 approx = approx_c
             else:
@@ -947,8 +1021,8 @@ def find_cbd_anchors(
                     score = (weights["closeness"] * float(closeness_component(c, objective, case_norm[k]))
                              + weights["degree"] * float(case_ranks[k][0][i])
                              + weights["density"] * float(case_ranks[k][1][i]))
-                if best_key is None or (score, -i) > best_key:
-                    best, best_key = i, (score, -i)
+                if best_key is None or (round(score, 12), -i) > best_key:
+                    best, best_key = i, (round(score, 12), -i)
             if best is None:
                 out.append({"case": case["case"], "drift_m": None, "node_id": None})
                 continue
@@ -1091,6 +1165,28 @@ def find_cbd_anchors(
         }
 
     results = {objective: solve(objective) for objective in ("composite", "closeness")}
+
+    def top_nodes(objective: str, limit: int) -> List[int]:
+        in_pool = set(pools[objective].tolist())
+        ranked = sorted((i for i in exact_c if i in in_pool),
+                        key=lambda i: (round(components(i, objective)["score"], 12), -i), reverse=True)
+        return ranked[:limit]
+
+    candidate_nodes: List[int] = []
+    for i in top_nodes("composite", ANCHOR_CONFIG["candidate_export"]) + top_nodes(
+            "closeness", ANCHOR_CONFIG["candidate_export"]):
+        if i not in candidate_nodes:
+            candidate_nodes.append(i)
+    composite_pool_set = set(composite_pool.tolist())
+    evidence_candidates = []
+    for i in candidate_nodes:
+        comp = components(i, "composite")
+        evidence_candidates.append({
+            "node_id": str(nodes[i]), "lat": float(lonlat[i, 1]), "lon": float(lonlat[i, 0]),
+            "composite_score": comp["score"], "closeness_norm": comp["closeness_norm"],
+            "degree": int(degrees[i]), "junction_count": int(density[i]),
+            "in_composite_pool": bool(i in composite_pool_set),
+        })
     finished = time.perf_counter()
     timings = {"prep_s": prep_done - started, "pivots_s": pivots_done - prep_done,
                "exact_s": finished - pivots_done, "compute_s": finished - started}
@@ -1098,9 +1194,586 @@ def find_cbd_anchors(
         result["compute_seconds"] = timings["compute_s"]
         result["timings"] = timings
     return {**results, "timings": timings, "rows_budget": rows_budget,
+            "evidence_candidates": evidence_candidates,
             "graph": {"nodes": n, "edges": int(matrix.nnz // 2),
                       "dropped_nodes": net["total_nodes"] - n},
             "study_center": list(study_center), "study_radius_m": study_radius_m}
+
+
+# ----------------------------------------------------------------------------
+# Evidence stage: official city plan (ผังเมืองรวม) + parcel layer (รูปแปลงที่ดิน)
+# ----------------------------------------------------------------------------
+# Roads find candidates; the DPT zoning colours and the DOL parcel structure confirm them.
+# In Thai towns the commercial core is ตึกแถว (shophouse) strips: narrow lots of roughly
+# 16-40 ตร.ว. (64-160 m²) whose boundary lines cover a large share of the picture, usually
+# inside the พาณิชยกรรม (red) zone. These functions measure that from WMS images; they are
+# pure (image in, numbers out) so they are testable without a network.
+
+PARCEL_CONFIG: Dict[str, Any] = {
+    "alpha_threshold": 32,            # pixel counts as a drawn line above this alpha
+    "opaque_bg_tolerance": 60,        # opaque images: colour distance from the dominant colour
+    "closing_size": 1,                # >1 bridges gaps in boundary lines; off by default: a 3x3 closing
+                                      # also fills real 2-px-wide cells (ตึกแถว at ~1.5 m/px)
+    "speck_px": 6,                    # cells smaller than this are label clutter
+    "giant_cell_ratio": 0.05,         # a free cell above 5% of the window is "no parcels here"
+    "small_cell_m2": 200.0,           # 50 ตร.ว.
+    "shophouse_area_m2": (40.0, 160.0),
+    "shophouse_min_aspect": 2.5,
+    "min_cells": 10,                  # fewer measurable cells -> no data
+    "min_ink_ratio": 0.002,           # (almost) blank layer -> no data
+    "ink_low": 0.03,                  # ink share that scores 0 / 1 in the blend
+    "ink_high": 0.40,
+    "score_weights": {"shophouse": 0.40, "small": 0.30, "ink": 0.30},
+}
+
+CITYPLAN_LEGEND_FILE: Path = (
+    Path(__file__).resolve().parent.parent / "Geoapify_Map" / "cityplan_legend.json"
+)
+# PROVISIONAL colours after the DPT zoning convention — real tiles have not been compared
+# yet. Replace with Geoapify_Map/cityplan_legend.json (written from the capture script's
+# colour histogram); a wrong colour only lowers plan coverage, which counts as "no data".
+CITYPLAN_PROVISIONAL_LEGEND: List[Dict[str, Any]] = [
+    {"name": "พาณิชยกรรม", "rgb": [255, 0, 0], "weight": 1.00, "commercial": True},
+    {"name": "ที่อยู่อาศัยหนาแน่นมาก", "rgb": [153, 76, 0], "weight": 0.80, "commercial": False},
+    {"name": "ที่อยู่อาศัยหนาแน่นปานกลาง", "rgb": [255, 153, 0], "weight": 0.50, "commercial": False},
+    {"name": "ที่อยู่อาศัยหนาแน่นน้อย", "rgb": [255, 255, 0], "weight": 0.25, "commercial": False},
+    {"name": "สถาบันราชการและสาธารณูปโภค", "rgb": [0, 0, 255], "weight": 0.40, "commercial": False},
+    {"name": "อุตสาหกรรมและคลังสินค้า", "rgb": [153, 51, 255], "weight": 0.10, "commercial": False},
+    {"name": "เกษตรกรรมและชนบท", "rgb": [0, 176, 80], "weight": 0.00, "commercial": False},
+    {"name": "อนุรักษ์และนันทนาการ", "rgb": [0, 100, 0], "weight": 0.00, "commercial": False},
+]
+ZONING_COLOR_TOLERANCE: float = 60.0  # RGB distance to a legend colour; beyond it = label/outline
+
+
+def load_cityplan_legend(path: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], str]:
+    """``(legend, source)``; ``source`` is ``"file"`` or ``"provisional"`` (never raises)."""
+    try:
+        data = json.loads(Path(path or CITYPLAN_LEGEND_FILE).read_text(encoding="utf-8"))
+        classes = data["classes"] if isinstance(data, dict) else data
+        legend = [
+            {"name": str(c["name"]), "rgb": [int(v) for v in c["rgb"]][:3],
+             "weight": float(c.get("weight", 0.0)), "commercial": bool(c.get("commercial", False))}
+            for c in classes
+        ]
+        if legend and all(len(c["rgb"]) == 3 for c in legend):
+            return legend, "file"
+    except Exception:
+        pass
+    return [dict(c) for c in CITYPLAN_PROVISIONAL_LEGEND], "provisional"
+
+
+def wms_meters_per_pixel(bbox_3857: Tuple[float, float, float, float], width_px: int, lat: float) -> float:
+    """Ground metres per pixel of a Web-Mercator window (3857 metres shrink by cos(lat))."""
+    return (bbox_3857[2] - bbox_3857[0]) / max(width_px, 1) * cos(radians(lat))
+
+
+def _ink_mask(rgba: np.ndarray) -> np.ndarray:
+    """Pixels that are drawn lines: alpha when the layer is transparent, else non-background."""
+    alpha = rgba[..., 3]
+    if alpha.min() < 255:
+        return alpha > PARCEL_CONFIG["alpha_threshold"]
+    rgb = rgba[..., :3].astype(np.int32)
+    key = (rgb[..., 0] // 16) * 256 + (rgb[..., 1] // 16) * 16 + (rgb[..., 2] // 16)
+    values, counts = np.unique(key, return_counts=True)
+    background = rgb[key == values[counts.argmax()]].mean(axis=0)
+    return np.abs(rgb - background).sum(axis=-1) > PARCEL_CONFIG["opaque_bg_tolerance"]
+
+
+def _component_axes(labels: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Principal-axis side lengths (major, minor; pixels) of every labelled cell.
+
+    From second moments, so a rotated rectangle keeps its true proportions
+    (a rectangle with sides a >= b has variances a²/12 and b²/12).
+    """
+    flat = labels.ravel()
+    yy, xx = np.indices(labels.shape)
+    count = np.maximum(np.bincount(flat, minlength=n + 1)[1:].astype(float), 1.0)
+
+    def moment(values: np.ndarray) -> np.ndarray:
+        return np.bincount(flat, weights=values.ravel().astype(float), minlength=n + 1)[1:] / count
+
+    mx, my = moment(xx), moment(yy)
+    cxx = moment(xx * xx) - mx ** 2 + 1 / 12  # +1/12: variance of a pixel's own footprint
+    cyy = moment(yy * yy) - my ** 2 + 1 / 12
+    cxy = moment(xx * yy) - mx * my
+    half_trace = (cxx + cyy) / 2
+    spread = np.sqrt(np.maximum(half_trace ** 2 - (cxx * cyy - cxy ** 2), 0.0))
+    major = np.sqrt(12.0 * (half_trace + spread))
+    minor = np.sqrt(12.0 * np.maximum(half_trace - spread, 1e-9))
+    return major, minor
+
+
+def _component_aspect(labels: np.ndarray, n: int) -> np.ndarray:
+    """Principal-axis aspect ratio (>= 1) of every labelled cell; rotation-invariant."""
+    major, minor = _component_axes(labels, n)
+    return major / minor
+
+
+def parcel_features(rgba: np.ndarray, m_per_px: float) -> Dict[str, Any]:
+    """Parcel fragmentation of a DOL window: how thick the lines look and how small the cells are.
+
+    ``ink_ratio`` is the share of the picture covered by boundary lines (the "thick" look);
+    cells are the regions *between* lines (specks and cells cut by
+    the window edge are dropped, a free region above ``giant_cell_ratio`` is "no parcels
+    here"). ``shophouse_share`` counts cells of 40-160 m² with aspect >= 2.5 — the ตึกแถว
+    signature. ``coverage`` is the share of the window that is not blank; a blank or
+    unreadable layer returns ``data = False`` (no data is not the same as "low").
+    """
+    cfg = PARCEL_CONFIG
+    empty = {"data": False, "coverage": 0.0, "score": None, "ink_ratio": 0.0, "cell_count": 0,
+             "median_cell_m2": None, "small_share": None, "shophouse_share": None}
+    if rgba.ndim != 3 or rgba.shape[2] != 4 or m_per_px <= 0:
+        return empty
+    ink = _ink_mask(rgba)
+    ink_ratio = float(ink.mean())
+    if ink_ratio < cfg["min_ink_ratio"]:
+        return {**empty, "ink_ratio": ink_ratio}
+    closed = (ndi.binary_closing(ink, structure=np.ones((cfg["closing_size"],) * 2))
+              if cfg["closing_size"] > 1 else ink)
+    labels, n = ndi.label(~closed)  # 4-connected free cells; 8-connected lines already separate them
+    if n == 0:
+        return {**empty, "ink_ratio": ink_ratio}
+    area_px = np.bincount(labels.ravel(), minlength=n + 1)[1:]
+    edge = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
+    edge = edge[edge > 0] - 1
+    touches_edge = np.zeros(n, dtype=bool)
+    touches_edge[edge] = True
+    giant = area_px > cfg["giant_cell_ratio"] * labels.size
+    keep = ~touches_edge & ~giant & (area_px >= cfg["speck_px"])
+    coverage = float(1.0 - area_px[giant].sum() / labels.size)
+    if int(keep.sum()) < cfg["min_cells"]:
+        return {**empty, "ink_ratio": ink_ratio, "coverage": coverage, "cell_count": int(keep.sum())}
+    # The free cells sit *between* the lines, so they are smaller than the parcels by half a
+    # line width on every side: parcel = (a + t)(b + t) = A + P t/2 + t². The line width t is
+    # recovered from the data (each line borders two cells: t ~ ink / (perimeter / 2)).
+    boundary = ((ndi.minimum_filter(labels, size=3) != labels)
+                | (ndi.maximum_filter(labels, size=3) != labels)) & (labels > 0)
+    perimeter_px = np.bincount(labels[boundary], minlength=n + 1)[1:].astype(float)
+    line_px = float(np.clip(ink.sum() / max(perimeter_px[keep].sum() / 2.0, 1.0), 0.5, 8.0))
+    parcel_px = area_px[keep] + perimeter_px[keep] * line_px / 2.0 + line_px ** 2
+    area_m2 = parcel_px * m_per_px ** 2
+    major, minor = _component_axes(labels, n)
+    aspect = (major[keep] + line_px) / (minor[keep] + line_px)
+    low, high = cfg["shophouse_area_m2"]
+    small_share = float(np.mean(area_m2 < cfg["small_cell_m2"]))
+    shophouse_share = float(np.mean((area_m2 >= low) & (area_m2 <= high)
+                                    & (aspect >= cfg["shophouse_min_aspect"])))
+    ink_scaled = float(np.clip((ink_ratio - cfg["ink_low"]) / (cfg["ink_high"] - cfg["ink_low"]), 0, 1))
+    w = cfg["score_weights"]
+    score = w["shophouse"] * shophouse_share + w["small"] * small_share + w["ink"] * ink_scaled
+    return {"data": True, "coverage": coverage, "score": float(score), "ink_ratio": ink_ratio,
+            "cell_count": int(keep.sum()), "median_cell_m2": float(np.median(area_m2)),
+            "small_share": small_share, "shophouse_share": shophouse_share}
+
+
+def _classify_colors(rgba: np.ndarray, legend: List[Dict[str, Any]], tolerance: float) -> np.ndarray:
+    """Nearest-legend-colour class per pixel (-1 = transparent / no colour within tolerance),
+    then a 3x3 majority vote so thin outlines and text do not count as a class."""
+    h, w = rgba.shape[:2]
+    rgb = rgba[..., :3].astype(np.float32)
+    best = np.full((h, w), np.inf, dtype=np.float32)
+    cls = np.full((h, w), -1, dtype=np.int16)
+    for k, entry in enumerate(legend):
+        dist = np.sqrt(((rgb - np.asarray(entry["rgb"], dtype=np.float32)) ** 2).sum(axis=-1))
+        closer = (dist < best) & (dist <= tolerance)
+        best[closer] = dist[closer]
+        cls[closer] = k
+    cls[rgba[..., 3] <= PARCEL_CONFIG["alpha_threshold"]] = -1
+    votes = np.stack([ndi.uniform_filter((cls == k).astype(np.float32), size=3)
+                      for k in range(len(legend))], axis=0)
+    smoothed = votes.argmax(axis=0).astype(np.int16)
+    smoothed[votes.max(axis=0) < 0.5] = -1
+    return smoothed
+
+
+def zoning_features(
+    rgba: np.ndarray,
+    legend: List[Dict[str, Any]],
+    m_per_px: float,
+    radius_m: float = 300.0,
+    tolerance: float = ZONING_COLOR_TOLERANCE,
+) -> Dict[str, Any]:
+    """Zoning of a city-plan window around its centre (the candidate is the window centre).
+
+    Within ``radius_m``: ``plan_coverage`` (share of the disc painted with a known plan
+    colour — outside the published plan this is ~0 and means *no data*), the share of each
+    class, ``commercial_share`` and ``zoning_intensity = sum(share * class weight)``.
+    Window-wide: ``in_commercial`` (class at the centre) and ``distance_to_commercial_m``
+    (to the nearest พาณิชยกรรม pixel, ``None`` when the window has none).
+    """
+    empty = {"data": False, "plan_coverage": 0.0, "zoning_intensity": None, "commercial_share": None,
+             "class_shares": {}, "in_commercial": None, "distance_to_commercial_m": None}
+    if rgba.ndim != 3 or rgba.shape[2] != 4 or m_per_px <= 0 or not legend:
+        return empty
+    cls = _classify_colors(rgba, legend, tolerance)
+    h, w = cls.shape
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    yy, xx = np.ogrid[:h, :w]
+    disc = (yy - cy) ** 2 + (xx - cx) ** 2 <= (radius_m / m_per_px) ** 2
+    painted = disc & (cls >= 0)
+    plan_coverage = float(painted.sum() / max(int(disc.sum()), 1))
+    commercial_ids = [k for k, c in enumerate(legend) if c.get("commercial")]
+    comm_mask = np.isin(cls, commercial_ids) if commercial_ids else np.zeros_like(cls, dtype=bool)
+    distance = None
+    if comm_mask.any():
+        distance = float(ndi.distance_transform_edt(~comm_mask)[int(round(cy)), int(round(cx))] * m_per_px)
+    centre = cls[max(int(cy) - 1, 0):int(cy) + 2, max(int(cx) - 1, 0):int(cx) + 2]
+    in_commercial = bool(np.isin(centre, commercial_ids).sum() * 2 > centre.size) if commercial_ids else None
+    if not painted.any() or plan_coverage < 0.02:
+        return {**empty, "plan_coverage": plan_coverage, "in_commercial": in_commercial,
+                "distance_to_commercial_m": distance}
+    counts = np.array([(painted & (cls == k)).sum() for k in range(len(legend))], dtype=float)
+    shares = counts / counts.sum()
+    weights = np.array([float(c.get("weight", 0.0)) for c in legend])
+    return {
+        "data": True, "plan_coverage": plan_coverage,
+        "zoning_intensity": float((shares * weights).sum()),
+        "commercial_share": float(shares[commercial_ids].sum()) if commercial_ids else 0.0,
+        "class_shares": {legend[k]["name"]: float(s) for k, s in enumerate(shares) if s > 0},
+        "in_commercial": in_commercial, "distance_to_commercial_m": distance,
+    }
+
+
+# ------------------------------------------------------------- WMS fetch + evidence runner
+EVIDENCE_CONFIG: Dict[str, Any] = {
+    "candidates": 12,               # road candidates sent to the evidence stage (both road anchors always included)
+    "min_spacing_m": 300.0,         # greedy non-maximum suppression between candidates
+    "px": 1024,
+    "parcel_window_m": 1000.0,      # ~0.98 m/px: 1-2 px boundary lines still leave ตึกแถว lots measurable
+    "plan_window_m": 1500.0,
+    "zoning_radius_m": 300.0,
+    "parcel_layer": "dol",
+    "plan_layer": "cityplan_dpt",
+    "weights": {"road": 0.35, "parcel": 0.35, "zoning": 0.30},
+    "max_requests": 40,
+    "parallel": 4,
+    "timeout_s": 15,
+    "agree_radius_m": 300.0,        # evidence anchor vs a road anchor counts as "agreeing" within this
+    "commercial_near_m": 150.0,     # "in the commercial zone" = inside it or this close
+    "confidence": {"parcel_ok": 0.50, "coverage_min": 0.60, "coverage_medium": 0.40},
+}
+_WEB_MERCATOR = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+
+
+def _wms_window(lat: float, lon: float, window_m: float) -> Tuple[float, float, float, float]:
+    """EPSG:3857 bbox that covers ``window_m`` ground metres around (lat, lon)."""
+    x, y = _WEB_MERCATOR.transform(lon, lat)
+    half = (window_m / 2.0) / max(cos(radians(lat)), 1e-6)  # Mercator metres stretch by 1/cos(lat)
+    return (x - half, y - half, x + half, y + half)
+
+
+def _wms_params(layer: str, bbox: Tuple[float, float, float, float], px: int) -> Dict[str, Any]:
+    return {
+        "service": "WMS", "version": "1.1.1", "request": "GetMap", "layers": layer, "styles": "",
+        "srs": "EPSG:3857", "bbox": ",".join(f"{v:.1f}" for v in bbox),
+        "width": px, "height": px, "format": "image/png", "transparent": "true",
+    }
+
+
+def _wms_cache_file(params: Dict[str, Any]) -> Path:
+    digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:40]
+    return CACHE_DIR / f"wms_{digest}.png"
+
+
+def load_cached_wms_image(layer: str, bbox: Tuple[float, float, float, float], px: int
+                          ) -> Optional[np.ndarray]:
+    """The cached window as RGBA, or ``None`` — never touches the network (for thumbnails)."""
+    from PIL import Image
+
+    try:
+        cache_file = _wms_cache_file(_wms_params(layer, bbox, px))
+        return np.asarray(Image.open(cache_file).convert("RGBA")) if cache_file.exists() else None
+    except Exception:
+        return None
+
+
+def fetch_wms_image(
+    layer: str, bbox: Tuple[float, float, float, float], px: int
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """RGBA ``(px, px, 4)`` array of a WMS window, from the disk cache or one GetMap request.
+
+    The cache key excludes the API key, so a result is reproducible offline and exports with
+    the cache. Never raises: ``(None, {"error": ...})`` on any failure (HTTP status, XML
+    service exception, undecodable image, timeout).
+    """
+    from PIL import Image
+
+    params = _wms_params(layer, bbox, px)
+    cache_file = _wms_cache_file(params)
+    info: Dict[str, Any] = {"layer": layer, "cache_file": cache_file.name, "from_cache": False}
+    try:
+        if cache_file.exists():
+            image = Image.open(cache_file).convert("RGBA")
+            info["from_cache"] = True
+            return np.asarray(image), info
+    except Exception:
+        pass  # unreadable cache entry: fetch again
+    try:
+        response = requests.get(
+            LONGDO_WMS_URL, params=params, timeout=EVIDENCE_CONFIG["timeout_s"],
+            headers={"User-Agent": "Rent_Gradient-evidence/1.0"},
+        )
+        if response.status_code != 200:
+            return None, {**info, "error": f"HTTP {response.status_code}"}
+        if "image" not in response.headers.get("Content-Type", "image/png"):
+            return None, {**info, "error": "server returned a service exception, not an image"}
+        image = Image.open(io.BytesIO(response.content))
+        image.load()
+        image = image.convert("RGBA")
+        if image.size != (px, px):
+            return None, {**info, "error": f"unexpected image size {image.size}"}
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        try:
+            _atomic_write(cache_file, buffer.getvalue())
+            _atomic_write(cache_file.with_suffix(".json"), json.dumps(
+                {"layer": layer, "bbox": list(bbox), "px": px,
+                 "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}).encode("utf-8"))
+        except Exception:
+            pass  # caching is best-effort
+        return np.asarray(image), info
+    except Exception as exc:
+        return None, {**info, "error": " ".join(str(exc).split())[:160] or type(exc).__name__}
+
+
+def select_evidence_candidates(
+    candidates: List[Dict[str, Any]],
+    anchors: List[Dict[str, Any]],
+    limit: int,
+    min_spacing_m: float,
+) -> List[Dict[str, Any]]:
+    """Both road anchors first, then the best remaining candidates >= ``min_spacing_m`` apart."""
+    by_id = {c["node_id"]: c for c in candidates}
+    ordered: List[Dict[str, Any]] = []
+    for a in anchors:
+        base = dict(by_id.get(a["node_id"], {}))
+        base.update(node_id=a["node_id"], lat=a["lat"], lon=a["lon"])
+        base.setdefault("composite_score", a.get("score", 0.0))
+        ordered.append(base)
+    ranked = sorted(candidates, key=lambda c: (-round(c["composite_score"], 12), str(c["node_id"])))
+    ordered.extend(ranked)
+    chosen: List[Dict[str, Any]] = []
+    for cand in ordered:
+        if len(chosen) >= limit:
+            break
+        if any(cand["node_id"] == c["node_id"] for c in chosen):
+            continue
+        if any(calculate_distance_meters(cand["lat"], cand["lon"], c["lat"], c["lon"]) < min_spacing_m
+               for c in chosen):
+            continue
+        chosen.append(cand)
+    return chosen
+
+
+def fuse_evidence(
+    candidates: List[Dict[str, Any]], weights: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    """Weighted blend over the signals that have data; a missing signal lowers ``coverage``,
+    never the score (no data is not the same as "low"). Sorted best first, ties by node id."""
+    total = sum(weights.values()) or 1.0
+    fused = []
+    for cand in candidates:
+        signals = {
+            "road": cand.get("road_signal"),
+            "parcel": cand["parcel"]["score"] if cand.get("parcel", {}).get("data") else None,
+            "zoning": cand["zoning"]["zoning_intensity"] if cand.get("zoning", {}).get("data") else None,
+        }
+        used = {k: v for k, v in signals.items() if v is not None}
+        weight_used = sum(weights[k] for k in used)
+        score = sum(weights[k] * v for k, v in used.items()) / weight_used if weight_used else None
+        fused.append({**cand, "signals": signals, "coverage": weight_used / total,
+                      "evidence_score": score})
+    fused.sort(key=lambda c: (c["evidence_score"] is None,
+                              -round(c["evidence_score"] or 0.0, 12), str(c["node_id"])))
+    for rank, cand in enumerate(fused, start=1):
+        cand["rank"] = rank
+    return fused
+
+
+def classify_anchor_confidence(
+    winner: Dict[str, Any],
+    road_anchors: List[Dict[str, Any]],
+    stability_level: Optional[str],
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """HIGH needs independent signals to agree: roads (an anchor within ``agree_radius_m``),
+    the official plan (in / next to the commercial zone) and the parcel structure.
+    Reasons are returned in Thai for the UI."""
+    conf = cfg["confidence"]
+    reasons: List[str] = []
+    nearest = min((calculate_distance_meters(winner["lat"], winner["lon"], a["lat"], a["lon"])
+                   for a in road_anchors), default=None)
+    roads_ok = nearest is not None and nearest <= cfg["agree_radius_m"]
+    reasons.append(
+        f"ถนน: anchor ถนนที่ใกล้สุดห่าง {nearest:,.0f} ม." + (" (สอดคล้อง)" if roads_ok else " (ไม่สอดคล้อง)")
+        if nearest is not None else "ถนน: ไม่มี anchor อ้างอิง")
+    zoning = winner.get("zoning") or {}
+    zoning_ok = None
+    if zoning.get("data") or zoning.get("distance_to_commercial_m") is not None:
+        distance = zoning.get("distance_to_commercial_m")
+        zoning_ok = bool(zoning.get("in_commercial")) or (
+            distance is not None and distance <= cfg["commercial_near_m"])
+        if zoning.get("in_commercial"):
+            reasons.append("ผังเมือง: อยู่ในโซนพาณิชยกรรม")
+        elif distance is not None:
+            reasons.append(f"ผังเมือง: ห่างโซนพาณิชยกรรม {distance:,.0f} ม." + ("" if zoning_ok else " (ไกล)"))
+        else:
+            reasons.append("ผังเมือง: ไม่พบโซนพาณิชยกรรมในกรอบภาพ")
+    else:
+        reasons.append("ผังเมือง: ไม่มีข้อมูล (นอกพื้นที่ผังเมืองหรืออ่านภาพไม่ได้)")
+    parcel = winner.get("parcel") or {}
+    parcel_ok = None
+    if parcel.get("data"):
+        parcel_ok = parcel["score"] >= conf["parcel_ok"]
+        reasons.append(
+            f"แปลงที่ดิน: คะแนน {parcel['score']:.2f}, แปลงเล็ก {parcel['small_share']:.0%}, "
+            f"ตึกแถว {parcel['shophouse_share']:.0%}" + ("" if parcel_ok else " (ไม่เด่น)"))
+    else:
+        reasons.append("แปลงที่ดิน: ไม่มีข้อมูล")
+    coverage = winner.get("coverage", 0.0)
+    flags = [roads_ok, zoning_ok, parcel_ok]
+    agreeing = sum(1 for f in flags if f)
+    if stability_level == "unstable":
+        reasons.append("ความนิ่ง: anchor ถนนขยับมากเมื่อวงศึกษาเปลี่ยน (ไม่นิ่ง)")
+    if coverage >= conf["coverage_min"] and agreeing == 3 and stability_level != "unstable":
+        level = "HIGH"
+    elif coverage >= conf["coverage_medium"] and agreeing >= 2:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+    return {"level": level, "reasons": reasons, "coverage": coverage,
+            "signals": {"roads": roads_ok, "zoning": zoning_ok, "parcel": parcel_ok},
+            "nearest_road_anchor_m": nearest}
+
+
+def _largest_commercial_zone(
+    plan: np.ndarray, legend: List[Dict[str, Any]], bbox: Tuple[float, float, float, float]
+) -> Optional[Dict[str, Any]]:
+    """Centroid (lat, lon) and area of the biggest พาณิชยกรรม patch in a city-plan overview."""
+    commercial = [k for k, c in enumerate(legend) if c.get("commercial")]
+    if not commercial:
+        return None
+    cls = _classify_colors(plan, legend, ZONING_COLOR_TOLERANCE)
+    mask = np.isin(cls, commercial)
+    if not mask.any():
+        return None
+    labels, n = ndi.label(mask)
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
+    biggest = int(sizes.argmax()) + 1
+    rows, cols = np.nonzero(labels == biggest)
+    h, w = mask.shape
+    x = bbox[0] + (cols.mean() + 0.5) / w * (bbox[2] - bbox[0])
+    y = bbox[3] - (rows.mean() + 0.5) / h * (bbox[3] - bbox[1])
+    lon, lat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform(x, y)
+    mid_lat = float(lat)
+    ground_per_px = (bbox[2] - bbox[0]) / w * cos(radians(mid_lat))
+    return {"lat": float(lat), "lon": float(lon), "area_km2": float(sizes.max() * ground_per_px ** 2 / 1e6)}
+
+
+def run_evidence_stage(
+    found: Dict[str, Any],
+    study_center: Tuple[float, float],
+    study_radius_m: float,
+    legend: Optional[List[Dict[str, Any]]] = None,
+    legend_source: str = "provisional",
+    fetcher: Callable[..., Tuple[Optional[np.ndarray], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Confirm the road candidates with the city plan and the parcel layer; never raises.
+
+    ``found`` is the result of :func:`find_cbd_anchors`. The returned block carries status
+    (``ok`` / ``partial`` / ``unavailable``), the fused candidate table, the evidence anchor
+    and its confidence. Without evidence the road anchors are left exactly as they are.
+    """
+    cfg = EVIDENCE_CONFIG
+    fetcher = fetcher or fetch_wms_image
+    started = time.perf_counter()
+    base: Dict[str, Any] = {
+        "status": "unavailable", "reason": None, "legend_source": legend_source,
+        "weights": dict(cfg["weights"]), "candidates": [], "evidence_anchor": None,
+        "confidence": None, "commercial_zone": None,
+        "windows": {"parcel_m": cfg["parcel_window_m"], "plan_m": cfg["plan_window_m"], "px": cfg["px"]},
+        "fetch": {"requests": 0, "cache_hits": 0, "errors": [], "seconds": 0.0},
+    }
+    try:
+        legend = legend or load_cityplan_legend()[0]
+        composite, closeness = found["composite"], found["closeness"]
+        picked = select_evidence_candidates(
+            found.get("evidence_candidates", []),
+            [composite["anchor"], closeness["anchor"]],
+            int(cfg["candidates"]), float(cfg["min_spacing_m"]))
+        if not picked:
+            return {**base, "reason": "ไม่มีผู้สมัครจากถนน"}
+        tasks: List[Tuple[str, int, str, Tuple[float, float, float, float]]] = []
+        for index, cand in enumerate(picked):
+            tasks.append(("parcel", index, cfg["parcel_layer"],
+                          _wms_window(cand["lat"], cand["lon"], cfg["parcel_window_m"])))
+            tasks.append(("plan", index, cfg["plan_layer"],
+                          _wms_window(cand["lat"], cand["lon"], cfg["plan_window_m"])))
+        overview_window = 2.0 * study_radius_m
+        overview_bbox = _wms_window(study_center[0], study_center[1], overview_window)
+        tasks.append(("overview", -1, cfg["plan_layer"], overview_bbox))
+        skipped = max(0, len(tasks) - int(cfg["max_requests"]))
+        tasks = tasks[: int(cfg["max_requests"])]
+        images: Dict[Tuple[str, int], Optional[np.ndarray]] = {}
+        errors: List[str] = []
+        hits = 0
+
+        def fetch_one(layer: str, bbox: Tuple[float, float, float, float]):
+            try:
+                return fetcher(layer, bbox, cfg["px"])
+            except Exception as exc:  # one bad window must not cancel the others
+                return None, {"error": f"{type(exc).__name__}: {' '.join(str(exc).split())[:120]}"}
+
+        with ThreadPoolExecutor(max_workers=max(1, int(cfg["parallel"]))) as pool:
+            futures = {pool.submit(fetch_one, layer, bbox): (kind, index)
+                       for kind, index, layer, bbox in tasks}
+            for future, key in futures.items():
+                image, info = future.result()
+                images[key] = image
+                hits += bool(info.get("from_cache"))
+                if image is None:
+                    errors.append(f"{key[0]}#{key[1]}: {info.get('error', 'no image')}")
+        base["fetch"] = {"requests": len(tasks) - hits, "cache_hits": hits, "errors": errors[:10],
+                         "skipped_over_budget": skipped, "seconds": time.perf_counter() - started}
+        records = []
+        for index, cand in enumerate(picked):
+            lat = cand["lat"]
+            parcel_img, plan_img = images.get(("parcel", index)), images.get(("plan", index))
+            parcel = (parcel_features(parcel_img, cfg["parcel_window_m"] / cfg["px"])
+                      if parcel_img is not None else {"data": False})
+            zoning = (zoning_features(plan_img, legend, cfg["plan_window_m"] / cfg["px"],
+                                      radius_m=cfg["zoning_radius_m"])
+                      if plan_img is not None else {"data": False})
+            records.append({
+                "node_id": cand["node_id"], "lat": lat, "lon": cand["lon"],
+                "is_composite_anchor": cand["node_id"] == composite["anchor"]["node_id"],
+                "is_closeness_anchor": cand["node_id"] == closeness["anchor"]["node_id"],
+                "road_signal": float(cand.get("composite_score", 0.0)),
+                "parcel": parcel, "zoning": zoning,
+            })
+        overview = images.get(("overview", -1))
+        if overview is not None:
+            base["commercial_zone"] = _largest_commercial_zone(overview, legend, overview_bbox)
+        fused = fuse_evidence(records, cfg["weights"])
+        have_extra = [c for c in fused if c["parcel"].get("data") or c["zoning"].get("data")]
+        if not have_extra:
+            return {**base, "candidates": fused,
+                    "reason": "ดึงภาพ/อ่านข้อมูลผังเมืองและแปลงที่ดินไม่สำเร็จ — ใช้ผลจากถนนอย่างเดียว"}
+        winner = have_extra[0]  # a road-only candidate never wins by default after a failed fetch
+        stability = (composite.get("stability") or {}).get("level")
+        confidence = classify_anchor_confidence(
+            winner, [composite["anchor"], closeness["anchor"]], stability, cfg)
+        evidence_anchor = {
+            "node_id": winner["node_id"], "lat": winner["lat"], "lon": winner["lon"],
+            "score": winner["evidence_score"], "source": "Automated CBD Anchor — Evidence",
+            "road_signal": winner["road_signal"], "coverage": winner["coverage"],
+        }
+        partial = bool(errors) or skipped > 0 or any(c["coverage"] < 1.0 for c in fused)
+        return {**base, "status": "partial" if partial else "ok", "candidates": fused,
+                "evidence_anchor": evidence_anchor, "confidence": confidence,
+                "fetch": {**base["fetch"], "seconds": time.perf_counter() - started}}
+    except Exception as exc:  # the road result must survive whatever goes wrong here
+        return {**base, "reason": f"{type(exc).__name__}: {' '.join(str(exc).split())[:160]}"}
 
 
 def get_fill_color(minutes: float, colors_config: Dict[str, str]) -> str:
@@ -2175,6 +2848,30 @@ def save_graph_to_cache(
             pass  # a missing sidecar only disables reuse of this entry
 
 
+def _read_cache_sidecar(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Footprint metadata of a cache entry, or ``None`` (legacy entry / corrupt sidecar)."""
+    try:
+        meta = json.loads(
+            (CACHE_DIR / f"osm_graph_{cache_key}.json").read_text(encoding="utf-8"))
+        return meta if meta.get("version") == 1 and meta.get("footprint_wkt") else None
+    except Exception:
+        return None
+
+
+def _footprint_covers(meta: Dict[str, Any], requested: Any) -> bool:
+    """True when the cached download footprint contains the requested polygon.
+
+    The stored footprint is rounded to 1e-6 degrees, so allow ~1 m of slack.
+    """
+    try:
+        footprint = wkt.loads(meta["footprint_wkt"])
+        if not footprint.is_valid:
+            footprint = footprint.buffer(0)
+        return bool(footprint.buffer(1e-5).contains(requested))
+    except Exception:
+        return False
+
+
 def find_covering_cache_key(polygon_wkt_str: str, network_type: str) -> Optional[str]:
     """Key of the smallest cached graph of ``network_type`` whose footprint contains the polygon.
 
@@ -2212,8 +2909,14 @@ def find_covering_cache_key(polygon_wkt_str: str, network_type: str) -> Optional
 def cached_graph_available(polygon_wkt_str: str, network_type: str) -> bool:
     """True when a request can be served without Overpass (exact or covering cache)."""
     key = get_cache_key(polygon_wkt_str, network_type)
-    return ((CACHE_DIR / f"osm_graph_{key}.pkl").exists()
-            or find_covering_cache_key(polygon_wkt_str, network_type) is not None)
+    if (CACHE_DIR / f"osm_graph_{key}.pkl").exists():
+        meta = _read_cache_sidecar(key)
+        try:
+            if meta is None or _footprint_covers(meta, wkt.loads(polygon_wkt_str)):
+                return True
+        except (ValueError, TypeError):
+            return False
+    return find_covering_cache_key(polygon_wkt_str, network_type) is not None
 
 
 def _reuse_covering_graph(
@@ -2457,11 +3160,30 @@ def _fetch_osm_graph(
     attempts = max(1, int(OVERPASS_CONFIG["attempts_per_endpoint"]))
     failures: List[str] = []
 
+    def exact_hit() -> Optional[nx.MultiDiGraph]:
+        """Exact-key entry, trusted only if its recorded footprint covers the request.
+
+        The key is the md5 of bounds rounded to 3 dp, so a differently shaped polygon
+        with the same bounds shares it. Entries without a sidecar (imported bundles,
+        caches from before footprints were recorded) cannot be checked and are used as
+        before, but labelled so the UI does not claim more than is known.
+        """
+        graph = load_graph_from_cache(cache_key)
+        if graph is None:
+            return None
+        meta = _read_cache_sidecar(cache_key)
+        if meta is None:
+            graph.graph["osm_source"] = "cache (footprint unverified)"
+            return graph
+        if not _footprint_covers(meta, polygon_geom):
+            return None  # same key, different shape: fall through to crop / download
+        graph.graph["osm_source"] = "cache"
+        return graph
+
     # Fast paths outside the lock: a cache hit (exact, or a cached graph that fully
     # covers this polygon) must not queue behind another session's download.
-    G = load_graph_from_cache(cache_key)
+    G = exact_hit()
     if G is not None:
-        G.graph["osm_source"] = "cache"
         return G, True, None
     G = _reuse_covering_graph(polygon_wkt_str, polygon_geom, network_type, cache_key)
     if G is not None:
@@ -2470,9 +3192,8 @@ def _fetch_osm_graph(
     with _OVERPASS_LOCK:
         original_url = ox.settings.overpass_url
         # Re-check: a session that held the lock may have just filled the cache.
-        G = load_graph_from_cache(cache_key)
+        G = exact_hit()
         if G is not None:
-            G.graph["osm_source"] = "cache"
             return G, True, None
 
         endpoints: List[str] = []
@@ -3298,6 +4019,78 @@ def _anchor_summary(label: str, result: Dict[str, Any], diagnostics: bool = Fals
         st.warning(warning)
 
 
+def _evidence_thumbnail(rgba: np.ndarray, size: int = 340) -> Any:
+    """Cached window on a white card (transparent layers are invisible on a dark theme)."""
+    from PIL import Image
+
+    card = Image.new("RGBA", (rgba.shape[1], rgba.shape[0]), (255, 255, 255, 255))
+    card.alpha_composite(Image.fromarray(rgba, "RGBA"))
+    return card.convert("RGB").resize((size, size))
+
+
+def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, Any]]) -> None:
+    """Confidence, reasons, coverage and the per-candidate table of the evidence stage."""
+    fetch = evidence.get("fetch", {})
+    if evidence.get("legend_source") == "provisional":
+        st.warning("สีผังเมืองที่ใช้อ่านภาพยังเป็นค่าชั่วคราว (ยังไม่ calibrate กับภาพจริงของ Longdo) "
+                   "— ใช้เป็นหลักฐานประกอบ ไม่ใช่คำตอบสุดท้าย", icon="⚠️")
+    if evidence.get("status") == "unavailable" or not evidence.get("evidence_anchor"):
+        st.warning(f"ไม่ได้หลักฐานเสริม: {evidence.get('reason') or 'ไม่ทราบสาเหตุ'} — ใช้ผลจากถนนอย่างเดียว")
+        if fetch.get("errors"):
+            st.caption("; ".join(fetch["errors"][:3]))
+        return
+    anchor, confidence = evidence["evidence_anchor"], evidence["confidence"]
+    badge = {"HIGH": "🟢 สูง", "MEDIUM": "🟡 กลาง", "LOW": "🔴 ต่ำ"}[confidence["level"]]
+    st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
+    st.caption(
+        f"ความเชื่อมั่น: {badge} · Evidence score {anchor['score']:.3f} · "
+        f"ข้อมูลครบ {anchor['coverage']:.0%}"
+        + (" · ข้อมูลบางส่วน" if evidence.get("status") == "partial" else ""))
+    for reason in confidence["reasons"]:
+        st.caption(f"• {reason}")
+    if composite:
+        moved = calculate_distance_meters(
+            composite["anchor"]["lat"], composite["anchor"]["lon"], anchor["lat"], anchor["lon"])
+        st.caption(f"ห่างจาก anchor ① {moved:,.0f} ม.")
+    zone = evidence.get("commercial_zone")
+    if zone:
+        to_zone = calculate_distance_meters(zone["lat"], zone["lon"], anchor["lat"], anchor["lon"])
+        st.caption(f"โซนพาณิชย์ใหญ่สุดในวงศึกษา ≈ {zone['area_km2']:.2f} ตร.กม. "
+                   f"(ห่างจาก anchor นี้ {to_zone:,.0f} ม. จากจุดกึ่งกลางโซน)")
+    st.caption(f"ดึงภาพ {fetch.get('requests', 0)} คำขอ · จากแคช {fetch.get('cache_hits', 0)} · "
+               f"{fetch.get('seconds', 0.0):.1f} วินาที"
+               + (f" · ข้ามเพราะเกินโควตา {fetch['skipped_over_budget']}"
+                  if fetch.get("skipped_over_budget") else ""))
+    st.checkbox("ใช้ Evidence Anchor คำนวณ Rent Gradient", key="rent_use_evidence_anchor",
+                on_change=_on_rent_anchor_toggle,
+                help="ค่าเริ่มต้น: Rent ใช้ anchor ① Composite — ติ๊กเมื่อยอมรับหลักฐานผังเมือง/แปลงที่ดินแล้ว")
+    with st.expander("รายละเอียดหลักฐาน (ผู้สมัคร + ภาพ)"):
+        st.dataframe([
+            {
+                "อันดับ": c["rank"], "node": c["node_id"],
+                "Evidence": None if c["evidence_score"] is None else round(c["evidence_score"], 3),
+                "ถนน": round(c["road_signal"], 3),
+                "แปลง": (round(c["parcel"]["score"], 3) if c["parcel"].get("data") else None),
+                "ตึกแถว%": (round(100 * c["parcel"]["shophouse_share"]) if c["parcel"].get("data") else None),
+                "ผังเมือง": (round(c["zoning"]["zoning_intensity"], 3) if c["zoning"].get("data") else None),
+                "ในโซนพาณิชย์": bool(c["zoning"].get("in_commercial")),
+                "anchor ถนน": "①" if c["is_composite_anchor"] else ("②" if c["is_closeness_anchor"] else ""),
+            }
+            for c in evidence["candidates"]
+        ], hide_index=True)
+        windows, px = evidence["windows"], evidence["windows"]["px"]
+        left, right = st.columns(2)
+        for column, layer, key, title in (
+                (left, EVIDENCE_CONFIG["parcel_layer"], "parcel_m", "รูปแปลงที่ดิน (dol)"),
+                (right, EVIDENCE_CONFIG["plan_layer"], "plan_m", "ผังเมืองรวม (cityplan_dpt)")):
+            image = load_cached_wms_image(
+                layer, _wms_window(anchor["lat"], anchor["lon"], windows[key]), px)
+            if image is not None:
+                column.image(_evidence_thumbnail(image), caption=f"{title} · {windows[key] / 1000:g} กม.")
+        st.download_button("ดาวน์โหลด Evidence JSON", json.dumps(evidence, ensure_ascii=False, indent=2),
+                           "automated_cbd_evidence.json", "application/json")
+
+
 def _render_sidebar_anchor_panel(locked: bool) -> bool:
     """One button, one road download, both anchors (Composite + Closeness 100%)."""
     with st.expander("🎯 Automated CBD Anchor", expanded=True):
@@ -3337,14 +4130,26 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                 st.session_state.anchor_lon = center_lon
         st.number_input("รัศมีพื้นที่ศึกษา (กม.)", 4.0, 20.0,
                         key="anchor_radius_km", step=1.0, disabled=locked)
+        st.checkbox(
+            "🗺️ ใช้ผังเมืองรวม + รูปแปลงที่ดิน ยืนยันผู้สมัคร (ทดลอง)",
+            key="anchor_use_evidence", disabled=locked,
+            help=(
+                "หลังหา anchor จากถนน จะดึงภาพผังเมืองรวม (cityplan_dpt) และรูปแปลงที่ดิน (dol) "
+                "รอบผู้สมัคร ~12 จุด เพื่อตรวจว่าอยู่ในโซนพาณิชย์/แปลงเล็กถี่แบบตึกแถวหรือไม่ "
+                "แล้วให้ความเชื่อมั่น — ภาพถูกแคชบนดิสก์ ถ้าดึงไม่ได้จะใช้ผลจากถนนอย่างเดียว"
+            ),
+        )
 
         context = _anchor_search_context()
         result = st.session_state.get(StateManager.K_AUTO_ANCHOR)
         closeness_result = st.session_state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
+        evidence_result = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
         if ((result and not _anchor_context_matches(result.get("context"), context))
                 or (closeness_result
-                    and not _anchor_context_matches(closeness_result.get("context"), context))):
-            StateManager.clear_results(["anchor", "anchor_closeness"])
+                    and not _anchor_context_matches(closeness_result.get("context"), context))
+                or (evidence_result
+                    and not _anchor_context_matches(evidence_result.get("context"), context))):
+            StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
             st.rerun()
 
         if not HAS_SCIPY:
@@ -3366,6 +4171,11 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
             st.caption("Score = Closeness อย่างเดียว (ระยะถนนเป็นเมตร) ทุก road node เป็น candidate; "
                        "Rent Gradient ยังคงใช้ตัวที่ ①")
             _anchor_summary("closeness", closeness_result, diagnostics=True)
+        if evidence_result:
+            st.markdown("##### ③ Evidence (ผังเมือง + รูปแปลงที่ดิน)")
+            _evidence_summary(evidence_result, result)
+        elif result and st.session_state.get("anchor_use_evidence"):
+            st.caption("เปิดตัวเลือกหลักฐานแล้ว — กดค้นหาอีกครั้ง (ใช้ถนนจากแคช) เพื่อตรวจผังเมือง/แปลงที่ดิน")
         shown = result or closeness_result
         if shown:
             timings = shown.get("timings", {})
@@ -3378,13 +4188,13 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
             )
             st.download_button(
                 "ดาวน์โหลด Anchor JSON",
-                json.dumps({"composite": result, "closeness": closeness_result},
-                           ensure_ascii=False, indent=2),
+                json.dumps({"composite": result, "closeness": closeness_result,
+                            "evidence": evidence_result}, ensure_ascii=False, indent=2),
                 "automated_cbd_anchors.json",
                 "application/json",
             )
             if st.button("ล้าง Anchor ที่ค้นหาไว้", disabled=locked):
-                StateManager.clear_results(["anchor", "anchor_closeness"])
+                StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
                 st.rerun()
         return run_anchor
 
@@ -3609,6 +4419,36 @@ def render_map() -> Optional[Dict[str, Any]]:
             ),
             icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
         ).add_to(m)
+
+    evidence = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
+    if evidence and evidence.get("evidence_anchor"):
+        anchor, confidence = evidence["evidence_anchor"], evidence["confidence"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor — Evidence",
+            popup=folium.Popup(
+                f"<b>Automated CBD Anchor — Evidence</b><br>Confidence: {confidence['level']}"
+                f"<br>Evidence score: {anchor['score']:.3f}"
+                f"<br>Coverage: {anchor['coverage']:.0%}"
+                + "".join(f"<br>• {reason}" for reason in confidence["reasons"]), max_width=360),
+            icon=folium.Icon(color="purple", icon="star", prefix="fa"),
+        ).add_to(m)
+        candidate_layer = folium.FeatureGroup(name="Evidence candidates", show=False)
+        for cand in evidence["candidates"]:
+            score = "n/a" if cand["evidence_score"] is None else f"{cand['evidence_score']:.3f}"
+            folium.CircleMarker(
+                [cand["lat"], cand["lon"]], radius=6, color="#7b2cbf", fill=True, fill_opacity=0.6,
+                tooltip=f"#{cand['rank']} evidence {score} (node {cand['node_id']})",
+            ).add_to(candidate_layer)
+        candidate_layer.add_to(m)
+        zone = evidence.get("commercial_zone")
+        if zone:
+            zone_layer = folium.FeatureGroup(name="Largest commercial zone (city plan)", show=False)
+            folium.Circle(
+                [zone["lat"], zone["lon"]], radius=max(50.0, (zone["area_km2"] * 1e6 / 3.14159265) ** 0.5),
+                color="#d62828", fill=False, dash_array="6",
+                tooltip=f"โซนพาณิชย์ใหญ่สุด ≈ {zone['area_km2']:.2f} ตร.กม. (วงกลมเทียบพื้นที่)",
+            ).add_to(zone_layer)
+            zone_layer.add_to(m)
 
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
@@ -4597,7 +5437,16 @@ def perform_automated_anchor() -> None:
                         "n_samples": fitted["n_samples"],
                     }
                 published[state_key] = result
-            st.session_state.update(published)  # both anchors become visible together
+            published[StateManager.K_AUTO_ANCHOR_EVIDENCE] = None
+            if st.session_state.get("anchor_use_evidence"):
+                with st.spinner("กำลังตรวจผังเมืองรวมและรูปแปลงที่ดินของผู้สมัคร…"):
+                    legend, legend_source = load_cityplan_legend()
+                    evidence = run_evidence_stage(
+                        found, tuple(context["study_center"]), context["study_radius_m"],
+                        legend=legend, legend_source=legend_source)
+                    evidence["context"] = context
+                    published[StateManager.K_AUTO_ANCHOR_EVIDENCE] = evidence
+            st.session_state.update(published)  # all anchors become visible together
             StateManager.clear_results(["rent"])
             perform_rent_gradient(quiet=True)
     except Exception as exc:
@@ -4606,10 +5455,25 @@ def perform_automated_anchor() -> None:
     st.rerun()
 
 
+def _rent_anchor_input() -> Optional[Dict[str, Any]]:
+    """Anchor handed to the Rent Gradient: the composite one, or the evidence anchor on opt-in."""
+    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    evidence = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
+    if (automated and evidence and evidence.get("evidence_anchor")
+            and st.session_state.get("rent_use_evidence_anchor")):
+        return {**automated, "anchor": dict(evidence["evidence_anchor"])}
+    return automated
+
+
+def _on_rent_anchor_toggle() -> None:
+    StateManager.clear_results(["rent"])
+    perform_rent_gradient(quiet=True)
+
+
 def perform_rent_gradient(quiet: bool = False) -> None:
     """Orchestrate Rent Gradient computation (pure math — ไม่มี API call)."""
     iso_data = StateManager.get_isochrone_data()
-    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    automated = _rent_anchor_input()
     if not iso_data and not automated:
         if not quiet:
             st.error("❌ กรุณาคำนวณ Isochrone หรือค้นหา Automated Anchor ก่อน")

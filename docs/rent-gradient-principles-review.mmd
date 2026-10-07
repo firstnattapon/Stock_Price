@@ -30,10 +30,12 @@ flowchart TD
         A4["centroid Travel Areas<br/>หรือ ค่าเฉลี่ยหมุด"]
         RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ<br/>UI เตือน + scripts/anchor_sensitivity.py · ground truth [OPEN]"]
         PROBE["Stability probe (ประมาณการ)<br/>วงศึกษา ×0.8/×1.2, ศูนย์ ±20% 4 ทิศ — ไม่เพิ่ม Dijkstra<br/>[FIXED] F2 ระดับ stable / check / unstable"]
+        EVD["Evidence stage (ติ๊กเลือก ค่าเริ่มต้นปิด)<br/>ผู้สมัคร 12 จุด + ผังเมืองรวม cityplan_dpt + รูปแปลง dol<br/>รวมคะแนนเฉพาะสัญญาณที่มีข้อมูล → ความเชื่อมั่น HIGH/MEDIUM/LOW<br/>[ASSUME] สี/threshold ยังเป็นค่าชั่วคราว — รอ fixtures จริง"]
         A0 --> CERT
         CERT -- "ใช่" --> EX
         CERT -- "ไม่" --> LO
         A0 -.-> PROBE
+        A0 -.-> EVD
     end
 
     OSMA --> A0
@@ -108,6 +110,6 @@ flowchart TD
 
     class EX,CL,A1 ok
     class A0,LO,PROBE,BT,GL,OLS,RRP,VG,GS,OSMA,OSMN fixed
-    class DM,ISO open
+    class DM,ISO,EVD open
     class RES,IDX,MOD assume
     class MK,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
