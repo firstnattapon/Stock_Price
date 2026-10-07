@@ -171,7 +171,7 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     "reference_seed": 0,
     "screen_top_k": 256,
     "refine_iterations": 40,
-    "candidate_export": 20,   # top nodes of each objective handed to the evidence stage
+    "candidate_export": 150,  # top nodes per objective handed to the evidence stage (it thins them by spacing)
     "boundary_warn_ratio": 0.40,
     # Indicative stability probe: how far does the anchor move if the user's circle
     # is rescaled / shifted? Drift is judged against the study radius.
@@ -249,6 +249,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_railway", "show_golden_spots",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
     "anchor_lat", "anchor_lon", "anchor_radius_km",
+    "anchor_use_evidence", "rent_use_evidence_anchor",
     "anchor_seed", "anchor_restarts",  # legacy: accepted from old configs, no longer used
 ]
 
@@ -260,6 +261,7 @@ RESULT_KEYS_TO_SAVE: List[str] = [
     "rent_gradient_data",
     "automated_anchor_data",
     "automated_anchor_closeness_data",
+    "automated_anchor_evidence_data",
 ]
 
 # GitHub Cache Repository Configuration
@@ -309,6 +311,7 @@ class StateManager:
     K_RENT_UNIT: str = "rent_unit_label"
     K_AUTO_ANCHOR: str = "automated_anchor_data"
     K_AUTO_ANCHOR_CLOSENESS: str = "automated_anchor_closeness_data"
+    K_AUTO_ANCHOR_EVIDENCE: str = "automated_anchor_evidence_data"
 
     # ---- Default values ----
     _DEFAULTS: Dict[str, Any] = {
@@ -344,6 +347,9 @@ class StateManager:
         K_RENT_UNIT: "บาท/ตร.ว./เดือน",
         K_AUTO_ANCHOR: None,
         K_AUTO_ANCHOR_CLOSENESS: None,
+        K_AUTO_ANCHOR_EVIDENCE: None,
+        "anchor_use_evidence": False,         # opt-in until real WMS fixtures calibrate the thresholds
+        "rent_use_evidence_anchor": False,    # Rent keeps the composite anchor unless ticked
         "anchor_lat": DEFAULT_CONFIG["LAT"],
         "anchor_lon": DEFAULT_CONFIG["LON"],
         "anchor_radius_km": 10.0,
@@ -524,11 +530,15 @@ class StateManager:
                     ``None`` clears all.
         """
         if layers is None:
-            layers = ["isochrone", "intersection", "network", "rent", "anchor", "anchor_closeness"]
+            layers = ["isochrone", "intersection", "network", "rent", "anchor", "anchor_closeness",
+                      "anchor_evidence"]
 
         if "anchor" in layers:
             st.session_state[cls.K_AUTO_ANCHOR] = None
+            st.session_state[cls.K_AUTO_ANCHOR_EVIDENCE] = None  # it confirms this road result
             st.session_state[cls.K_RENT_DATA] = None
+        if "anchor_evidence" in layers:
+            st.session_state[cls.K_AUTO_ANCHOR_EVIDENCE] = None
         if "anchor_closeness" in layers:
             st.session_state[cls.K_AUTO_ANCHOR_CLOSENESS] = None
 
@@ -1463,6 +1473,18 @@ def _wms_params(layer: str, bbox: Tuple[float, float, float, float], px: int) ->
 def _wms_cache_file(params: Dict[str, Any]) -> Path:
     digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:40]
     return CACHE_DIR / f"wms_{digest}.png"
+
+
+def load_cached_wms_image(layer: str, bbox: Tuple[float, float, float, float], px: int
+                          ) -> Optional[np.ndarray]:
+    """The cached window as RGBA, or ``None`` — never touches the network (for thumbnails)."""
+    from PIL import Image
+
+    try:
+        cache_file = _wms_cache_file(_wms_params(layer, bbox, px))
+        return np.asarray(Image.open(cache_file).convert("RGBA")) if cache_file.exists() else None
+    except Exception:
+        return None
 
 
 def fetch_wms_image(
@@ -3997,6 +4019,78 @@ def _anchor_summary(label: str, result: Dict[str, Any], diagnostics: bool = Fals
         st.warning(warning)
 
 
+def _evidence_thumbnail(rgba: np.ndarray, size: int = 340) -> Any:
+    """Cached window on a white card (transparent layers are invisible on a dark theme)."""
+    from PIL import Image
+
+    card = Image.new("RGBA", (rgba.shape[1], rgba.shape[0]), (255, 255, 255, 255))
+    card.alpha_composite(Image.fromarray(rgba, "RGBA"))
+    return card.convert("RGB").resize((size, size))
+
+
+def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, Any]]) -> None:
+    """Confidence, reasons, coverage and the per-candidate table of the evidence stage."""
+    fetch = evidence.get("fetch", {})
+    if evidence.get("legend_source") == "provisional":
+        st.warning("สีผังเมืองที่ใช้อ่านภาพยังเป็นค่าชั่วคราว (ยังไม่ calibrate กับภาพจริงของ Longdo) "
+                   "— ใช้เป็นหลักฐานประกอบ ไม่ใช่คำตอบสุดท้าย", icon="⚠️")
+    if evidence.get("status") == "unavailable" or not evidence.get("evidence_anchor"):
+        st.warning(f"ไม่ได้หลักฐานเสริม: {evidence.get('reason') or 'ไม่ทราบสาเหตุ'} — ใช้ผลจากถนนอย่างเดียว")
+        if fetch.get("errors"):
+            st.caption("; ".join(fetch["errors"][:3]))
+        return
+    anchor, confidence = evidence["evidence_anchor"], evidence["confidence"]
+    badge = {"HIGH": "🟢 สูง", "MEDIUM": "🟡 กลาง", "LOW": "🔴 ต่ำ"}[confidence["level"]]
+    st.write(f"**{anchor['source']}** ({anchor['lat']:.6f}, {anchor['lon']:.6f})")
+    st.caption(
+        f"ความเชื่อมั่น: {badge} · Evidence score {anchor['score']:.3f} · "
+        f"ข้อมูลครบ {anchor['coverage']:.0%}"
+        + (" · ข้อมูลบางส่วน" if evidence.get("status") == "partial" else ""))
+    for reason in confidence["reasons"]:
+        st.caption(f"• {reason}")
+    if composite:
+        moved = calculate_distance_meters(
+            composite["anchor"]["lat"], composite["anchor"]["lon"], anchor["lat"], anchor["lon"])
+        st.caption(f"ห่างจาก anchor ① {moved:,.0f} ม.")
+    zone = evidence.get("commercial_zone")
+    if zone:
+        to_zone = calculate_distance_meters(zone["lat"], zone["lon"], anchor["lat"], anchor["lon"])
+        st.caption(f"โซนพาณิชย์ใหญ่สุดในวงศึกษา ≈ {zone['area_km2']:.2f} ตร.กม. "
+                   f"(ห่างจาก anchor นี้ {to_zone:,.0f} ม. จากจุดกึ่งกลางโซน)")
+    st.caption(f"ดึงภาพ {fetch.get('requests', 0)} คำขอ · จากแคช {fetch.get('cache_hits', 0)} · "
+               f"{fetch.get('seconds', 0.0):.1f} วินาที"
+               + (f" · ข้ามเพราะเกินโควตา {fetch['skipped_over_budget']}"
+                  if fetch.get("skipped_over_budget") else ""))
+    st.checkbox("ใช้ Evidence Anchor คำนวณ Rent Gradient", key="rent_use_evidence_anchor",
+                on_change=_on_rent_anchor_toggle,
+                help="ค่าเริ่มต้น: Rent ใช้ anchor ① Composite — ติ๊กเมื่อยอมรับหลักฐานผังเมือง/แปลงที่ดินแล้ว")
+    with st.expander("รายละเอียดหลักฐาน (ผู้สมัคร + ภาพ)"):
+        st.dataframe([
+            {
+                "อันดับ": c["rank"], "node": c["node_id"],
+                "Evidence": None if c["evidence_score"] is None else round(c["evidence_score"], 3),
+                "ถนน": round(c["road_signal"], 3),
+                "แปลง": (round(c["parcel"]["score"], 3) if c["parcel"].get("data") else None),
+                "ตึกแถว%": (round(100 * c["parcel"]["shophouse_share"]) if c["parcel"].get("data") else None),
+                "ผังเมือง": (round(c["zoning"]["zoning_intensity"], 3) if c["zoning"].get("data") else None),
+                "ในโซนพาณิชย์": bool(c["zoning"].get("in_commercial")),
+                "anchor ถนน": "①" if c["is_composite_anchor"] else ("②" if c["is_closeness_anchor"] else ""),
+            }
+            for c in evidence["candidates"]
+        ], hide_index=True)
+        windows, px = evidence["windows"], evidence["windows"]["px"]
+        left, right = st.columns(2)
+        for column, layer, key, title in (
+                (left, EVIDENCE_CONFIG["parcel_layer"], "parcel_m", "รูปแปลงที่ดิน (dol)"),
+                (right, EVIDENCE_CONFIG["plan_layer"], "plan_m", "ผังเมืองรวม (cityplan_dpt)")):
+            image = load_cached_wms_image(
+                layer, _wms_window(anchor["lat"], anchor["lon"], windows[key]), px)
+            if image is not None:
+                column.image(_evidence_thumbnail(image), caption=f"{title} · {windows[key] / 1000:g} กม.")
+        st.download_button("ดาวน์โหลด Evidence JSON", json.dumps(evidence, ensure_ascii=False, indent=2),
+                           "automated_cbd_evidence.json", "application/json")
+
+
 def _render_sidebar_anchor_panel(locked: bool) -> bool:
     """One button, one road download, both anchors (Composite + Closeness 100%)."""
     with st.expander("🎯 Automated CBD Anchor", expanded=True):
@@ -4036,14 +4130,26 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                 st.session_state.anchor_lon = center_lon
         st.number_input("รัศมีพื้นที่ศึกษา (กม.)", 4.0, 20.0,
                         key="anchor_radius_km", step=1.0, disabled=locked)
+        st.checkbox(
+            "🗺️ ใช้ผังเมืองรวม + รูปแปลงที่ดิน ยืนยันผู้สมัคร (ทดลอง)",
+            key="anchor_use_evidence", disabled=locked,
+            help=(
+                "หลังหา anchor จากถนน จะดึงภาพผังเมืองรวม (cityplan_dpt) และรูปแปลงที่ดิน (dol) "
+                "รอบผู้สมัคร ~12 จุด เพื่อตรวจว่าอยู่ในโซนพาณิชย์/แปลงเล็กถี่แบบตึกแถวหรือไม่ "
+                "แล้วให้ความเชื่อมั่น — ภาพถูกแคชบนดิสก์ ถ้าดึงไม่ได้จะใช้ผลจากถนนอย่างเดียว"
+            ),
+        )
 
         context = _anchor_search_context()
         result = st.session_state.get(StateManager.K_AUTO_ANCHOR)
         closeness_result = st.session_state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
+        evidence_result = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
         if ((result and not _anchor_context_matches(result.get("context"), context))
                 or (closeness_result
-                    and not _anchor_context_matches(closeness_result.get("context"), context))):
-            StateManager.clear_results(["anchor", "anchor_closeness"])
+                    and not _anchor_context_matches(closeness_result.get("context"), context))
+                or (evidence_result
+                    and not _anchor_context_matches(evidence_result.get("context"), context))):
+            StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
             st.rerun()
 
         if not HAS_SCIPY:
@@ -4065,6 +4171,11 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
             st.caption("Score = Closeness อย่างเดียว (ระยะถนนเป็นเมตร) ทุก road node เป็น candidate; "
                        "Rent Gradient ยังคงใช้ตัวที่ ①")
             _anchor_summary("closeness", closeness_result, diagnostics=True)
+        if evidence_result:
+            st.markdown("##### ③ Evidence (ผังเมือง + รูปแปลงที่ดิน)")
+            _evidence_summary(evidence_result, result)
+        elif result and st.session_state.get("anchor_use_evidence"):
+            st.caption("เปิดตัวเลือกหลักฐานแล้ว — กดค้นหาอีกครั้ง (ใช้ถนนจากแคช) เพื่อตรวจผังเมือง/แปลงที่ดิน")
         shown = result or closeness_result
         if shown:
             timings = shown.get("timings", {})
@@ -4077,13 +4188,13 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
             )
             st.download_button(
                 "ดาวน์โหลด Anchor JSON",
-                json.dumps({"composite": result, "closeness": closeness_result},
-                           ensure_ascii=False, indent=2),
+                json.dumps({"composite": result, "closeness": closeness_result,
+                            "evidence": evidence_result}, ensure_ascii=False, indent=2),
                 "automated_cbd_anchors.json",
                 "application/json",
             )
             if st.button("ล้าง Anchor ที่ค้นหาไว้", disabled=locked):
-                StateManager.clear_results(["anchor", "anchor_closeness"])
+                StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
                 st.rerun()
         return run_anchor
 
@@ -4308,6 +4419,36 @@ def render_map() -> Optional[Dict[str, Any]]:
             ),
             icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
         ).add_to(m)
+
+    evidence = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
+    if evidence and evidence.get("evidence_anchor"):
+        anchor, confidence = evidence["evidence_anchor"], evidence["confidence"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor — Evidence",
+            popup=folium.Popup(
+                f"<b>Automated CBD Anchor — Evidence</b><br>Confidence: {confidence['level']}"
+                f"<br>Evidence score: {anchor['score']:.3f}"
+                f"<br>Coverage: {anchor['coverage']:.0%}"
+                + "".join(f"<br>• {reason}" for reason in confidence["reasons"]), max_width=360),
+            icon=folium.Icon(color="purple", icon="star", prefix="fa"),
+        ).add_to(m)
+        candidate_layer = folium.FeatureGroup(name="Evidence candidates", show=False)
+        for cand in evidence["candidates"]:
+            score = "n/a" if cand["evidence_score"] is None else f"{cand['evidence_score']:.3f}"
+            folium.CircleMarker(
+                [cand["lat"], cand["lon"]], radius=6, color="#7b2cbf", fill=True, fill_opacity=0.6,
+                tooltip=f"#{cand['rank']} evidence {score} (node {cand['node_id']})",
+            ).add_to(candidate_layer)
+        candidate_layer.add_to(m)
+        zone = evidence.get("commercial_zone")
+        if zone:
+            zone_layer = folium.FeatureGroup(name="Largest commercial zone (city plan)", show=False)
+            folium.Circle(
+                [zone["lat"], zone["lon"]], radius=max(50.0, (zone["area_km2"] * 1e6 / 3.14159265) ** 0.5),
+                color="#d62828", fill=False, dash_array="6",
+                tooltip=f"โซนพาณิชย์ใหญ่สุด ≈ {zone['area_km2']:.2f} ตร.กม. (วงกลมเทียบพื้นที่)",
+            ).add_to(zone_layer)
+            zone_layer.add_to(m)
 
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
@@ -5296,7 +5437,16 @@ def perform_automated_anchor() -> None:
                         "n_samples": fitted["n_samples"],
                     }
                 published[state_key] = result
-            st.session_state.update(published)  # both anchors become visible together
+            published[StateManager.K_AUTO_ANCHOR_EVIDENCE] = None
+            if st.session_state.get("anchor_use_evidence"):
+                with st.spinner("กำลังตรวจผังเมืองรวมและรูปแปลงที่ดินของผู้สมัคร…"):
+                    legend, legend_source = load_cityplan_legend()
+                    evidence = run_evidence_stage(
+                        found, tuple(context["study_center"]), context["study_radius_m"],
+                        legend=legend, legend_source=legend_source)
+                    evidence["context"] = context
+                    published[StateManager.K_AUTO_ANCHOR_EVIDENCE] = evidence
+            st.session_state.update(published)  # all anchors become visible together
             StateManager.clear_results(["rent"])
             perform_rent_gradient(quiet=True)
     except Exception as exc:
@@ -5305,10 +5455,25 @@ def perform_automated_anchor() -> None:
     st.rerun()
 
 
+def _rent_anchor_input() -> Optional[Dict[str, Any]]:
+    """Anchor handed to the Rent Gradient: the composite one, or the evidence anchor on opt-in."""
+    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    evidence = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
+    if (automated and evidence and evidence.get("evidence_anchor")
+            and st.session_state.get("rent_use_evidence_anchor")):
+        return {**automated, "anchor": dict(evidence["evidence_anchor"])}
+    return automated
+
+
+def _on_rent_anchor_toggle() -> None:
+    StateManager.clear_results(["rent"])
+    perform_rent_gradient(quiet=True)
+
+
 def perform_rent_gradient(quiet: bool = False) -> None:
     """Orchestrate Rent Gradient computation (pure math — ไม่มี API call)."""
     iso_data = StateManager.get_isochrone_data()
-    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    automated = _rent_anchor_input()
     if not iso_data and not automated:
         if not quiet:
             st.error("❌ กรุณาคำนวณ Isochrone หรือค้นหา Automated Anchor ก่อน")
