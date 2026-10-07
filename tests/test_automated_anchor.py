@@ -127,10 +127,13 @@ def test_global_certificate_is_independent_of_seed_and_includes_every_candidate(
     assert {r["anchor"]["node_id"] for r in results} == {"60"}
 
 
-def test_large_graph_local_only_is_explicit():
+def test_large_graph_is_screened_not_certified_and_says_so():
     result = search(road_grid(size=21), restarts=1, max_evaluations=200)
     assert not result["globally_certified"]
-    assert result["certification"] == "local-only"
+    assert result["certification"] == "pivot-screened-exact-top-k"
+    assert result["method"] == "arps-pivot-screened-exact-scipy"
+    assert result["screening"]["pivots"] > 0 and result["screening"]["screened_top_k"] > 0
+    assert result["evaluated_nodes"] <= 200  # the screen never exceeds the budget
     assert any("global optimum" in w for w in result["warnings"])
 
 

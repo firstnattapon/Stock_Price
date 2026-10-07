@@ -9,6 +9,10 @@
 | สิ่งที่ตรวจเชิงประจักษ์ | (1) ทดลอง `networkx 3.7` กับ MultiGraph จำลองเพื่อยืนยัน F1 (2) คำนวณตัวเลขซ้ำจาก benchmark JSON เพื่อยืนยัน F3 |
 | แผนภาพคู่กัน | [`rent-gradient-principles-review.mmd`](rent-gradient-principles-review.mmd) |
 
+> **สถานะ (อัปเดตหลังแก้ไข):** หัวข้อ 1–7 เป็นผลรีวิวตามโค้ด ณ commit `80cf8ed` และคงไว้เป็นบันทึกต้นฉบับ
+> ข้อค้นพบส่วนใหญ่แก้แล้ว — ดูหัวข้อ **8** สำหรับสิ่งที่เปลี่ยน หลักฐาน และสิ่งที่ตั้งใจไม่แก้
+> (F8 คงเดิมตามเจ้าของ; F6/F7/F11/F15 อยู่นอกแผน)
+
 ไฟล์นี้ทำ 3 อย่างพร้อมกัน: Bid-Rent (Alonso–Muth–Mills) → หา CBD anchor จากโครงข่ายถนน → วิเคราะห์ Network
 เพื่อคัดทำเลที่ดิน ("Golden Spots", "Value Gap")
 
@@ -44,24 +48,24 @@
 
 ## 2. แผนผังหลักการและผลรีวิว
 
-แผนภาพเดียวกับไฟล์ [`.mmd`](rent-gradient-principles-review.mmd) (render บน GitHub ได้โดยตรง)
-ป้าย **[OK]** ออกแบบดี · **[ASSUME]** เป็นสมมติฐาน · **[RISK]** ความเสี่ยงเชิงวิธีการ · **[BUG]** ผิดจริง ·
-เลข `F#` ตรงกับตารางข้อค้นพบหัวข้อ 5
+แผนภาพเดียวกับไฟล์ [`.mmd`](rent-gradient-principles-review.mmd) (render บน GitHub ได้โดยตรง) — แสดง **สถานะหลังแก้ไข**
+ป้าย **[OK]** ดีอยู่แล้ว · **[FIXED]** แก้แล้ว · **[OPEN]** ยังเปิด · **[ASSUME]** เป็นสมมติฐาน ·
+เลข `F#` ตรงกับตารางข้อค้นพบหัวข้อ 5 และสถานะหัวข้อ 8
 
 ```mermaid
 ---
-title: "Rent_Gradient.py — หลักการ + ผลรีวิว   [OK] ดี · [ASSUME] สมมติฐาน · [RISK] เสี่ยง · [BUG] ผิดจริง"
+title: "Rent_Gradient.py — หลักการ + สถานะหลังแก้   [FIXED] แก้แล้ว · [OPEN] ยังเปิด · [ASSUME] สมมติฐาน · [OK] ดีอยู่แล้ว"
 ---
-%% สอดคล้องกับ docs/rent-gradient-principles-review.md — เลข F# อ้างอิงตารางข้อค้นพบใน .md
+%% สอดคล้องกับ docs/rent-gradient-principles-review.md — เลข F# อ้างอิงตารางข้อค้นพบ (หัวข้อ 5) และสถานะหลังแก้ (หัวข้อ 8)
 flowchart TD
 
     %% ---------------- อินพุต ----------------
     subgraph IN["อินพุต"]
         direction LR
         MK["หมุด / พิกัดศึกษา<br/>study centre + radius"]
-        ISO["Isochrone จาก Geoapify<br/>perform_calculation"]
-        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>ผ่าน Overpass + pkl cache"]
-        OSMN["OSM roads: union ของ isochrone<br/>perform_network_analysis"]
+        ISO["Isochrone จาก Geoapify<br/>perform_calculation<br/>[OPEN] F8 API key ค้างในซอร์ส — คงเดิมตามเจ้าของ"]
+        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>ผ่าน Overpass + pkl cache<br/>[FIXED] F9 allow-list unpickler · F10 lock แคบลง"]
+        OSMN["OSM roads: union ของ isochrone<br/>perform_network_analysis<br/>[FIXED] F12 เก็บ coverage polygon"]
         SMP["ตัวอย่างราคาจริง (ถ้ามี)<br/>lat, lon, rent"]
     end
 
@@ -71,15 +75,15 @@ flowchart TD
     %% ---------------- หลักการ 1: ตำแหน่ง CBD ----------------
     subgraph P1["หลักการ 1 — จุดยึด CBD (anchor)"]
         direction TB
-        A0["Composite anchor<br/>0.5·C_norm + 0.3·D_norm + 0.2·J_norm<br/>[RISK] F3 น้ำหนักจริงของ closeness ต่ำกว่า 50%"]
+        A0["Composite anchor — rank-v2<br/>0.5·C_rank + 0.3·D_rank + 0.2·J_rank<br/>[FIXED] F3 น้ำหนักจริงใกล้ 50/30/20 และรายงานใน UI"]
         CERT{"candidates ≤ 2048 ?"}
         EX["exhaustive audit<br/>certified เฉพาะ objective + กราฟนี้<br/>[OK] ผลไม่ขึ้นกับ seed"]
-        LO["local-only<br/>pattern search 8 ทิศ + halve radius<br/>[RISK] F16 ผลขึ้นกับ seed"]
+        LO["pivot-screened + exact top-K + local climb<br/>ไม่ใช่ certificate<br/>[FIXED] F16 seed-stable บนกราฟจริง"]
         A1["Closeness 100%<br/>network 1-median ทุกโหนด<br/>[OK] สมการสะอาด — ใช้เทียบเท่านั้น"]
         A2["CBD Zone centroid<br/>จุดตัด isochrone"]
         A3["Integration Center<br/>top node closeness"]
         A4["centroid Travel Areas<br/>หรือ ค่าเฉลี่ยหมุด"]
-        RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ"]
+        RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ<br/>UI เตือน + scripts/anchor_sensitivity.py · ground truth [OPEN]"]
         A0 --> CERT
         CERT -- "ใช่" --> EX
         CERT -- "ไม่" --> LO
@@ -100,8 +104,8 @@ flowchart TD
     subgraph P3["หลักการ 3 — Network analysis (OSM)"]
         direction TB
         CL["Weighted closeness บน LCC<br/>exact ≤ 3000 โหนด / pivot k=600<br/>[OK] seed คงที่ ทำซ้ำได้"]
-        BT["Edge betweenness<br/>exact ≤ 2000 / sample k=400<br/>[BUG] F1 key (u,v,k) ไม่ตรง (u,v) → ค่า 0 ทุกเส้น"]
-        GL["Golden Land score<br/>0.5·C + 0.3·D + 0.2·(1 − B)<br/>[BUG] F1 เทอม (1 − B) คงที่ = 1"]
+        BT["Edge betweenness<br/>exact ≤ 2000 / sample k=400<br/>[FIXED] F1 รวม key (u,v,k) เป็นคู่ (u,v) ด้วย max"]
+        GL["Golden Land score<br/>0.5·C + 0.3·D + 0.2·(1 − B)<br/>[FIXED] F1 เทอม (1 − B) ไม่คงที่แล้ว"]
         CL --> GL
         BT --> GL
     end
@@ -113,9 +117,9 @@ flowchart TD
     %% ---------------- หลักการ 2: Bid-Rent ----------------
     subgraph P2["หลักการ 2 — Bid-Rent (Alonso–Muth–Mills)"]
         direction TB
-        DM["d_max จาก bbox corners ของ isochrone<br/>[RISK] F6 เกินจริงได้ถึง √2 เท่า"]
+        DM["d_max จาก bbox corners ของ isochrone<br/>[OPEN] F6 เกินจริงได้ถึง √2 เท่า (นอกแผน)"]
         FIT{"ตัวอย่าง ≥ 2 จุด<br/>และระยะต่างกัน ?"}
-        OLS["log-linear OLS<br/>ln R = ln R0 − λ·d<br/>[RISK] F4 n = 2 ได้ R² = 1 เสมอ"]
+        OLS["log-linear OLS<br/>ln R = ln R0 − λ·d<br/>[FIXED] F4 SE / 95% CI / adj-R² + เตือนเมื่อ n < 5"]
         IDX["โหมดดัชนี<br/>R0 = 100, λ = ln 4 / d_max<br/>[ASSUME] ไม่ได้ calibrate จากข้อมูล"]
         MOD["R(d) = R0 · e^(−λ·d)   d½ = ln 2 / λ<br/>d = haversine จาก anchor<br/>[ASSUME] F7 ระยะเส้นตรง, monocentric"]
         DM --> IDX
@@ -132,11 +136,11 @@ flowchart TD
     %% ---------------- เอาต์พุต ----------------
     subgraph OUT["เอาต์พุต"]
         direction TB
-        CRV["Bid-Rent Curve<br/>+ เส้น d½"]
+        CRV["Bid-Rent Curve<br/>+ เส้น d½ + ช่วงเชื่อมั่น"]
         RNG["Rent Rings + Rent Heat<br/>6 วงระยะเท่ากัน สีตามค่า ณ กึ่งกลางวง"]
-        RRP["Ring Report<br/>[RISK] F12 โหนด/km² หารด้วยพื้นที่วงเต็ม"]
-        VG["Value Gap = C̄ − R(d)/R0<br/>[RISK] F5 คนละสเกล, โหมดดัชนีเอนเอียงออกนอก"]
-        GS["Golden Spots top 10<br/>[RISK] F13 ไม่มี spatial dedup"]
+        RRP["Ring Report<br/>[FIXED] F12 โหนด/km² หารด้วยพื้นที่วง ∩ coverage"]
+        VG["Value Gap = C̄ − R(d)/R0<br/>[FIXED] F5 ซ่อนในโหมดดัชนี<br/>[ASSUME] โหมด calibrated ยังต่างสเกล — ใช้เป็นตัวชี้นำ"]
+        GS["Golden Spots top 10<br/>[FIXED] F13 NMS ระยะห่าง ≥ 150 m"]
     end
 
     MOD --> CRV
@@ -150,16 +154,16 @@ flowchart TD
 
     %% ---------------- สไตล์ ----------------
     classDef ok fill:#e6f4ea,stroke:#1e7a3c,color:#0b3d1e
-    classDef risk fill:#fff4d6,stroke:#b27a00,color:#4a3300
-    classDef bug fill:#fde7e9,stroke:#c0262d,color:#5c0a0e
+    classDef fixed fill:#d9f2e0,stroke:#1e7a3c,color:#0b3d1e,stroke-width:2px
+    classDef open fill:#fff4d6,stroke:#b27a00,color:#4a3300
     classDef assume fill:#e8eefc,stroke:#3b5bb5,color:#14264f
     classDef plain fill:#f5f5f5,stroke:#8a8a8a,color:#222
 
     class EX,CL,A1 ok
-    class A0,LO,DM,OLS,RRP,VG,GS risk
-    class BT,GL bug
+    class A0,LO,BT,GL,OLS,RRP,VG,GS,OSMA,OSMN fixed
+    class DM,ISO open
     class RES,IDX,MOD assume
-    class MK,ISO,OSMA,OSMN,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
+    class MK,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
 ```
 
 ---
@@ -417,6 +421,54 @@ lookup : [0.5, 0.5, 0.5]                                                      # 
 | ผลกระทบต่อ UI ของ F1 (สี/ความหนาเส้นแบน) | **อนุมานจากโค้ด** ไม่ได้รัน UI | L2020–2046 |
 | Value Gap เอนบวกในวงนอกสำหรับโหมดดัชนี | **อนุมานเชิงโครงสร้าง** (ดิสก์สม่ำเสมอ 0.59 เทียบ 0.25) ไม่ได้วัดกับข้อมูลจริง | §4.4 |
 | anchor ใกล้ CBD จริง / การปรับปรุงของ rent fit | **ยังไม่ทราบ** — ต้องใช้ข้อมูลอิสระ (เอกสารเดิมระบุเช่นเดียวกัน) | benchmark `limitations` |
+
+---
+
+## 8. สถานะหลังแก้ไข
+
+ทดสอบด้วย `pytest tests` — **59 ผ่าน** (30 เดิม + 29 ใหม่ใน `tests/test_rent_gradient_principles.py`);
+ทดสอบใหม่ 24 จาก 29 ข้อล้มบนโค้ดก่อนแก้ (อีก 5 ข้อตรวจพฤติกรรมที่ไม่เปลี่ยน) จึงจับ regression ได้จริง
+
+| ID | สถานะ | สิ่งที่เปลี่ยน | หลักฐาน |
+| --- | --- | --- | --- |
+| F1 | ✅ แก้แล้ว | `edge_scores_by_pair()` รวม key `(u,v,k)` เป็น `(u,v)` ด้วย `max` ใช้ทั้งชั้นแผนที่ Betweenness และ Golden Land | test บน MultiGraph ที่มี parallel edge: low-traffic term ไม่คงที่, สีเส้นต่างกัน |
+| F2 | 🟡 บรรเทา | กล่องเตือนใน UI ว่าเป็น "ศูนย์กลางเชิงโครงข่าย" + `scripts/anchor_sensitivity.py` (รัศมี ×0.8/×1.2, ขยับศูนย์ 20% ×4 ทิศ) | กราฟจริง 8 km: composite ขยับสูงสุด 379 m, Closeness 100% สูงสุด 2.3 km. **ยังเปิด:** ground truth จากข้อมูลภายนอก |
+| F3 | ✅ แก้แล้ว | composite = rank-v2: degree/density เป็น mid-rank percentile, closeness เป็น Φ(z) จาก reference sample คงที่; ผลลัพธ์รายงาน `effective_weights` และ `winner_contribution` | กราฟจริง 2 ชุด: น้ำหนักจริงของ closeness ≈ 27% → ≈ 56%, density ≈ 45–49% → ≈ 23% (ประกาศ 50/20) |
+| F4 | ✅ แก้แล้ว | fit คืน SE ของ λ, 95% CI ของ λ และ d½, adjusted R², `dof`, `low_confidence` (n < 5); ป้าย "calibrated (n=…, R²=…)" แทน "calibrated"; n = 2 แสดง "R² ไม่มีความหมาย" | SE ตรงกับ `scipy.stats.linregress`; UI test ยืนยันคำเตือน n < 5 |
+| F5 | 🟡 แก้บางส่วน | ซ่อนคอลัมน์ Value Gap ในโหมดดัชนีทั้ง Ring Report และ Golden Spots พร้อมคำอธิบาย | **ยังเปิด:** โหมด calibrated ยังเป็นผลต่างของสองสเกล — ใช้เป็นตัวชี้นำเชิงเปรียบเทียบเท่านั้น |
+| F8 | ⏸ คงเดิม | **ไม่แก้ตามที่เจ้าของระบุ** (คีย์ยังอยู่ในซอร์ส/config) | — |
+| F9 | ✅ แก้แล้ว | อ่าน cache/bundle ผ่าน allow-list unpickler (`safe_pickle_loads`), ตรวจชื่อไฟล์ด้วย regex, จำกัดขนาด, บันทึกแบบ atomic, import แล้ว serialise ใหม่ | bundle จริงของ repo (`osmnx_cache.zip`) ยัง import ได้; pickle อันตราย (`os.system`) ถูกบล็อก ไม่สร้างไฟล์; ชื่อ `../` ถูกข้าม. **ยืนยันช่องโหว่เดิม:** เมื่อรัน test เดียวกันกับโค้ดก่อนแก้ payload ถูกรันจริง (ไฟล์ marker ถูกสร้าง) |
+| F10 | ✅ แก้แล้ว | ตรวจแคชก่อนเข้า `_OVERPASS_LOCK` แล้วตรวจซ้ำในล็อก | test: cache hit ไม่รอ lock ที่ถูกถือ ส่วน cache miss ยังถูก serialise |
+| F12 | ✅ แก้แล้ว | network result เก็บ `coverage_geojson`; Ring Report หารความหนาแน่นด้วยพื้นที่ (วงแหวน ∩ coverage) และเพิ่มคอลัมน์ "พื้นที่ครอบคลุม (km²)" (ผลเก่าที่ไม่มี coverage ใช้พื้นที่วงเต็มเหมือนเดิม) | test: disc 3 km → ริงที่ 4–6 มีพื้นที่ ≈ 0 |
+| F13 | ✅ แก้แล้ว | Golden Spots ใช้ greedy NMS ระยะห่าง ≥ 150 m (`golden_land_min_spacing_m`, ตั้ง 0 เพื่อปิด) | test: คลัสเตอร์ 5 โหนดเหลือ 1 จุดใน top-3 |
+| F14 | 🟡 แก้บางส่วน | เพิ่ม test สำหรับ fit, rings/report, closeness (exact/pivot), golden/betweenness, cache import, sensitivity, UI | ไม่ได้ครอบ `import_bundle_zip` ทั้งเส้น (ผูกกับ `st.session_state`) |
+| F16 | 🟡 บรรเทา | เกินงบ → คัดด้วย pivot closeness (reference 256 จุด seed คงที่) → ประเมิน exact top-256 → ไต่เฉพาะที่; `certification = pivot-screened-exact-top-k` | กราฟจริง 1,115 candidates, งบ 150, 20 seed เดี่ยว: **เดิม 10 anchor ต่างกัน ห่างสุด 15.7 km (ห่างคำตอบ exhaustive 13.1 km) → ใหม่ 1 anchor, 0 m, ตรง exhaustive** |
+| F6, F7, F11, F15 | ⏭ นอกแผน | ไม่ได้แก้ | — |
+
+### สิ่งที่ทำต่างจากแผนเดิม (และเหตุผล)
+
+1. **F3 — ไม่ใช้ตัวเลือก "x₀ จาก median ของ pivot".** ความชันของ `C/(C+x₀)` รอบ `C≈x₀` คือ 0.25 ต่อการเปลี่ยนสัมพัทธ์
+   ไม่ว่า x₀ จะเป็นเท่าใด (แค่เลื่อนจุดศูนย์กลาง) จึงไม่แก้การบีบช่วง — ใช้ทางเลือก percentile/rank แทน
+   และให้ closeness ใช้ Φ(z) แทน percentile ตรง ๆ เพราะ percentile จาก sample จะเกิดที่ราบ (plateau)
+   ในกลุ่มผู้สมัครอันดับบนสุด ซึ่งเป็นกลุ่มที่ต้องการแยกแยะมากที่สุด
+2. **F9 — ใช้ allow-list unpickler แทน GraphML/HMAC.** bundle ที่มีอยู่ใน repo และที่ดึงจาก GitHub เป็น `.pkl`;
+   HMAC ต้องมีความลับร่วมซึ่งไม่มีสำหรับไฟล์จากภายนอก และ GraphML จะทำให้ bundle เดิมใช้ไม่ได้.
+   ข้อจำกัด: ยังเป็น pickle — allow-list ปิดการรันโค้ดตามอำเภอใจ แต่ **ไม่พิสูจน์ตัวผู้ส่ง**
+   (ข้อมูลกราฟที่ถูกแก้ยังโหลดได้) ถ้าต้องการ authenticity ต้องเซ็นไฟล์แยก
+3. **F4 — ไม่ปิดกั้นเมื่อ n < 5** แต่คำนวณต่อพร้อมคำเตือนชัดเจน (แผนระบุ "หรืออย่างน้อยเตือนชัด")
+4. **F2 — ไม่เปลี่ยนชื่อปุ่ม/`source` "Automated CBD Anchor"** เพราะ test และ config ที่บันทึกไว้อ้างชื่อนี้ และการพิสูจน์
+   ที่จะอนุญาตให้ใช้คำว่า CBD ต้องใช้ข้อมูลภายนอกที่ยังไม่มี — เปลี่ยนได้ทันทีเมื่อมีผลตรวจสอบ
+5. **พบระหว่างแก้:** test เดิม 5 ข้อล้มอยู่แล้วก่อนแก้ในสภาพแวดล้อมนี้ — จุดบนวงรัศมี 500 m ของกริดทดสอบมีระยะ
+   `500 ± 1e-9 m` หลังแปลงพิกัด (ขึ้นกับ pyproj) จึงนับเข้า/ออกวงแบบสุ่ม — แก้ด้วยค่าเผื่อ `1e-6 m` ในการนับ
+   ความหนาแน่น (ไม่เปลี่ยนความหมายทางเรขาคณิต)
+6. test เดิม `test_large_graph_local_only_is_explicit` ถูกเปลี่ยนเป็น `..._is_screened_not_certified_and_says_so`
+   เพราะป้าย `local-only` ถูกแทนด้วย `pivot-screened-exact-top-k` (ยังเป็น `globally_certified = false`)
+
+### ข้อจำกัดของหลักฐานหลังแก้
+
+- ตัวเลข "ก่อน/หลัง" ของ F3 และ F16 วัดบนกราฟถนนจริงเพียง 2 ชุดใน repo (เชียงของ) — ไม่ได้พิสูจน์ว่าได้ผลเท่ากันกับเมืองอื่น
+- ผล benchmark เดิมใน `docs/cbd-anchor-benchmark.json` บันทึกก่อนเปลี่ยน scoring และไม่มีกราฟต้นทางใน repo จึงยังไม่ได้ทำซ้ำ (ระบุไว้ในไฟล์แล้ว)
+- ยังไม่ได้รัน UI จริงกับ Overpass/Geoapify; ทดสอบ UI ด้วย `streamlit.testing` และกราฟจำลอง/กราฟในแคชเท่านั้น
 
 อ้างอิงทฤษฎี: Alonso (1964), Mills (1967), Muth (1969) — ต้นกำเนิดโมเดล Bid-Rent แบบ monocentric;
 Eppstein & Wang (2004) — การประมาณ closeness ด้วย pivot sampling

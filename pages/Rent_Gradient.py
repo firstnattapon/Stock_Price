@@ -31,6 +31,7 @@ import time
 import hashlib
 import pickle
 import os
+import re
 import threading
 from pathlib import Path
 import zipfile
@@ -137,6 +138,7 @@ NETWORK_CONFIG: Dict[str, Any] = {
     "closeness_exact_threshold": 3000,
     "closeness_k_pivots": 600,
     "golden_land_top_n": 10,
+    "golden_land_min_spacing_m": 150.0,  # ไม่เลือกสองจุดที่ใกล้กว่านี้ (กันผลซ้ำที่ทางแยกเดียว)
     "golden_land_weights": {
         "closeness": 0.50,
         "degree": 0.30,
@@ -153,6 +155,13 @@ ANCHOR_CONFIG: Dict[str, Any] = {
     "max_evaluations": 2048,
     "max_nodes": 100000,
     "batch_size": 16,
+    # Fixed, seed-independent reference sample of destinations. Its exact closeness
+    # values calibrate the composite normaliser, and its distance rows drive the
+    # pivot screening used when the exhaustive audit does not fit the budget.
+    # These rows are extra to (not counted in) ``max_evaluations``.
+    "reference_nodes": 256,
+    "reference_seed": 0,
+    "screen_top_k": 256,
 }
 
 # OSMnx uses one process-global Overpass URL. Keep downloads serialized while
@@ -178,6 +187,7 @@ RENT_CONFIG: Dict[str, Any] = {
     "ring_fill_opacity": 0.16,
     "curve_points": 80,         # ความละเอียดเส้นโค้ง Bid-Rent
     "min_lambda": 1e-6,
+    "min_reliable_samples": 5,  # ต่ำกว่านี้ R²/λ ยังไม่น่าเชื่อถือ (2 จุด → R² = 1 เสมอ)
     "default_d_max_km": 5.0,
     "min_d_max_km": 0.3,
 }
@@ -627,9 +637,15 @@ def automated_coarse_to_fine_anchor(
     neighbours; density counts them within 500 metric metres (no POI data).
     All inside road nodes remain shortest-path destinations.
 
-    objective="composite" preserves the original candidate/scoring behaviour:
-    junctions are preferred (road-node fallback only when none exist), with
-    Score = .5*C_norm + .3*degree_norm + .2*density_norm.
+    objective="composite": junctions are preferred (road-node fallback only when
+    none exist), with Score = .5*C_rank + .3*degree_rank + .2*density_rank. Every
+    component is mapped onto a comparable 0..1 scale before weighting so the
+    nominal weights are the realised weights: degree/density are mid-rank
+    percentiles over the candidate pool, closeness is Phi((C-mean)/std) using
+    the exact closeness of a fixed reference sample. (The earlier bounded
+    transform C/(C+1/R) varied only ~0.25 per relative change of C, which let
+    junction density dominate a nominal 50% closeness weight.) All normalisers
+    are fixed functions of the graph: they never depend on the seed or probes.
 
     objective="closeness" is the second Closeness-100% anchor: every inside
     road node is a candidate and Score = C_norm. Degree and density are retained
@@ -640,12 +656,16 @@ def automated_coarse_to_fine_anchor(
     halves the radius on a plateau. The final neighbourhood is evaluated
     exhaustively with exact shortest paths. If every eligible node fits the
     evaluation budget, a final exhaustive audit certifies the global score
-    maximum independently of the seed. Otherwise convergence is only local.
+    maximum independently of the seed. Otherwise a seed-independent pivot
+    screen ranks every candidate from the reference sample's distances, the
+    top-K are scored exactly and refined by a local exhaustive climb; this is
+    far more stable than the restarts alone but is NOT a global certificate.
     Neither certificate proves an economic CBD. Resource exhaustion is explicit.
     """
     if not HAS_SCIPY:
         raise RuntimeError("Automated CBD search requires SciPy and NumPy.")
     from scipy.spatial import cKDTree
+    from scipy.special import ndtr
 
     started = time.perf_counter()
     anchor_study_polygon(*study_center, study_radius_m)
@@ -710,11 +730,24 @@ def automated_coarse_to_fine_anchor(
     tree = cKDTree(xy[candidates_inside])
     density = np.zeros(len(nodes))
     if len(junctions):
+        # Inclusive radius with a sub-micrometre tolerance: lattice points that sit
+        # exactly on the circle land at 500 ± 1e-9 m after the CRS round trip, so a
+        # bare "<= 500" would depend on pyproj/libm rounding rather than geometry.
         density = cKDTree(xy[junctions]).query_ball_point(
-            xy, ANCHOR_CONFIG["density_radius_m"], return_length=True
+            xy, ANCHOR_CONFIG["density_radius_m"] + 1e-6, return_length=True
         ).astype(float)
+    # Diagnostics (and the Closeness-100% record): share of the inside maximum.
     degree_norm = degrees / max(float(degrees[eligible].max()), 1.0)
     density_norm = density / max(float(density[eligible].max()), 1.0)
+
+    def pool_midrank(values):
+        """Mid-rank percentile of each value within the candidate pool, in (0, 1)."""
+        pool = np.sort(values[candidates_inside])
+        return (np.searchsorted(pool, values, side="left")
+                + np.searchsorted(pool, values, side="right")) / (2.0 * len(pool))
+
+    degree_rank = pool_midrank(degrees)
+    density_rank = pool_midrank(density)
     rows, cols, values = [], [], []
     for u, v, attrs in roads.edges(data=True):
         a, b = index[u], index[v]
@@ -723,27 +756,64 @@ def automated_coarse_to_fine_anchor(
         values.extend((attrs["length"], attrs["length"]))
     matrix = csr_matrix((values, (rows, cols)), shape=(len(nodes), len(nodes)))
     scores: Dict[int, Dict[str, Any]] = {}
+    weights = {"closeness": 0.50, "degree": 0.30, "density": 0.20}
+    batch_size = ANCHOR_CONFIG["batch_size"]
+    n_destinations = len(eligible)
+
+    # Fixed reference sample of destinations: exact closeness calibrates the
+    # composite normaliser and the summed distance rows power the pivot screen.
+    pivots: Dict[str, Any] = {}
+
+    def ensure_pivots():
+        if pivots:
+            return pivots
+        n_ref = min(len(eligible), int(ANCHOR_CONFIG["reference_nodes"]))
+        ref_rng = np.random.default_rng(ANCHOR_CONFIG["reference_seed"])
+        ref_nodes = np.sort(ref_rng.choice(eligible, size=n_ref, replace=False))
+        ref_c = np.empty(n_ref)
+        pivot_sum = np.zeros(len(nodes))
+        for start in range(0, n_ref, batch_size):
+            part = ref_nodes[start:start + batch_size]
+            rows_d = csgraph_dijkstra(matrix, directed=False, indices=part)
+            ref_c[start:start + len(part)] = (
+                (n_destinations - 1) / rows_d[:, eligible].sum(axis=1))
+            pivot_sum += rows_d.sum(axis=0)
+        pivots.update(nodes=ref_nodes, c=ref_c, sum=pivot_sum, k=n_ref,
+                      mean=float(ref_c.mean()), std=float(ref_c.std()))
+        return pivots
+
+    def closeness_component(c):
+        """Closeness mapped onto 0..1 (scalar or array), fixed for the whole search."""
+        if objective == "closeness":
+            return c / (c + 1.0 / study_radius_m)
+        ref = ensure_pivots()
+        if ref["std"] <= 0:
+            return np.full_like(np.asarray(c, dtype=float), 0.5)
+        return ndtr((c - ref["mean"]) / ref["std"])
+
+    if objective == "composite":
+        ensure_pivots()  # normaliser must exist before the first probe
 
     def evaluate(candidates):
         missing = sorted(set(int(i) for i in candidates) - scores.keys())
         if len(scores) + len(missing) > max_evaluations:
             raise ValueError("Search evaluation budget exceeded; reduce the area or restarts.")
-        for start in range(0, len(missing), ANCHOR_CONFIG["batch_size"]):
-            batch = missing[start:start + ANCHOR_CONFIG["batch_size"]]
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start:start + batch_size]
             distances = csgraph_dijkstra(matrix, directed=False, indices=batch)
-            closeness = (len(eligible) - 1) / distances[:, eligible].sum(axis=1)
+            closeness = (n_destinations - 1) / distances[:, eligible].sum(axis=1)
             for i, c in zip(batch, closeness):
-                cn = float(c / (c + 1.0 / study_radius_m))
-                objective_score = (
-                    cn if objective == "closeness"
-                    else 0.50 * cn + 0.30 * float(degree_norm[i])
-                         + 0.20 * float(density_norm[i])
-                )
+                cn = float(closeness_component(float(c)))
+                if objective == "closeness":
+                    objective_score, dn, jn = cn, float(degree_norm[i]), float(density_norm[i])
+                else:
+                    dn, jn = float(degree_rank[i]), float(density_rank[i])
+                    objective_score = (weights["closeness"] * cn
+                                       + weights["degree"] * dn + weights["density"] * jn)
                 scores[i] = {
                     "score": float(objective_score),
                     "closeness": float(c), "closeness_norm": cn,
-                    "degree_norm": float(degree_norm[i]),
-                    "density_norm": float(density_norm[i]),
+                    "degree_norm": dn, "density_norm": jn,
                     "degree": int(degrees[i]), "junction_count": int(density[i]),
                 }
 
@@ -800,11 +870,58 @@ def automated_coarse_to_fine_anchor(
         outcomes.append({"seed": location(int(seed)), "anchor": location(current),
                          "converged": converged, "iterations": iteration + 1,
                          "final_radius_m": radius})
-    # Real-road trials expose local traps even after radial contraction. For
-    # affordable graphs, certify the objective globally rather than imply that
-    # convergence alone establishes seed robustness. Reuse all ARPS distances.
+    # Real-road trials expose local traps even after radial contraction (the 50
+    # local endpoints of one 10 km study lay up to 18 km apart). For affordable
+    # graphs, certify the objective globally. Beyond the budget, rank every
+    # candidate with the seed-independent pivot sample, score the top-K exactly
+    # and climb locally from the best: stable, but explicitly not certified.
+    def screen_and_refine():
+        ref = ensure_pivots()
+        cand = np.asarray(candidates_inside)
+        # A pivot's own row sums d(p, p) = 0, so it averages over k - 1 others.
+        k_eff = ref["k"] - np.isin(cand, ref["nodes"]).astype(float)
+        approx_c = k_eff / np.maximum(ref["sum"][cand], 1e-9)
+        if objective == "closeness":
+            approx_score = approx_c
+        else:
+            approx_score = (weights["closeness"] * closeness_component(approx_c)
+                            + weights["degree"] * degree_rank[cand]
+                            + weights["density"] * density_rank[cand])
+        order = np.lexsort((cand, -approx_score))  # score desc, node index asc
+        room = max(0, max_evaluations - len(scores))
+        chosen, fresh = [], 0
+        for j in order[: int(ANCHOR_CONFIG["screen_top_k"])]:
+            node = int(cand[j])
+            if node not in scores:
+                if fresh >= room:
+                    continue  # budget is full; only already-scored nodes may join
+                fresh += 1
+            chosen.append(node)
+        if chosen:
+            evaluate(chosen)
+        current = max(scores, key=lambda i: (scores[i]["score"], -i))
+        refined = False
+        for _ in range(max_iterations):
+            around = [current] + [int(candidates_inside[j]) for j in
+                                  tree.query_ball_point(xy[current], final_radius_m)]
+            if len(scores) + len(set(around) - scores.keys()) > max_evaluations:
+                break
+            best = best_of(around)
+            if scores[best]["score"] > scores[current]["score"] + 1e-12:
+                current = best
+            else:
+                refined = True
+                break
+        return {"pivots": ref["k"], "screened_top_k": len(chosen),
+                "exact_evaluations": len(scores), "refine_converged": refined}
+
     globally_certified = len(candidates_inside) <= max_evaluations
-    winner = best_of(candidates_inside if globally_certified else final_indices)
+    screening = None
+    if globally_certified:
+        winner = best_of(candidates_inside)
+    else:
+        screening = screen_and_refine()
+        winner = max(scores, key=lambda i: (scores[i]["score"], -i))
     anchor = dict(
         location(winner),
         source=("Automated CBD Anchor — Closeness 100%"
@@ -812,7 +929,10 @@ def automated_coarse_to_fine_anchor(
     )
     warnings = []
     if not globally_certified:
-        warnings.append("กราฟเกินงบตรวจครบทุกโหนด: ยืนยันได้เฉพาะผลค้นหาเฉพาะที่ ไม่รับรอง global optimum")
+        warnings.append(
+            f"กราฟเกินงบตรวจครบทุกโหนด: คัดผู้สมัครด้วย pivot closeness ({screening['pivots']} จุด) "
+            f"แล้วประเมินแม่นยำ {screening['screened_top_k']} อันดับแรกและไต่ต่อเฉพาะที่ — "
+            "เสถียรกว่าการสุ่มเริ่มต้นเดี่ยว ๆ แต่ไม่รับรอง global optimum")
     if len(components) > 1:
         warnings.append(f"ใช้ component ใหญ่ที่สุด; ตัด {len(graph) - len(nodes)} โหนดที่ไม่เชื่อมต่อ")
     if not all(o["converged"] for o in outcomes):
@@ -824,12 +944,54 @@ def automated_coarse_to_fine_anchor(
         warnings.append("ไม่พบทางแยกในพื้นที่ศึกษา: ใช้โหนดถนนทั่วไปเป็นผู้สมัคร Anchor แทน")
     spread = max(calculate_distance_meters(anchor["lat"], anchor["lon"],
                  o["anchor"]["lat"], o["anchor"]["lon"]) for o in outcomes)
+
+    # Report the weights that actually move the ranking, not only the nominal ones.
+    if objective == "composite":
+        ref = ensure_pivots()
+        spread_c = (float(ndtr((ref["c"] - ref["mean"]) / ref["std"]).std())
+                    if ref["std"] > 0 else 0.0)
+        influence = {
+            "closeness": weights["closeness"] * spread_c,
+            "degree": weights["degree"] * float(degree_rank[candidates_inside].std()),
+            "density": weights["density"] * float(density_rank[candidates_inside].std()),
+        }
+        total_influence = sum(influence.values())
+        effective = {k: (v / total_influence if total_influence > 0 else weights[k])
+                     for k, v in influence.items()}
+        win = scores[winner]
+        contribution = {
+            "closeness": weights["closeness"] * win["closeness_norm"] / win["score"],
+            "degree": weights["degree"] * win["degree_norm"] / win["score"],
+            "density": weights["density"] * win["density_norm"] / win["score"],
+        } if win["score"] > 0 else dict(weights)
+        scoring = "rank-v2"
+        normalisation = {
+            "closeness": {"type": "normal-cdf-z", "mean": ref["mean"], "std": ref["std"],
+                          "reference_nodes": ref["k"]},
+            "degree": {"type": "mid-rank-percentile", "pool": len(candidates_inside)},
+            "density": {"type": "mid-rank-percentile", "pool": len(candidates_inside)},
+        }
+    else:
+        effective = {"closeness": 1.0, "degree": 0.0, "density": 0.0}
+        contribution = dict(effective)
+        scoring = "closeness-bounded"
+        normalisation = {"closeness": {"type": "C/(C+1/study_radius)"}}
+
+    method = ("arps-exact-scipy-closeness-100"
+              if objective == "closeness" else "arps-exact-scipy")
+    if screening:
+        method = method.replace("arps-exact-scipy", "arps-pivot-screened-exact-scipy")
     return {"anchor": anchor, "converged": all(o["converged"] for o in outcomes),
-            "method": ("arps-exact-scipy-closeness-100"
-                       if objective == "closeness" else "arps-exact-scipy"),
+            "method": method,
             "objective": objective, "density_source": "road-junctions-only",
             "globally_certified": globally_certified,
-            "certification": "exhaustive-fixed-objective" if globally_certified else "local-only",
+            "certification": ("exhaustive-fixed-objective" if globally_certified
+                              else "pivot-screened-exact-top-k"),
+            "screening": screening, "scoring": scoring,
+            "nominal_weights": dict(weights) if objective == "composite"
+                               else {"closeness": 1.0, "degree": 0.0, "density": 0.0},
+            "effective_weights": effective, "winner_contribution": contribution,
+            "normalisation": normalisation,
             "study_center": list(study_center), "study_radius_m": study_radius_m,
             "random_seed": int(random_seed), "restarts": outcomes, "trace": trace,
             "evaluated_nodes": len(scores), "graph_nodes": len(nodes),
@@ -931,17 +1093,40 @@ def calculate_intersection(
         return None
 
 
+def edge_scores_by_pair(
+    scores: Dict[Tuple[Any, ...], float]
+) -> Dict[Tuple[Any, Any], float]:
+    """Collapse edge scores keyed ``(u, v)`` or ``(u, v, key)`` onto ``sorted((u, v))``.
+
+    NetworkX returns 3-tuple keys for MultiGraph edge betweenness and credits
+    only one of several parallel edges, so the pair value is the maximum over
+    its keys. Looking such a dict up with a 2-tuple silently yields nothing.
+    """
+    pairs: Dict[Tuple[Any, Any], float] = {}
+    for key, value in scores.items():
+        pair = tuple(sorted(key[:2]))
+        if value > pairs.get(pair, float("-inf")):
+            pairs[pair] = value
+    return pairs
+
+
 def compute_golden_land_opportunities(
     graph: nx.MultiDiGraph,
     closeness_cent: Dict[Any, float],
     edge_betweenness_cent: Dict[Tuple[Any, Any], float],
     top_n: int = 10,
+    min_spacing_m: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
     Rank candidate nodes for "golden land" discovery.
 
     Principle / Equation:
     score = 0.50*closeness_norm + 0.30*degree_norm + 0.20*(1-edge_betweenness_norm)
+
+    Selection is greedy non-maximum suppression: a node is skipped when a
+    higher-ranked pick lies within ``min_spacing_m`` (default from
+    ``NETWORK_CONFIG``; ``0`` disables), so adjacent nodes of one junction
+    cluster cannot fill the whole top-N.
     """
     if not closeness_cent:
         return []
@@ -954,6 +1139,7 @@ def compute_golden_land_opportunities(
     if max_degree <= 0:
         max_degree = 1
 
+    edge_betweenness_cent = edge_scores_by_pair(edge_betweenness_cent)
     max_bet = max(edge_betweenness_cent.values()) if edge_betweenness_cent else 1.0
     if max_bet <= 0:
         max_bet = 1.0
@@ -1002,7 +1188,22 @@ def compute_golden_land_opportunities(
         )
 
     ranked.sort(key=lambda x: x["score"], reverse=True)
-    return ranked[:top_n]
+    spacing = (
+        NETWORK_CONFIG["golden_land_min_spacing_m"]
+        if min_spacing_m is None else float(min_spacing_m)
+    )
+    if spacing <= 0:
+        return ranked[:top_n]
+    picked: List[Dict[str, Any]] = []
+    for cand in ranked:
+        if len(picked) >= top_n:
+            break
+        if all(
+            calculate_distance_meters(cand["lat"], cand["lon"], p["lat"], p["lon"]) >= spacing
+            for p in picked
+        ):
+            picked.append(cand)
+    return picked
 
 
 def approx_geom_area_km2(geojson_geom: Dict[str, Any]) -> Optional[float]:
@@ -1036,6 +1237,23 @@ def rent_color_for_norm(norm: float) -> str:
     norm = max(0.0, min(1.0, norm))
     idx = int(round(norm * (len(RENT_RAMP) - 1)))
     return RENT_RAMP[idx]
+
+
+# Two-sided 95% Student-t critical values for small degrees of freedom.
+_T_CRIT_975: Dict[int, float] = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+    8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145,
+    15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+    25: 2.060, 30: 2.042, 40: 2.021, 60: 2.000, 120: 1.980,
+}
+
+
+def t_critical_95(dof: int) -> float:
+    """Two-sided 95% t quantile; interpolates conservatively (next-lower df)."""
+    if dof < 1:
+        return float("inf")
+    usable = [k for k in _T_CRIT_975 if k <= dof]
+    return _T_CRIT_975[max(usable)] if dof <= 120 else 1.960
 
 
 def fit_rent_gradient_from_samples(
@@ -1084,10 +1302,33 @@ def fit_rent_gradient_from_samples(
     ss_res = sum((p[1] - (intercept + slope * p[0])) ** 2 for p in pts)
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 1.0
 
+    # Uncertainty of the slope. With n = 2 the line is exact (no residual degrees
+    # of freedom), so R² = 1 carries no information and no interval exists.
+    dof = n - 2
+    adj_r2: Optional[float] = None
+    lam_se: Optional[float] = None
+    lam_ci95: Optional[Tuple[float, float]] = None
+    half_dist_ci95: Optional[Tuple[float, float]] = None
+    if dof > 0:
+        if ss_tot > 1e-12:
+            adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / dof
+        lam_se = sqrt(ss_res / dof / sxx)
+        margin = t_critical_95(dof) * lam_se
+        lam_ci95 = (lam - margin, lam + margin)
+        # d½ = ln2/λ is only bounded when the whole interval stays positive.
+        if lam_ci95[0] > RENT_CONFIG["min_lambda"]:
+            half_dist_ci95 = (log(2.0) / lam_ci95[1], log(2.0) / lam_ci95[0])
+
     return {
         "r0": r0,
         "lam": lam,
         "r2": r2,
+        "adj_r2": adj_r2,
+        "lam_se": lam_se,
+        "lam_ci95": lam_ci95,
+        "half_dist_ci95": half_dist_ci95,
+        "dof": dof,
+        "low_confidence": n < RENT_CONFIG["min_reliable_samples"],
         "n_samples": n,
         "points": [{"d": p[0], "rent": exp(p[1])} for p in pts],
     }
@@ -1291,6 +1532,45 @@ def _ring_index_for_distance(
     return idx
 
 
+def ring_coverage_areas_km2(
+    coverage_geojson: Optional[Dict[str, Any]],
+    anchor_lat: float,
+    anchor_lon: float,
+    step_km: float,
+    n_rings: int,
+) -> Optional[List[float]]:
+    """พื้นที่ของ (วงแหวน ∩ พื้นที่ที่ดาวน์โหลดถนนจริง) ต่อวง หน่วย km² (pure).
+
+    โหนด Network มีเฉพาะในพื้นที่ที่ดึงข้อมูลถนน (union ของ isochrone) จึงต้องหาร
+    ความหนาแน่นด้วยพื้นที่ที่ครอบจริง ไม่ใช่พื้นที่วงแหวนเต็ม คำนวณในพิกัดเมตร
+    (azimuthal equidistant รอบ anchor). คืน ``None`` เมื่อไม่มี/อ่านพื้นที่ไม่ได้.
+    """
+    if not coverage_geojson or step_km <= 0 or n_rings <= 0:
+        return None
+    try:
+        from shapely.geometry import Point
+        from shapely.ops import transform
+
+        projection = _anchor_projection(anchor_lat, anchor_lon)
+        geom = transform(
+            lambda x, y, z=None: projection.transform(x, y), shape(coverage_geojson)
+        )
+        if geom.is_empty:
+            return None
+        if not geom.is_valid:
+            geom = geom.buffer(0)
+        origin = Point(0.0, 0.0)
+        areas: List[float] = []
+        for i in range(n_rings):
+            outer = origin.buffer(step_km * (i + 1) * 1000.0, quad_segs=64)
+            inner = origin.buffer(step_km * i * 1000.0, quad_segs=64) if i else None
+            band = outer.difference(inner) if inner is not None else outer
+            areas.append(float(band.intersection(geom).area) / 1e6)
+        return areas
+    except Exception:
+        return None
+
+
 def count_nodes_per_ring(
     nodes_geojson: Optional[Dict[str, Any]],
     anchor_lat: float,
@@ -1346,6 +1626,10 @@ def build_ring_report(
 
     model = rent_data["model"]
     anchor = rent_data["anchor"]
+    # Value Gap compares network closeness with R(d)/R0. In index mode R(d)/R0
+    # is an assumed decay (1/4 at the edge), so the gap would only echo that
+    # assumption; it is reported only when the rent model is fitted to data.
+    show_gap = not model.get("is_index")
     n_rings = len(ring_feats)
     d_max = model["d_max_km"]
     step = d_max / n_rings
@@ -1360,6 +1644,13 @@ def build_ring_report(
         nodes_fc, anchor["lat"], anchor["lon"], step, n_rings
     )
     total_nodes = sum(counts) + outside_nodes
+    coverage_areas = (
+        ring_coverage_areas_km2(
+            (network_data or {}).get("coverage_geojson"),
+            anchor["lat"], anchor["lon"], step, n_rings,
+        )
+        if has_net else None
+    )
 
     golden_per_ring: List[List[int]] = [[] for _ in range(n_rings)]
     golden_spots = (network_data or {}).get("golden_spots") or []
@@ -1410,11 +1701,19 @@ def build_ring_report(
             row["% โหนด"] = (
                 round(100.0 * n_in / total_nodes, 1) if total_nodes else 0.0
             )
-            row["โหนด/km²"] = round(n_in / area_km2, 1) if area_km2 > 0 else 0.0
+            if coverage_areas is not None:
+                covered = coverage_areas[i]
+                row["พื้นที่ครอบคลุม (km²)"] = round(covered, 2)
+                # หารด้วยพื้นที่ที่มีข้อมูลถนนจริง (ไม่ใช่วงแหวนเต็ม) กันค่าต่ำเกินจริงในวงนอก
+                density_area = covered if covered > 1e-6 else area_km2
+            else:
+                density_area = area_km2
+            row["โหนด/km²"] = round(n_in / density_area, 1) if density_area > 0 else 0.0
             row["Closeness เฉลี่ย"] = round(cl_mean, 3)
             row["Closeness สูงสุด"] = round(max(cl), 3) if cl else 0.0
             row["Golden Spots"] = ", ".join(map(str, golden_per_ring[i])) or "—"
-            row["Value Gap"] = round(cl_mean - rent_norm, 3)
+            if show_gap:
+                row["Value Gap"] = round(cl_mean - rent_norm, 3)
         row["ตัวอย่างราคา"] = samples_per_ring[i]
         rows.append(row)
 
@@ -1425,6 +1724,7 @@ def build_ring_report(
                 "วง": "—",
                 "ช่วงระยะจาก CBD": f"> {d_max:.1f} km (นอกวงนอกสุด)",
                 "พื้นที่ (km²)": None,
+                **({"พื้นที่ครอบคลุม (km²)": None} if coverage_areas is not None else {}),
                 "ค่าเช่าคาดการณ์": "นอกขอบเขตโมเดล",
                 "โหนด Network": outside_nodes,
                 "% โหนด": (
@@ -1436,7 +1736,7 @@ def build_ring_report(
                 "Closeness เฉลี่ย": None,
                 "Closeness สูงสุด": None,
                 "Golden Spots": "—",
-                "Value Gap": None,
+                **({"Value Gap": None} if show_gap else {}),
                 "ตัวอย่างราคา": 0,
             }
         )
@@ -1470,6 +1770,11 @@ def compute_rent_gradient_data(
     if fit is not None:
         r0, lam, r2 = fit["r0"], fit["lam"], fit["r2"]
         n_samples = fit["n_samples"]
+        fit_stats = {
+            key: fit[key]
+            for key in ("adj_r2", "lam_se", "lam_ci95", "half_dist_ci95",
+                        "dof", "low_confidence")
+        }
         is_index = False
         samples_scatter = fit["points"]
         # ขยายขอบเขตกราฟ/วงแหวนให้คลุมตัวอย่างที่อยู่ไกลกว่า Travel Areas
@@ -1479,6 +1784,10 @@ def compute_rent_gradient_data(
         lam = log(RENT_CONFIG["edge_decay_ratio"]) / d_max
         r2 = None
         n_samples = 0
+        fit_stats = {
+            "adj_r2": None, "lam_se": None, "lam_ci95": None,
+            "half_dist_ci95": None, "dof": 0, "low_confidence": False,
+        }
         is_index = True
         samples_scatter = []
 
@@ -1519,6 +1828,7 @@ def compute_rent_gradient_data(
             "r0": r0,
             "lam": lam,
             "r2": r2,
+            **fit_stats,
             "n_samples": n_samples,
             "is_index": is_index,
             "inverted": inverted,
@@ -1538,6 +1848,59 @@ def format_rent_value(value: float, model: Dict[str, Any]) -> str:
     if model.get("is_index"):
         return f"ดัชนี {value:.1f}/100"
     return f"{value:,.0f} {model.get('unit', '')}".strip()
+
+
+def _fit_dof(model: Dict[str, Any]) -> int:
+    """Residual degrees of freedom; derived for results saved before ``dof`` existed."""
+    return int(model.get("dof", model.get("n_samples", 0) - 2))
+
+
+def fit_quality_label(model: Dict[str, Any]) -> str:
+    """ป้ายคุณภาพการ fit ที่ระบุจำนวนตัวอย่างเสมอ (ไม่ใช้คำว่า calibrated เปล่า ๆ)."""
+    if model.get("is_index") or model.get("r2") is None:
+        return "โหมดดัชนี — ยังไม่ calibrate จากราคาจริง"
+    n = model.get("n_samples", 0)
+    parts = [f"n={n}"]
+    if _fit_dof(model) > 0:
+        parts.append(f"R²={model['r2']:.3f}")
+        if model.get("adj_r2") is not None:
+            parts.append(f"adj-R²={model['adj_r2']:.3f}")
+    else:
+        parts.append("R² ไม่มีความหมาย (2 จุดผ่านเส้นตรงได้พอดี)")
+    return "calibrated (" + ", ".join(parts) + ")"
+
+
+def fit_quality_warning(model: Dict[str, Any]) -> Optional[str]:
+    """ข้อความเตือนเมื่อการ fit ยังไม่น่าเชื่อถือ — ``None`` เมื่อไม่มีประเด็น."""
+    if model.get("is_index") or model.get("r2") is None:
+        return None
+    need = RENT_CONFIG["min_reliable_samples"]
+    low = model.get("low_confidence")
+    if low is None:  # results saved before the flag existed
+        low = model.get("n_samples", 0) < need
+    if low:
+        return (
+            f"ตัวอย่าง {model.get('n_samples', 0)} จุด น้อยกว่า {need} จุด — "
+            "λ และ d½ ยังไม่น่าเชื่อถือ (2 จุดจะได้ R² = 1 เสมอ) ควรเพิ่มตัวอย่างก่อนใช้ตัดสินใจ"
+        )
+    ci = model.get("lam_ci95")
+    if ci and ci[0] <= 0 <= ci[1]:
+        return "ช่วงเชื่อมั่น 95% ของ λ คร่อมศูนย์ — ข้อมูลยังแยกไม่ออกว่าราคาลดลงตามระยะจริงหรือไม่"
+    return None
+
+
+def fit_interval_text(model: Dict[str, Any]) -> Optional[str]:
+    """ช่วงเชื่อมั่น 95% ของ λ และ d½ เป็นข้อความ (``None`` เมื่อไม่มีองศาอิสระ)."""
+    ci = model.get("lam_ci95")
+    if not ci:
+        return None
+    text = f"λ 95% CI [{ci[0]:.4f}, {ci[1]:.4f}]"
+    half_ci = model.get("half_dist_ci95")
+    if half_ci:
+        text += f" · d½ 95% CI [{half_ci[0]:.2f}, {half_ci[1]:.2f}] km"
+    else:
+        text += " · d½ ไม่มีขอบเขต (CI ของ λ รวมศูนย์)"
+    return text
 
 
 # ------------------------------------------------------------------ API calls
@@ -1605,26 +1968,77 @@ def get_cache_key(polygon_wkt_str: str, network_type: str) -> str:
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
+# A pickle can execute arbitrary code while it loads. Cache files and imported
+# bundles are therefore read only through an allow-list that admits the graph
+# containers OSMnx produces (NetworkX classes, shapely geometries rebuilt from
+# WKB, NumPy scalars/dtypes and plain builtins) and rejects every other global.
+_PICKLE_SAFE_BUILTINS = frozenset({
+    "dict", "list", "set", "frozenset", "tuple", "int", "float", "complex",
+    "str", "bytes", "bytearray", "bool", "slice", "range",
+})
+_PICKLE_ALLOWED_GLOBALS = frozenset({
+    ("collections", "OrderedDict"), ("collections", "defaultdict"),
+    ("numpy", "dtype"), ("numpy", "ndarray"),
+    ("numpy.core.multiarray", "scalar"), ("numpy._core.multiarray", "scalar"),
+    ("numpy.core.multiarray", "_reconstruct"), ("numpy._core.multiarray", "_reconstruct"),
+    ("shapely.io", "from_wkb"), ("shapely", "from_wkb"),
+})
+_PICKLE_ALLOWED_CLASS_PREFIXES = ("networkx.classes.", "shapely.geometry.")
+_CACHE_FILE_RE = re.compile(r"^osm_graph_[0-9a-f]{32}\.pkl$")
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Allow-list unpickler: only graph data containers can be reconstructed."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        if module == "builtins" and name in _PICKLE_SAFE_BUILTINS:
+            return super().find_class(module, name)
+        if (module, name) in _PICKLE_ALLOWED_GLOBALS:
+            return super().find_class(module, name)
+        if module.startswith(_PICKLE_ALLOWED_CLASS_PREFIXES):
+            obj = super().find_class(module, name)
+            if isinstance(obj, type):  # classes only, never helper functions
+                return obj
+        raise pickle.UnpicklingError(f"Blocked global in cache file: {module}.{name}")
+
+
+def safe_pickle_loads(data: bytes) -> Any:
+    """Deserialize ``data`` with the allow-list; raises ``UnpicklingError`` otherwise."""
+    return _RestrictedUnpickler(io.BytesIO(data)).load()
+
+
+def _load_graph_bytes(data: bytes) -> nx.MultiDiGraph:
+    """Restricted load plus a shape check — never trust the file's own claims."""
+    graph = safe_pickle_loads(data)
+    if not isinstance(graph, nx.Graph):
+        raise ValueError("Cache entry is not a NetworkX graph.")
+    return graph
+
+
 def load_graph_from_cache(cache_key: str) -> Optional[nx.MultiDiGraph]:
-    """Load a cached OSM graph from disk."""
+    """Load a cached OSM graph from disk (restricted unpickler; ``None`` if unsafe)."""
     cache_file = CACHE_DIR / f"osm_graph_{cache_key}.pkl"
     if cache_file.exists():
         try:
-            with open(cache_file, "rb") as f:
-                return pickle.load(f)
+            return _load_graph_bytes(cache_file.read_bytes())
         except Exception:
             return None
     return None
 
 
 def save_graph_to_cache(cache_key: str, graph: nx.MultiDiGraph) -> None:
-    """Persist an OSM graph to disk."""
+    """Persist an OSM graph to disk atomically so readers never see a partial file."""
     cache_file = CACHE_DIR / f"osm_graph_{cache_key}.pkl"
+    tmp_file = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        with open(cache_file, "wb") as f:
+        with open(tmp_file, "wb") as f:
             pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_file, cache_file)
     except Exception:
-        pass  # Caching is best-effort
+        try:
+            tmp_file.unlink()
+        except OSError:
+            pass  # Caching is best-effort
 
 
 def get_cache_stats() -> Dict[str, Any]:
@@ -1677,8 +2091,12 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
         with zipfile.ZipFile(zip_buffer, "r") as zf:
             for file_info in zf.infolist():
                 name = file_info.filename
-                if not name.startswith("osm_graph_") or not name.endswith(".pkl"):
+                # Exact file-name pattern: no path separators, no traversal.
+                if not _CACHE_FILE_RE.match(name):
                     result["errors"].append(f"Skipped invalid file: {name}")
+                    continue
+                if file_info.file_size > MAX_CACHE_ENTRY_BYTES:
+                    result["errors"].append(f"Skipped oversized file: {name}")
                     continue
 
                 target_path = CACHE_DIR / name
@@ -1687,11 +2105,12 @@ def import_cache_from_zip(zip_bytes: bytes) -> Dict[str, Any]:
                     continue
 
                 try:
-                    data = zf.read(name)
-                    # Validate pickle
-                    pickle.load(io.BytesIO(data))
-                    with open(target_path, "wb") as f:
-                        f.write(data)
+                    # Validate through the allow-list (never plain pickle.load), then
+                    # write our own serialisation so the stored bytes are known-good.
+                    graph = _load_graph_bytes(zf.read(name))
+                    save_graph_to_cache(name[len("osm_graph_"):-len(".pkl")], graph)
+                    if not target_path.exists():
+                        raise OSError("could not write cache entry")
                     result["imported"] += 1
                 except Exception as e:
                     result["errors"].append(f"Failed to import {name}: {str(e)}")
@@ -1839,8 +2258,16 @@ def _fetch_osm_graph(
     ]
     attempts = max(1, int(OVERPASS_CONFIG["attempts_per_endpoint"]))
     failures: List[str] = []
+
+    # Fast path outside the lock: a cache hit must not queue behind another
+    # session's (possibly minutes-long) download.
+    G = load_graph_from_cache(cache_key)
+    if G is not None:
+        return G, True, None
+
     with _OVERPASS_LOCK:
         original_url = ox.settings.overpass_url
+        # Re-check: a session that held the lock may have just filled the cache.
         G = load_graph_from_cache(cache_key)
         if G is not None:
             return G, True, None
@@ -2008,6 +2435,8 @@ def _compute_centrality_impl(
         )
     else:
         betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight="length")
+    # MultiGraph results are keyed (u, v, key); the lookups below use (u, v).
+    betweenness_cent = edge_scores_by_pair(betweenness_cent)
     max_bet = max(betweenness_cent.values()) if betweenness_cent else 1.0
 
     # Public colormap registry (Matplotlib >= 3.5).
@@ -2108,6 +2537,10 @@ def _compute_centrality_impl(
             "features": golden_geojson_features,
         },
         "top_node": top_node_data if top_node_data["score"] != -1.0 else None,
+        # ~11 m simplification keeps exports small; area error is negligible.
+        "coverage_geojson": mapping(
+            wkt.loads(polygon_wkt_str).simplify(1e-4, preserve_topology=True)
+        ),
         "stats": {
             "nodes_count": len(G.nodes),
             "edges_count": len(G.edges),
@@ -2634,6 +3067,12 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
     """Render the original composite anchor and a second Closeness-100% anchor."""
     with st.expander("🎯 Automated CBD Anchor", expanded=True):
         st.caption("กำหนดพื้นที่ศึกษา แล้วสุ่มจุดบนถนนเพื่อค้นหา 8 ทิศ: 4 กม. → 150 ม.")
+        st.info(
+            "ผลลัพธ์คือ **ศูนย์กลางเชิงโครงข่ายถนน** ของพื้นที่ที่เลือก (ขึ้นกับจุดศูนย์กลาง/รัศมี) "
+            "ยังไม่ได้พิสูจน์ว่าตรงกับ CBD เชิงเศรษฐกิจ — ตรวจความไวด้วย "
+            "`scripts/anchor_sensitivity.py` และเทียบกับจุดที่ทราบก่อนใช้ตัดสินใจ",
+            icon="ℹ️",
+        )
         if "anchor_center_input" not in st.session_state:
             st.session_state["anchor_center_input"] = (
                 f"{st.session_state.anchor_lat!r}, {st.session_state.anchor_lon!r}"
@@ -2680,6 +3119,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
 
         st.markdown("##### ① Composite (เดิม)")
         st.caption("คะแนน: 50% Closeness + 30% Degree + 20% ความหนาแน่นทางแยกใน 500 ม. "
+                   "(แต่ละตัวแปลงเป็นอันดับ/percentile 0–1 ก่อนถ่วงน้ำหนัก เพื่อให้น้ำหนักมีผลจริง) "
                    "ใช้ junction เป็น candidate หลัก")
         run_composite = st.button(
             "🎯 ค้นหา CBD Anchor อัตโนมัติ",
@@ -2698,6 +3138,17 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
             )
             st.caption("ตรวจคะแนนครบทุก candidate: ยืนยันคะแนนสูงสุดของ objective นี้แล้ว"
                        if result.get("globally_certified") else "ยังไม่ยืนยันคะแนนสูงสุดทั้งพื้นที่ศึกษา")
+            effective = result.get("effective_weights")
+            if effective and result.get("scoring") == "rank-v2":
+                st.caption(
+                    "น้ำหนักที่มีผลจริงต่อการจัดอันดับ — "
+                    f"Closeness {effective['closeness']:.0%} · Degree {effective['degree']:.0%} · "
+                    f"Density {effective['density']:.0%} (ประกาศ 50/30/20); "
+                    "สัดส่วนคะแนนที่ผู้ชนะ — "
+                    f"{result['winner_contribution']['closeness']:.0%} / "
+                    f"{result['winner_contribution']['degree']:.0%} / "
+                    f"{result['winner_contribution']['density']:.0%}"
+                )
             for warning in result["warnings"]:
                 st.warning(warning)
             st.download_button(
@@ -2734,7 +3185,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> Tuple[bool, bool]:
                        f"รวมโหลดข้อมูล {closeness_result['total_seconds']:.2f} วินาที")
             st.caption("ตรวจครบทุก road-node candidate: ยืนยัน Closeness สูงสุดในพื้นที่ศึกษาแล้ว"
                        if closeness_result.get("globally_certified")
-                       else "กราฟใหญ่เกินงบ exhaustive audit: ผลเป็น local-only")
+                       else "กราฟใหญ่เกินงบ exhaustive audit: คัดด้วย pivot closeness แล้วประเมินแม่นยำ — ไม่รับรอง global optimum")
             for warning in closeness_result["warnings"]:
                 st.warning(warning)
             st.download_button(
@@ -2769,8 +3220,8 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
         # ---- Calibration samples ----
         st.markdown("##### 🧾 ตัวอย่างราคาจริง (Calibration)")
         st.caption(
-            "ใส่ ≥ 2 จุดที่ระยะต่างกันเพื่อ fit λ จากตลาดจริง — "
-            "เว้นว่างไว้ระบบจะใช้ดัชนี 0–100"
+            "แนะนำ ≥ 5 จุดที่ระยะต่างกันเพื่อ fit λ จากตลาดจริง (2 จุดคำนวณได้ "
+            "แต่ R² = 1 เสมอ จึงไม่บอกคุณภาพ) — เว้นว่างไว้ระบบจะใช้ดัชนี 0–100"
         )
         samples = StateManager.get_rent_samples()
         df = pd.DataFrame(samples, columns=["lat", "lon", "rent"], dtype="float64")
@@ -2816,9 +3267,18 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
             r0_txt = f"{model['r0']:,.0f}" if not model["is_index"] else f"{model['r0']:.0f} (ดัชนี)"
             c3.metric("R₀ ที่ CBD", r0_txt)
             if model.get("r2") is not None:
-                c4.metric("R² (fit)", f"{model['r2']:.3f}")
+                if _fit_dof(model) > 0:
+                    c4.metric("R² (fit)", f"{model['r2']:.3f}", help=fit_quality_label(model))
+                else:
+                    c4.metric("R² (fit)", "—", help=fit_quality_label(model))
             else:
                 c4.metric("Calibration", "ดัชนี (ไม่มีตัวอย่าง)")
+            interval = fit_interval_text(model)
+            if interval:
+                st.caption(f"n = {model['n_samples']} · {interval}")
+            quality_warning = fit_quality_warning(model)
+            if quality_warning:
+                st.warning(quality_warning, icon="📉")
 
             anchor = rent_data["anchor"]
             st.caption(
@@ -3383,7 +3843,9 @@ def _build_golden_spots_df(
             row["ระยะจาก CBD (km)"] = round(d_km, 2)
             row["ค่าเช่าคาดการณ์"] = round(est, 1)
             # Value Gap: เข้าถึงง่าย (closeness สูง) แต่ราคายังต่ำ = โอกาส
-            row["Value Gap"] = round(s.get("closeness_norm", 0.0) - rent_norm, 3)
+            # ซ่อนในโหมดดัชนี: R(d)/R0 เป็นค่าสมมติ gap จึงสะท้อนสมมติฐานเอง
+            if not model.get("is_index"):
+                row["Value Gap"] = round(s.get("closeness_norm", 0.0) - rent_norm, 3)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -3415,15 +3877,17 @@ def render_analytics_panel() -> None:
                 config={"displayModeBar": False},
             )
             eq_r0 = f"{model['r0']:,.1f}" if not model["is_index"] else f"{model['r0']:.0f}"
-            fit_txt = (
-                f" (fit จากตัวอย่าง {model['n_samples']} จุด, R² = {model['r2']:.3f})"
-                if model.get("r2") is not None
-                else " (โหมดดัชนี — ยังไม่ calibrate จากราคาจริง)"
-            )
+            fit_txt = f" — {fit_quality_label(model)}"
+            interval = fit_interval_text(model)
+            if interval:
+                fit_txt += f" · {interval}"
             st.caption(
                 f"R(d) = {eq_r0} × e^(−{model['lam']:.4f}·d)"
                 + fit_txt
             )
+            quality_warning = fit_quality_warning(model)
+            if quality_warning:
+                st.warning(quality_warning, icon="📉")
         else:
             st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างเส้นโค้ง Bid-Rent", icon="💡")
 
@@ -3450,13 +3914,21 @@ def render_analytics_panel() -> None:
                     "และ Value Gap รายวง",
                     icon="💡",
                 )
-            st.caption(
-                "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนนในวง · "
-                "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
-                "**Value Gap** = Closeness เฉลี่ย − (ค่าเช่าคาดการณ์/R₀) — "
-                "วงที่ Value Gap สูงคือวงที่โครงข่ายเข้าถึงดีแต่ราคาคาดการณ์ยังต่ำ "
-                "จึงควรไล่ scan หาแปลงในวงนั้นก่อน"
-            )
+            if rent_data["model"].get("is_index"):
+                st.caption(
+                    "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนน หารด้วยพื้นที่ของวงที่มีข้อมูลถนนจริง · "
+                    "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
+                    "**Value Gap ถูกซ่อน** ในโหมดดัชนี เพราะ R(d)/R₀ เป็นค่าสมมติ "
+                    "(ลดเหลือ ¼ ที่ขอบ) — ใส่ตัวอย่างราคาจริงเพื่อ calibrate ก่อน"
+                )
+            else:
+                st.caption(
+                    "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนน หารด้วยพื้นที่ของวงที่มีข้อมูลถนนจริง · "
+                    "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
+                    "**Value Gap** = Closeness เฉลี่ย − (ค่าเช่าคาดการณ์/R₀) — "
+                    "วงที่ Value Gap สูงคือวงที่โครงข่ายเข้าถึงดีแต่ราคาคาดการณ์ยังต่ำ "
+                    "(ตัวชี้นำเชิงเปรียบเทียบ ไม่ใช่ราคาผิดปกติที่พิสูจน์แล้ว)"
+                )
         else:
             st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างรายงานรายวง", icon="💡")
 
@@ -3465,10 +3937,16 @@ def render_analytics_panel() -> None:
             df_gold = _build_golden_spots_df(golden_spots, rent_data)
             st.dataframe(df_gold, use_container_width=True, hide_index=True)
             if has_rent:
-                st.caption(
-                    "**Value Gap** = Closeness − (ค่าเช่าคาดการณ์/R₀) — "
-                    "ค่าบวกมาก = เข้าถึงง่ายแต่ราคายังต่ำ (โอกาส 'ก่อนคนรู้')"
-                )
+                if rent_data["model"].get("is_index"):
+                    st.caption(
+                        "Value Gap ถูกซ่อนในโหมดดัชนี (R(d)/R₀ เป็นค่าสมมติ) — "
+                        "ใส่ตัวอย่างราคาจริงเพื่อ calibrate"
+                    )
+                else:
+                    st.caption(
+                        "**Value Gap** = Closeness − (ค่าเช่าคาดการณ์/R₀) — "
+                        "ค่าบวกมาก = เข้าถึงง่ายแต่ราคายังต่ำ (ตัวชี้นำเชิงเปรียบเทียบ)"
+                    )
 
             c1, c2, _sp = st.columns([0.3, 0.3, 0.4])
             csv_bytes = df_gold.to_csv(index=False).encode("utf-8-sig")
@@ -3997,8 +4475,13 @@ def perform_rent_gradient(quiet: bool = False) -> None:
     StateManager.set_rent_data(data)
     if not quiet:
         model = data["model"]
-        mode = "โหมดดัชนี" if model["is_index"] else f"calibrated, R²={model['r2']:.3f}"
-        st.toast(f"💰 Rent Gradient พร้อม ({mode}) λ={model['lam']:.4f}", icon="✅")
+        mode = "โหมดดัชนี" if model["is_index"] else fit_quality_label(model)
+        warn = fit_quality_warning(model)
+        st.toast(
+            f"💰 Rent Gradient พร้อม ({mode}) λ={model['lam']:.4f}"
+            + (" — ⚠️ ตัวอย่างน้อย" if warn and "น้อยกว่า" in warn else ""),
+            icon="⚠️" if warn else "✅",
+        )
 
 
 def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None:

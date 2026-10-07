@@ -1,16 +1,16 @@
 ---
-title: "Rent_Gradient.py — หลักการ + ผลรีวิว   [OK] ดี · [ASSUME] สมมติฐาน · [RISK] เสี่ยง · [BUG] ผิดจริง"
+title: "Rent_Gradient.py — หลักการ + สถานะหลังแก้   [FIXED] แก้แล้ว · [OPEN] ยังเปิด · [ASSUME] สมมติฐาน · [OK] ดีอยู่แล้ว"
 ---
-%% สอดคล้องกับ docs/rent-gradient-principles-review.md — เลข F# อ้างอิงตารางข้อค้นพบใน .md
+%% สอดคล้องกับ docs/rent-gradient-principles-review.md — เลข F# อ้างอิงตารางข้อค้นพบ (หัวข้อ 5) และสถานะหลังแก้ (หัวข้อ 8)
 flowchart TD
 
     %% ---------------- อินพุต ----------------
     subgraph IN["อินพุต"]
         direction LR
         MK["หมุด / พิกัดศึกษา<br/>study centre + radius"]
-        ISO["Isochrone จาก Geoapify<br/>perform_calculation"]
-        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>ผ่าน Overpass + pkl cache"]
-        OSMN["OSM roads: union ของ isochrone<br/>perform_network_analysis"]
+        ISO["Isochrone จาก Geoapify<br/>perform_calculation<br/>[OPEN] F8 API key ค้างในซอร์ส — คงเดิมตามเจ้าของ"]
+        OSMA["OSM roads: วงศึกษา + buffer 20%<br/>ผ่าน Overpass + pkl cache<br/>[FIXED] F9 allow-list unpickler · F10 lock แคบลง"]
+        OSMN["OSM roads: union ของ isochrone<br/>perform_network_analysis<br/>[FIXED] F12 เก็บ coverage polygon"]
         SMP["ตัวอย่างราคาจริง (ถ้ามี)<br/>lat, lon, rent"]
     end
 
@@ -20,15 +20,15 @@ flowchart TD
     %% ---------------- หลักการ 1: ตำแหน่ง CBD ----------------
     subgraph P1["หลักการ 1 — จุดยึด CBD (anchor)"]
         direction TB
-        A0["Composite anchor<br/>0.5·C_norm + 0.3·D_norm + 0.2·J_norm<br/>[RISK] F3 น้ำหนักจริงของ closeness ต่ำกว่า 50%"]
+        A0["Composite anchor — rank-v2<br/>0.5·C_rank + 0.3·D_rank + 0.2·J_rank<br/>[FIXED] F3 น้ำหนักจริงใกล้ 50/30/20 และรายงานใน UI"]
         CERT{"candidates ≤ 2048 ?"}
         EX["exhaustive audit<br/>certified เฉพาะ objective + กราฟนี้<br/>[OK] ผลไม่ขึ้นกับ seed"]
-        LO["local-only<br/>pattern search 8 ทิศ + halve radius<br/>[RISK] F16 ผลขึ้นกับ seed"]
+        LO["pivot-screened + exact top-K + local climb<br/>ไม่ใช่ certificate<br/>[FIXED] F16 seed-stable บนกราฟจริง"]
         A1["Closeness 100%<br/>network 1-median ทุกโหนด<br/>[OK] สมการสะอาด — ใช้เทียบเท่านั้น"]
         A2["CBD Zone centroid<br/>จุดตัด isochrone"]
         A3["Integration Center<br/>top node closeness"]
         A4["centroid Travel Areas<br/>หรือ ค่าเฉลี่ยหมุด"]
-        RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ"]
+        RES["resolve_cbd_anchor<br/>precedence: 0 > 1 > 2 > 3 > 4<br/>[ASSUME] F2 anchor = ศูนย์กลางโครงข่าย ไม่ใช่ CBD เชิงเศรษฐกิจ<br/>UI เตือน + scripts/anchor_sensitivity.py · ground truth [OPEN]"]
         A0 --> CERT
         CERT -- "ใช่" --> EX
         CERT -- "ไม่" --> LO
@@ -49,8 +49,8 @@ flowchart TD
     subgraph P3["หลักการ 3 — Network analysis (OSM)"]
         direction TB
         CL["Weighted closeness บน LCC<br/>exact ≤ 3000 โหนด / pivot k=600<br/>[OK] seed คงที่ ทำซ้ำได้"]
-        BT["Edge betweenness<br/>exact ≤ 2000 / sample k=400<br/>[BUG] F1 key (u,v,k) ไม่ตรง (u,v) → ค่า 0 ทุกเส้น"]
-        GL["Golden Land score<br/>0.5·C + 0.3·D + 0.2·(1 − B)<br/>[BUG] F1 เทอม (1 − B) คงที่ = 1"]
+        BT["Edge betweenness<br/>exact ≤ 2000 / sample k=400<br/>[FIXED] F1 รวม key (u,v,k) เป็นคู่ (u,v) ด้วย max"]
+        GL["Golden Land score<br/>0.5·C + 0.3·D + 0.2·(1 − B)<br/>[FIXED] F1 เทอม (1 − B) ไม่คงที่แล้ว"]
         CL --> GL
         BT --> GL
     end
@@ -62,9 +62,9 @@ flowchart TD
     %% ---------------- หลักการ 2: Bid-Rent ----------------
     subgraph P2["หลักการ 2 — Bid-Rent (Alonso–Muth–Mills)"]
         direction TB
-        DM["d_max จาก bbox corners ของ isochrone<br/>[RISK] F6 เกินจริงได้ถึง √2 เท่า"]
+        DM["d_max จาก bbox corners ของ isochrone<br/>[OPEN] F6 เกินจริงได้ถึง √2 เท่า (นอกแผน)"]
         FIT{"ตัวอย่าง ≥ 2 จุด<br/>และระยะต่างกัน ?"}
-        OLS["log-linear OLS<br/>ln R = ln R0 − λ·d<br/>[RISK] F4 n = 2 ได้ R² = 1 เสมอ"]
+        OLS["log-linear OLS<br/>ln R = ln R0 − λ·d<br/>[FIXED] F4 SE / 95% CI / adj-R² + เตือนเมื่อ n < 5"]
         IDX["โหมดดัชนี<br/>R0 = 100, λ = ln 4 / d_max<br/>[ASSUME] ไม่ได้ calibrate จากข้อมูล"]
         MOD["R(d) = R0 · e^(−λ·d)   d½ = ln 2 / λ<br/>d = haversine จาก anchor<br/>[ASSUME] F7 ระยะเส้นตรง, monocentric"]
         DM --> IDX
@@ -81,11 +81,11 @@ flowchart TD
     %% ---------------- เอาต์พุต ----------------
     subgraph OUT["เอาต์พุต"]
         direction TB
-        CRV["Bid-Rent Curve<br/>+ เส้น d½"]
+        CRV["Bid-Rent Curve<br/>+ เส้น d½ + ช่วงเชื่อมั่น"]
         RNG["Rent Rings + Rent Heat<br/>6 วงระยะเท่ากัน สีตามค่า ณ กึ่งกลางวง"]
-        RRP["Ring Report<br/>[RISK] F12 โหนด/km² หารด้วยพื้นที่วงเต็ม"]
-        VG["Value Gap = C̄ − R(d)/R0<br/>[RISK] F5 คนละสเกล, โหมดดัชนีเอนเอียงออกนอก"]
-        GS["Golden Spots top 10<br/>[RISK] F13 ไม่มี spatial dedup"]
+        RRP["Ring Report<br/>[FIXED] F12 โหนด/km² หารด้วยพื้นที่วง ∩ coverage"]
+        VG["Value Gap = C̄ − R(d)/R0<br/>[FIXED] F5 ซ่อนในโหมดดัชนี<br/>[ASSUME] โหมด calibrated ยังต่างสเกล — ใช้เป็นตัวชี้นำ"]
+        GS["Golden Spots top 10<br/>[FIXED] F13 NMS ระยะห่าง ≥ 150 m"]
     end
 
     MOD --> CRV
@@ -99,13 +99,13 @@ flowchart TD
 
     %% ---------------- สไตล์ ----------------
     classDef ok fill:#e6f4ea,stroke:#1e7a3c,color:#0b3d1e
-    classDef risk fill:#fff4d6,stroke:#b27a00,color:#4a3300
-    classDef bug fill:#fde7e9,stroke:#c0262d,color:#5c0a0e
+    classDef fixed fill:#d9f2e0,stroke:#1e7a3c,color:#0b3d1e,stroke-width:2px
+    classDef open fill:#fff4d6,stroke:#b27a00,color:#4a3300
     classDef assume fill:#e8eefc,stroke:#3b5bb5,color:#14264f
     classDef plain fill:#f5f5f5,stroke:#8a8a8a,color:#222
 
     class EX,CL,A1 ok
-    class A0,LO,DM,OLS,RRP,VG,GS risk
-    class BT,GL bug
+    class A0,LO,BT,GL,OLS,RRP,VG,GS,OSMA,OSMN fixed
+    class DM,ISO open
     class RES,IDX,MOD assume
-    class MK,ISO,OSMA,OSMN,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain
+    class MK,SMP,A2,A3,A4,CRV,RNG,FIT,CERT plain

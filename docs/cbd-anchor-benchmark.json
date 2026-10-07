@@ -104,6 +104,8 @@
   "limitations": [
     "Ground-truth CBD error and rent-fit improvement unverified: no independent observations supplied.",
     "OSM cold download exceeded 10 seconds.",
-    "Uncertified local search endpoints vary; only the exhaustive fixed-objective final anchor passed the independent-seed audit."
-  ]
+    "Uncertified local search endpoints vary; only the exhaustive fixed-objective final anchor passed the independent-seed audit.",
+    "Recorded before the composite scoring was rank-normalised; repeat the benchmark to refresh the composite anchor."
+  ],
+  "recorded_with_scoring": "bounded-closeness-v1 (before rank-v2; composite winner will differ on re-run)"
 }
