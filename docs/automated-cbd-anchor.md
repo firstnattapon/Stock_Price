@@ -210,31 +210,38 @@ the search button. The road search is unchanged; afterwards `run_evidence_stage`
    lies between magenta-pink and red-orange (−30°…+15°), so pure red, dark red and pink all count while
    orange, brown, yellow, green, blue and purple do not. (Longdo's real shade is not known here; a legend
    class flagged `commercial` is also counted.) Cells where ≥ 40 % of the pixels are red, grouped
-   8-connected and kept when a group has ≥ 4 cells (≈ 0.06 km²), are the peak zone. Green farmland and
+   8-connected and kept when a group has ≥ 4 cells (≈ 0.06 km²), are the red zones. A zone is **in scope** when any
+   of its cells lies in the study circle, and it is then read **whole**: the circle admits zones, it never clips them
+   (the working grid is made of whole plan tiles). Green farmland and
    every other colour are never the peak, **and when the radius holds no red zone the stage does not fall
    to a lower colour** (e.g. dense residential): it takes the fallback below. With several red zones in
-   the radius, the densest cluster over all of them wins, so the answer does not depend on the centre you
-   typed. The colour that was actually read is reported (`plan.peak.rgb`), together with the dominant
+   the radius they compete as in step 6. The colour that was actually read is reported (`plan.peak.rgb`), together with the dominant
    colours of the plan tiles (`plan.colours`: hex, share, matching legend class, counted as red or not).
-4. **Parcel pass.** `dol` tiles are fetched **only where the peak zone is**: ≤ 16 tiles, the ones
-   with most zone cells first, nearest the study centre among equals. One label pass per tile
-   (the same boundary-line / line-width logic as `parcel_features`) gives every lot's centroid, area
-   and aspect.
+4. **Parcel pass.** `dol` tiles are fetched **only where the red zones are**: ≤ 16 tiles, ranked by
+   `zone cells in the tile / (1 + (distance to the study centre / 2 km)²)` — the same prior as step 6, and
+   independent of the radius, so a far zone entering with a larger circle never evicts a town tile from the
+   budget. One label pass per tile (the same boundary-line / line-width logic as `parcel_features`) gives
+   every lot's centroid, area and aspect.
 5. **Frequency per cell.** `cover_small` and `cover_shop` are the share of a cell's ground area
    taken by lots < 200 m² and by ตึกแถว (40–160 m², aspect ≥ 2.5); score =
    0.4·clip(cover_shop/0.5) + 0.3·clip(cover_small/0.5) + 0.3·scaled ink. Coverage, not lot-count
    shares: ten shophouses beside farmland score 0.13, a shophouse quarter 0.88, town / suburb /
    rural 0.07 / 0.03 / 0.00 (synthetic scenes). A cell without drawn lines is **no data**, not low.
-6. **Dense cluster (ถี่ cluster).** 3×3 box mean over cells with data; hot cells lie inside the peak
-   zone (dilated by one cell) and the circle and are dense **in absolute terms (smoothed score ≥ 0.5) or,
-   when the zone is less regular than that, among the densest quarter of its scored cells** (never below
-   0.10): real lot patterns are far less regular than the synthetic ones 0.5 was set on, so "ถี่" must also
-   work relative to the zone, while the confidence still judges the cluster in absolute terms
-   (cluster score ≥ 0.5). 8-connected groups of ≥ 3 cells are
-   clusters, ranked by mass (Σ score; ties: raster order). The **evidence anchor is the
-   score-weighted centroid of the best cluster**. It is not snapped to a road node (Rent Gradient only
-   needs `lat`/`lon`). No cluster ⇒ the centre of the largest peak zone (`basis = "zone"`,
-   LOW). No peak zone ⇒ see the fallback below.
+6. **Dense cluster (ถี่ cluster) — stable when the radius grows.** 3×3 box mean over cells with data. Hot cells
+   are decided **zone by zone**: dense in absolute terms (smoothed score ≥ 0.5) or among the densest quarter
+   of *that zone's* scored cells (never below 0.10), so a zone that enters when the radius grows never moves
+   another zone's threshold. 8-connected groups of ≥ 3 hot cells are clusters, computed once and **not
+   clipped by the circle**; the circle only *admits* a cluster (centroid within the radius), so a larger
+   radius can only add candidates. Clusters are ranked by `mass / (1 + (d / 2 km)²)` (`d` = distance from the
+   study centre to the cluster's centroid, mass = Σ score): a smooth prior toward the centre you entered that
+   does not depend on the radius — a village 6 km away needs ≈ 10× the mass of a town at the centre. The
+   **evidence anchor is the score-weighted centroid of the best cluster**; it is not snapped to a road node
+   (Rent Gradient only needs `lat`/`lon`). A cluster that runs into a part of its zone whose parcel tile was not
+   read (budget, failed tile) is flagged `touches_boundary` and cannot be HIGH. No cluster ⇒ the centre of the
+   largest red zone whose centre lies inside the radius (`basis = "zone"`, LOW; a zone that only grazes the rim
+   gives no anchor). No red zone ⇒ see the fallback below. On a synthetic town + red village 6.5 km away
+   (before this rule the anchor jumped 5.3 km to the village once the radius reached 8 km) the anchor is
+   identical to the last digit at 4, 6, 8, 10, 12, 15 and 20 km.
 7. **Fallback (no red zone / plan unreadable).** No red zone in the radius, a blank plan or an area outside the
    published plan make the stage look at the parcels within
    1.5 km of the composite road anchor instead: `status = "partial"`, the zoning signal is unknown (never
@@ -244,10 +251,10 @@ the search button. The road search is unchanged; afterwards `run_evidence_stage`
    coverage (tiles read ÷ tiles needed) ≥ 0.6, no *unstable* road or evidence probe, and a cluster that
    does not touch the circle edge. MEDIUM: two of three and coverage ≥ 0.4. Otherwise LOW. Thai
    reasons are listed in the sidebar and the marker popup.
-9. **Stability probe (indicative, free).** On the rasters already loaded the pick is repeated for a
-   radius ×0.8 and for the centre moved 0.2 R north / east / south / west; the peak class and parcel grid
-   stay those of the base run. Drift ≤ 5 % of R ⇒ 🟢, ≤ 15 % ⇒ 🟡, else 🔴; a probe that loses the cluster
-   counts as a full-radius move. A cluster cut by the circle is flagged and cannot be HIGH.
+9. **Stability probe (indicative, free).** Among the clusters already read, the pick is repeated for a radius ×0.8 and
+   ×1.2 and for the centre moved 0.2 R (at most 1 km) north / east / south / west. Growth only sees red zones
+   that were already scanned, so it is a lower bound. Drift ≤ 5 % of R ⇒ 🟢, ≤ 15 % ⇒ 🟡, else 🔴; a probe that
+   loses the cluster counts as a full-radius move.
 10. **Bounded and boring.** ≤ 40 requests, 15 s per request, 60 s per run (unfinished tiles are dropped
     and reported). No key, network error, service exception, blank layer or unreadable plan ⇒ the road
     anchors are untouched and the panel says why.
@@ -326,7 +333,10 @@ Limits: small parcels also occur in suburban subdivisions and informal housing, 
 parcel signal alone is not a CBD (hence the peak-colour gate and the road agreement in the
 confidence); DPT plans exist only for planned areas and can be outdated; Longdo's terms for
 server-side tile use should be checked (requests are few and cached); the evidence anchor is the
-centre of a cluster of 120 m cells, so it is accurate to about a cell and is not snapped to a road node;
+centre of a cluster of 120 m cells, so it is accurate to about a cell and is not snapped to a road node; the
+centre-distance prior makes the answer depend (smoothly) on the centre you enter, the price of not depending
+on the radius (`reach_m` = 2 km is untuned on real data); a red zone is cut only where it crosses a 16 km
+plan-tile border;
 parcel analysis covers only the peak-colour zone (≤ 16 tiles) and drops lots cut by a tile edge, which
 slightly under-counts border cells; the stability probe keeps the base run's peak class and parcel grid.
 

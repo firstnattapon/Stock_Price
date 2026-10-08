@@ -1427,6 +1427,7 @@ EVIDENCE_CONFIG: Dict[str, Any] = {
     "hot_score": 0.50,              # a smoothed cell this dense is hot in absolute terms ...
     "hot_quantile": 0.75,           # ... otherwise the densest quarter of the red zone is (never below hot_floor)
     "hot_floor": 0.10,
+    "reach_m": 2000.0,              # cluster choice: mass / (1 + (distance from the study centre / reach)²) — radius-free
     "cluster_min_cells": 3,
     "cluster_top": 5,
     "max_plan_tiles": 16,
@@ -1437,7 +1438,7 @@ EVIDENCE_CONFIG: Dict[str, Any] = {
     "deadline_s": 60.0,             # per run: unfinished tiles are dropped and reported
     "agree_radius_m": 300.0,        # evidence anchor vs a road anchor counts as "agreeing" within this
     "confidence": {"parcel_ok": 0.50, "coverage_min": 0.60, "coverage_medium": 0.40},
-    "stability": {"shrink": 0.8, "shift": 0.2, "stable": 0.05, "check": 0.15},
+    "stability": {"shrink": 0.8, "grow": 1.2, "shift": 0.2, "shift_max_m": 1000.0, "stable": 0.05, "check": 0.15},
 }
 _WEB_MERCATOR = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 _WEB_MERCATOR_INV = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
@@ -1529,12 +1530,17 @@ def fetch_wms_image(
 # same WMS request (and cache file) whatever the study centre or radius. Arrays are indexed
 # [row j, column i] with j growing northwards (images are flipped once, on the way in).
 def _evidence_geometry(center: Tuple[float, float], radius_m: float) -> Dict[str, Any]:
-    """Study circle in Web-Mercator metres plus the lattice-cell box that covers it."""
+    """Study circle in Web-Mercator metres plus the lattice-cell box that holds it.
+
+    The box is aligned to whole plan tiles, so a red zone that reaches out of the circle is still
+    read whole (the circle admits zones and clusters, it never clips them).
+    """
     lat, lon = center
     x0, y0 = _WEB_MERCATOR.transform(lon, lat)
     r = float(radius_m) / max(cos(radians(lat)), 1e-6)  # 3857 metres stretch by 1/cos(lat)
-    i0, i1 = int(floor((x0 - r) / CELL_M)), int(floor((x0 + r) / CELL_M))
-    j0, j1 = int(floor((y0 - r) / CELL_M)), int(floor((y0 + r) / CELL_M))
+    n = _cells_per_tile(EVIDENCE_CONFIG["plan_tile_m"])
+    i0, i1 = int(floor(floor((x0 - r) / CELL_M) / n)) * n, (int(floor(floor((x0 + r) / CELL_M) / n)) + 1) * n - 1
+    j0, j1 = int(floor(floor((y0 - r) / CELL_M) / n)) * n, (int(floor(floor((y0 + r) / CELL_M) / n)) + 1) * n - 1
     return {"x0": x0, "y0": y0, "r": r, "lat": lat, "ground": cos(radians(lat)), "radius_m": float(radius_m),
             "i0": i0, "j0": j0, "ni": i1 - i0 + 1, "nj": j1 - j0 + 1}
 
@@ -1653,14 +1659,14 @@ def _peak_classes(legend: List[Dict[str, Any]]) -> List[int]:
     return [k for k, c in enumerate(legend) if c.get("commercial")]
 
 
-def _peak_zone(shares: np.ndarray, circle: np.ndarray, legend: List[Dict[str, Any]], cell_px2: int
-               ) -> Optional[Dict[str, Any]]:
-    """The red zone inside the circle: cells where ≥ ``peak_cell_share`` of the pixels are red (by hue)
-    or a legend class flagged ``commercial``, grouped 8-connected; ``None`` when no group reaches
-    ``zone_min_cells``. A lower colour is never promoted to "the highest zone" when there is no red."""
+def _peak_zone(shares: np.ndarray, legend: List[Dict[str, Any]], cell_px2: int) -> Optional[Dict[str, Any]]:
+    """The red zones of the loaded plan tiles: cells where ≥ ``peak_cell_share`` of the pixels are red
+    (by hue) or a legend class flagged ``commercial``, grouped 8-connected; groups below
+    ``zone_min_cells`` are dropped, ``None`` when none is left. Zones are whole: the study circle does
+    not clip them (see :func:`_zones_in_scope`). A lower colour is never promoted when there is no red."""
     cfg = EVIDENCE_CONFIG
     classes = _peak_classes(legend) + [shares.shape[0] - 1]          # the last channel is red-by-hue
-    mask = circle & (shares[classes].sum(axis=0) >= cfg["peak_cell_share"] * cell_px2)
+    mask = shares[classes].sum(axis=0) >= cfg["peak_cell_share"] * cell_px2
     if not mask.any():
         return None
     labels, n = ndi.label(mask, structure=np.ones((3, 3), dtype=bool))
@@ -1669,6 +1675,15 @@ def _peak_zone(shares: np.ndarray, circle: np.ndarray, legend: List[Dict[str, An
     if not big.size:
         return None
     return {"classes": classes, "labels": labels, "big": big, "sizes": sizes, "mask": np.isin(labels, big)}
+
+
+def _zones_in_scope(peak: Dict[str, Any], circle: np.ndarray) -> Optional[Dict[str, Any]]:
+    """Keep the red zones that reach into the study circle — whole. ``None`` = no red inside the radius."""
+    inside = np.unique(peak["labels"][circle & (peak["labels"] > 0)])
+    big = np.intersect1d(peak["big"], inside)
+    if not big.size:
+        return None
+    return {**peak, "big": big, "mask": np.isin(peak["labels"], big)}
 
 
 def _mask_polygon(mask: np.ndarray, geo: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1789,76 +1804,111 @@ def _hot_threshold(values: np.ndarray) -> float:
     return float(min(cfg["hot_score"], max(cfg["hot_floor"], np.quantile(values, cfg["hot_quantile"]))))
 
 
-def _find_clusters(
+def _clusters_of(
     smooth: np.ndarray,
-    region: np.ndarray,
-    circle: np.ndarray,
-    zone: np.ndarray,
+    zones: Dict[str, Any],
     fields: Dict[str, np.ndarray],
+    scanned: np.ndarray,
     geo: Dict[str, Any],
-    top: int,
-    polygons: bool = False,
-) -> List[Dict[str, Any]]:
-    """Connected hot cells inside ``region ∩ circle``, densest mass first (ties: raster order)."""
+) -> Dict[str, Any]:
+    """Every dense cluster of the red zones, whole — **independent of the study circle**.
+
+    Hot cells are decided zone by zone (dense in absolute terms, or among the densest quarter of *that
+    zone*), so a zone that enters when the radius grows never moves another zone's threshold, and a
+    larger radius can only add candidates. ``touches_boundary`` = the cluster runs into a part of its
+    zone that was not scanned (tile budget / failed tile). Choosing among them is :func:`_pick_cluster`.
+    """
     cfg = EVIDENCE_CONFIG
+    three = np.ones((3, 3), dtype=bool)
+    labels_z, zone = zones["labels"], zones["mask"]
     finite = np.isfinite(smooth)
-    scope = region & circle & finite
-    if not scope.any():
-        return []
-    hot = scope & (np.where(finite, smooth, -1.0) >= _hot_threshold(smooth[scope]))
-    labels, n = ndi.label(hot, structure=np.ones((3, 3), dtype=bool))
+    nj, ni = smooth.shape
+    hot = np.zeros(smooth.shape, dtype=bool)
+    thr_map = np.full(smooth.shape, np.nan)
+    objects = ndi.find_objects(labels_z)
+    for lab in zones["big"]:
+        box_ = objects[int(lab) - 1] if int(lab) <= len(objects) else None
+        if box_ is None:
+            continue
+        sl = (slice(max(box_[0].start - 1, 0), min(box_[0].stop + 1, nj)),
+              slice(max(box_[1].start - 1, 0), min(box_[1].stop + 1, ni)))
+        scope = ndi.binary_dilation(labels_z[sl] == lab, structure=three) & finite[sl]
+        if not scope.any():
+            continue
+        thr = _hot_threshold(smooth[sl][scope])
+        mine = scope & (np.where(finite[sl], smooth[sl], -1.0) >= thr)
+        hot[sl] |= mine
+        thr_map[sl][mine] = thr
+    labels, n = ndi.label(hot, structure=three)
     if n == 0:
-        return []
+        return {"clusters": [], "labels": labels}
     index = np.arange(1, n + 1)
     weights = np.where(hot, smooth, 0.0)
     cells = np.asarray(ndi.sum(hot, labels, index), dtype=float)
     mass = np.asarray(ndi.sum(weights, labels, index), dtype=float)
     first = np.asarray(ndi.minimum(np.arange(hot.size).reshape(hot.shape), labels, index), dtype=float)
-    inner = ndi.binary_erosion(circle, structure=np.ones((3, 3), dtype=bool), border_value=0)
-    edge = np.asarray(ndi.maximum((~inner).astype(float), labels, index))
+    rim = ndi.binary_dilation(zone & ~scanned, structure=three)
+    cut = np.asarray(ndi.maximum(rim.astype(float), labels, index))
     in_zone = np.asarray(ndi.mean(zone.astype(float), labels, index))
     cover_small = np.asarray(ndi.mean(np.where(hot, fields["cover_small"], 0.0), labels, index))
     cover_shop = np.asarray(ndi.mean(np.where(hot, fields["cover_shop"], 0.0), labels, index))
     centres = ndi.center_of_mass(weights, labels, index)
-    keep = [k for k in range(n) if cells[k] >= cfg["cluster_min_cells"]]
-    keep.sort(key=lambda k: (-round(float(mass[k]), 12), float(first[k])))
     cell_ha = (CELL_M * geo["ground"]) ** 2 / 1e4
-    out = []
-    for rank, k in enumerate(keep[: int(top)], start=1):
+    clusters = []
+    for k in range(n):
+        if cells[k] < cfg["cluster_min_cells"]:
+            continue
         row, col = centres[k]
         lat, lon = _cell_lonlat(geo, float(col), float(row))
-        record = {"rank": rank, "lat": lat, "lon": lon, "cells": int(cells[k]), "area_ha": float(cells[k] * cell_ha),
-                  "score": float(mass[k] / cells[k]), "mass": float(mass[k]),
-                  "cover_small": float(cover_small[k]), "cover_shop": float(cover_shop[k]),
-                  "in_zone": float(in_zone[k]) >= 0.5, "touches_boundary": bool(edge[k] > 0),
-                  "_x": (geo["i0"] + float(col) + 0.5) * CELL_M, "_y": (geo["j0"] + float(row) + 0.5) * CELL_M}
-        if polygons:
-            record["polygon"] = _mask_polygon(labels == k + 1, geo)
-        out.append(record)
-    return out
+        clusters.append({
+            "lat": lat, "lon": lon, "cells": int(cells[k]), "area_ha": float(cells[k] * cell_ha),
+            "score": float(mass[k] / cells[k]), "mass": float(mass[k]),
+            "cover_small": float(cover_small[k]), "cover_shop": float(cover_shop[k]),
+            "in_zone": float(in_zone[k]) >= 0.5, "touches_boundary": bool(cut[k] > 0),
+            "threshold": float(thr_map.flat[int(first[k])]),
+            "_x": (geo["i0"] + float(col) + 0.5) * CELL_M, "_y": (geo["j0"] + float(row) + 0.5) * CELL_M,
+            "_first": float(first[k]), "_label": k + 1})
+    return {"clusters": clusters, "labels": labels}
 
 
-def _evidence_stability(
-    smooth: np.ndarray, zone_dilated: np.ndarray, zone: np.ndarray, fields: Dict[str, np.ndarray],
-    geo: Dict[str, Any], best: Dict[str, Any],
-) -> Dict[str, Any]:
-    """How far the winning cluster moves when the study circle changes (radius ×0.8, centre ±0.2R).
+def _pick_cluster(
+    clusters: List[Dict[str, Any]], geo: Dict[str, Any], centre: Tuple[float, float], radius_m: float,
+    top: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """The circle (``centre`` in 3857 metres, ``radius_m`` on the ground) admits clusters by centroid;
+    they are ranked by ``mass / (1 + (distance / reach_m)²)`` — a smooth prior toward the study centre
+    that does not depend on the radius, so a far village needs ≈ 10× the mass to beat a town at the
+    centre. Ties: raster order."""
+    reach = EVIDENCE_CONFIG["reach_m"]
+    out = []
+    for c in clusters:
+        d = hypot(c["_x"] - centre[0], c["_y"] - centre[1]) * geo["ground"]
+        if d <= radius_m:
+            out.append({**c, "distance_m": float(d), "weighted_mass": float(c["mass"] / (1.0 + (d / reach) ** 2))})
+    out.sort(key=lambda c: (-round(c["weighted_mass"], 12), c["_first"]))
+    for rank, c in enumerate(out, start=1):
+        c["rank"] = rank
+    return out if top is None else out[: int(top)]
 
-    Re-picks on the rasters already loaded — no request. The peak class and the parcel grid are
-    those of the base run, so this is indicative, like the road probe.
+
+def _evidence_stability(clusters: List[Dict[str, Any]], geo: Dict[str, Any], best: Dict[str, Any]) -> Dict[str, Any]:
+    """How far the winning cluster moves when the study circle changes (radius ×0.8 and ×1.2, centre ±0.2R, at most 1 km).
+
+    Re-picks among the clusters already read — no request, so growth (×1.2) only sees red zones that were
+    already scanned. Indicative, like the road probe.
     """
     cfg = EVIDENCE_CONFIG["stability"]
-    r, x0, y0 = geo["r"], geo["x0"], geo["y0"]
-    cases = [(x0, y0, cfg["shrink"] * r)]
-    cases += [(x0 + dx * cfg["shift"] * r, y0 + dy * cfg["shift"] * r, r) for dx, dy in ((0, 1), (1, 0), (0, -1), (-1, 0))]
+    x0, y0, radius = geo["x0"], geo["y0"], geo["radius_m"]
+    step = min(cfg["shift"] * geo["r"], cfg["shift_max_m"] / geo["ground"])   # 3857 m; ≤ 1 km on the ground
+    cases = [(x0, y0, cfg["shrink"] * radius), (x0, y0, cfg["grow"] * radius)]
+    cases += [(x0 + dx * step, y0 + dy * step, radius) for dx, dy in ((0, 1), (1, 0), (0, -1), (-1, 0))]
     drifts = []
     for cx, cy, cr in cases:
-        circle = _circle_mask(geo, cx, cy, cr)
-        found = _find_clusters(smooth, zone_dilated, circle, zone, fields, geo, top=1)
+        found = _pick_cluster(clusters, geo, (cx, cy), cr, top=1)
         drifts.append(hypot(found[0]["_x"] - best["_x"], found[0]["_y"] - best["_y"]) * geo["ground"]
-                      if found else geo["radius_m"])
+                      if found else radius)
     worst = max(drifts)
-    ratio = worst / max(geo["radius_m"], 1e-9)
+    ratio = worst / max(radius, 1e-9)
     level = "stable" if ratio <= cfg["stable"] else ("check" if ratio <= cfg["check"] else "unstable")
     return {"cases": len(cases), "max_drift_m": float(worst), "median_drift_m": float(np.median(drifts)),
             "max_drift_ratio": float(ratio), "level": level}
@@ -1902,7 +1952,7 @@ def classify_anchor_confidence(
         reasons.append("แปลงที่ดิน: ไม่มีข้อมูล")
     touches = bool(cluster and cluster.get("touches_boundary"))
     if touches:
-        reasons.append("cluster ชนขอบวงศึกษา — ขยายรัศมีแล้วลองใหม่")
+        reasons.append("cluster ต่อเนื่องเข้าส่วนของโซนแดงที่ยังไม่ได้สแกน (เกินโควตาไทล์/ดึงไม่สำเร็จ)")
     unstable = "unstable" in stability_levels
     if unstable:
         reasons.append("ความนิ่ง: anchor ขยับมากเมื่อวงศึกษาเปลี่ยน (ไม่นิ่ง)")
@@ -2056,7 +2106,8 @@ def run_evidence_stage(
         elif painted < cfg["plan_min_painted"] * max(pixels, 1):
             plan_state = "blank"
         else:
-            peak = _peak_zone(shares, circle, legend, (cfg["px"] // n_plan) ** 2)
+            peak = _peak_zone(shares, legend, (cfg["px"] // n_plan) ** 2)
+            peak = _zones_in_scope(peak, circle) if peak else None   # red inside the radius, zones whole
             plan_state = "ok" if peak else "no_peak"
         plan_info: Dict[str, Any] = {
             "state": plan_state, "tiles": len(plan_tiles), "tiles_ok": int(plan_ok),
@@ -2074,6 +2125,7 @@ def run_evidence_stage(
             plan_info["peak"] = {"name": "สีแดง", "rgb": seen if red_pixels else [255, 0, 0], "weight": 1.0,
                                  "commercial": True, "cells": int(zone.sum()), "area_km2": area_km2}
             plan_info["zones"] = zones
+            peak_zones = peak
             region_kind = "peak_zone"
         else:
             reason_text = {"unavailable": "ดึงภาพผังเมืองไม่สำเร็จ", "blank": "ผังเมืองว่าง/นอกพื้นที่ผังเมืองรวม",
@@ -2082,7 +2134,8 @@ def run_evidence_stage(
             if not anchor_ref or anchor_ref.get("lat") is None:
                 return finish(plan=plan_info, reason=f"{reason_text} และไม่มี anchor ถนนให้ใช้เป็นจุดค้นหา")
             fx, fy = _WEB_MERCATOR.transform(anchor_ref["lon"], anchor_ref["lat"])
-            zone = circle & _circle_mask(geo, fx, fy, cfg["fallback_radius_m"] / geo["ground"])
+            zone = _circle_mask(geo, fx, fy, cfg["fallback_radius_m"] / geo["ground"])
+            peak_zones = {"labels": zone.astype(np.int32), "big": np.array([1]), "mask": zone}
             region_kind = "fallback_disc"
             notes.append(f"{reason_text} — ใช้เฉพาะแปลงที่ดินในรัศมี {cfg['fallback_radius_m'] / 1000:g} กม. รอบ anchor ถนน")
 
@@ -2090,11 +2143,14 @@ def run_evidence_stage(
         jj, ii = np.nonzero(zone)
         gi, gj = (geo["i0"] + ii) // n_parcel, (geo["j0"] + jj) // n_parcel
         keys, counts = np.unique(np.stack([gj, gi], axis=1), axis=0, return_counts=True)
-        # most zone cells first; among equals (the interior of a big zone) the tiles nearest the study centre
-        ranked = sorted(
-            zip(counts.tolist(), keys[:, 0].tolist(), keys[:, 1].tolist()),
-            key=lambda t: (-t[0], round(hypot((t[2] + 0.5) * cfg["parcel_tile_m"] - geo["x0"],
-                                              (t[1] + 0.5) * cfg["parcel_tile_m"] - geo["y0"]), 3), t[1], t[2]))
+        # tile priority = zone cells / (1 + (distance to the study centre / reach)²): the same radius-free prior
+        # as the cluster choice, so a far zone entering with a larger radius never evicts a town tile
+        def tile_priority(count: int, tj: int, ti: int) -> Tuple[float, float, int, int]:
+            d = hypot((ti + 0.5) * cfg["parcel_tile_m"] - geo["x0"], (tj + 0.5) * cfg["parcel_tile_m"] - geo["y0"]) * geo["ground"]
+            return (-round(count / (1.0 + (d / cfg["reach_m"]) ** 2), 12), round(d, 3), tj, ti)
+
+        ranked = sorted(zip(counts.tolist(), keys[:, 0].tolist(), keys[:, 1].tolist()),
+                        key=lambda t: tile_priority(*t))
         needed = len(ranked)
         room = max(0, min(int(cfg["max_parcel_tiles"]), budget - len(plan_jobs)))
         chosen = [(ti, tj) for _, tj, ti in ranked[:room]]
@@ -2105,11 +2161,13 @@ def run_evidence_stage(
         parcel_out = _fetch_tiles(
             fetcher, parcel_jobs, lambda key, image: _parcel_tile_scores(image, m_per_px, n_parcel), deadline, tally)
         fields = {name: np.full((geo["nj"], geo["ni"]), np.nan) for name in ("score", "cover_small", "cover_shop")}
+        scanned = np.zeros((geo["nj"], geo["ni"]), dtype=bool)         # cells whose parcel tile was read
         parcel_ok = 0
         for (_, ti, tj), (status, value) in sorted(parcel_out.items(), key=lambda kv: kv[0]):
             if status == "error":
                 continue
             parcel_ok += 1
+            _paste(scanned, np.ones((n_parcel, n_parcel), dtype=bool), ti * n_parcel - geo["i0"], tj * n_parcel - geo["j0"])
             if status == "ok":
                 for name in fields:
                     _paste(fields[name], value[name], ti * n_parcel - geo["i0"], tj * n_parcel - geo["j0"])
@@ -2120,15 +2178,22 @@ def run_evidence_stage(
                        "best_score": None, "hot_threshold": None}
         have_parcels = bool(np.isfinite(fields["score"]).any())
 
-        # ---- the densest cluster inside the zone
+        # ---- the clusters of the red zone(s), whole; the circle only admits them, the study-centre prior ranks them
         smooth = _smooth_nan(fields["score"], int(cfg["smooth_cells"]))
-        zone_dilated = ndi.binary_dilation(zone, structure=np.ones((3, 3), dtype=bool)) & circle
+        zone_dilated = ndi.binary_dilation(zone, structure=np.ones((3, 3), dtype=bool))
         in_scope = zone_dilated & np.isfinite(smooth)
         if in_scope.any():
             parcel_info["best_score"] = float(smooth[in_scope].max())
+        found_clusters = (_clusters_of(smooth, peak_zones, fields, scanned, geo)
+                          if have_parcels else {"clusters": [], "labels": None})
+        if found_clusters["clusters"]:
+            parcel_info["hot_threshold"] = float(min(c["threshold"] for c in found_clusters["clusters"]))
+        elif in_scope.any():
             parcel_info["hot_threshold"] = _hot_threshold(smooth[in_scope])
-        clusters = (_find_clusters(smooth, zone_dilated, circle, zone, fields, geo, int(cfg["cluster_top"]), polygons=True)
-                    if have_parcels else [])
+        picked = _pick_cluster(found_clusters["clusters"], geo, (geo["x0"], geo["y0"]), geo["radius_m"])
+        clusters = picked[: int(cfg["cluster_top"])]
+        for record in clusters:
+            record["polygon"] = _mask_polygon(found_clusters["labels"] == record["_label"], geo)
         winner = clusters[0] if clusters else None
         if winner is None and not peak:
             return finish(plan=plan_info, parcel=parcel_info, notes=notes, reason=(
@@ -2138,10 +2203,15 @@ def run_evidence_stage(
         if winner is None:
             notes.append("ไม่พบ cluster แปลงเล็กถี่ในโซน — ใช้จุดกึ่งกลางโซนสีสูงสุดใหญ่สุดแทน" if have_parcels
                          else "อ่านรูปแปลงที่ดินไม่ได้ — ใช้จุดกึ่งกลางโซนสีสูงสุดใหญ่สุดแทน")
-            point, basis = zones[0], "zone"
+            inside_zones = [z for z in zones if calculate_distance_meters(
+                z["lat"], z["lon"], study_center[0], study_center[1]) <= study_radius_m]
+            if not inside_zones:       # the red only grazes the rim of the circle: no anchor inside the study area
+                return finish(plan=plan_info, parcel=parcel_info, notes=notes,
+                              reason="โซนแดงอยู่แค่ขอบวงศึกษา — จุดกึ่งกลางโซนอยู่นอกรัศมี")
+            point, basis = inside_zones[0], "zone"
         else:
             point, basis = winner, "cluster"
-        stability = (_evidence_stability(smooth, zone_dilated, zone, fields, geo, winner) if winner else None)
+        stability = _evidence_stability(found_clusters["clusters"], geo, winner) if winner else None
 
         # ---- confidence
         point_x, point_y = _WEB_MERCATOR.transform(point["lon"], point["lat"])
@@ -2160,7 +2230,8 @@ def run_evidence_stage(
             anchor, road_anchors, zoning_ok=zoning_ok, parcel_ok=parcel_flag, coverage=float(coverage),
             peak=peak_info, cluster=winner, stability_levels=stability_levels, cfg=cfg)
         for record in clusters:
-            record.pop("_x"), record.pop("_y")
+            for private in ("_x", "_y", "_first", "_label"):
+                record.pop(private)
         clean = all(v == 0 for v in (len(tally["errors"]), tally["skipped"], tally["timed_out"]))
         status = "ok" if (clean and region_kind == "peak_zone" and basis == "cluster" and coverage >= 1.0) else "partial"
         return finish(status=status, notes=notes, plan=plan_info, parcel=parcel_info, clusters=clusters,
@@ -4503,8 +4574,9 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
             {
                 "อันดับ": c["rank"], "Lat": round(c["lat"], 5), "Lon": round(c["lon"], 5),
                 "เซลล์": c["cells"], "เฮกตาร์": round(c["area_ha"]), "คะแนน": round(c["score"], 3),
+                "ห่างศูนย์ (กม.)": round(c["distance_m"] / 1000, 1), "คะแนนถ่วงระยะ": round(c["weighted_mass"], 1),
                 "แปลงเล็ก%": round(100 * c["cover_small"]), "ตึกแถว%": round(100 * c["cover_shop"]),
-                "ในโซนสีสูงสุด": c["in_zone"], "ชนขอบวง": c["touches_boundary"],
+                "ในโซนสีสูงสุด": c["in_zone"], "สแกนไม่ครบ": c["touches_boundary"],
             }
             for c in evidence["clusters"]
         ], hide_index=True)
