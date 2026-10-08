@@ -1622,23 +1622,35 @@ def _plan_tile_shares(rgba: np.ndarray, lut: np.ndarray, n_classes: int, cells: 
             "pixels": int(painted.size)}
 
 
+def _peak_classes(legend: List[Dict[str, Any]]) -> List[int]:
+    """Legend classes that make up the peak zone: every class flagged ``commercial`` (the red
+    พาณิชยกรรม). A legend that flags none keeps the highest-weight class with weight > 0 instead."""
+    flagged = [k for k, c in enumerate(legend) if c.get("commercial")]
+    if flagged:
+        return flagged
+    weights = [float(c.get("weight", 0.0)) for c in legend]
+    best = max(range(len(legend)), key=lambda q: (weights[q], -q), default=None)
+    return [] if best is None or weights[best] <= 0 else [best]
+
+
 def _peak_zone(shares: np.ndarray, circle: np.ndarray, legend: List[Dict[str, Any]], cell_px2: int
                ) -> Optional[Dict[str, Any]]:
-    """Highest-weight legend class that forms a real zone inside the circle (``None`` if none does)."""
+    """The red (พาณิชยกรรม) zone inside the circle: cells where ≥ ``peak_cell_share`` of the pixels
+    are a peak class, grouped 8-connected; ``None`` when no group reaches ``zone_min_cells``.
+    A lower colour is never promoted to "the highest zone" when there is no red."""
     cfg = EVIDENCE_CONFIG
-    weights = [float(c.get("weight", 0.0)) for c in legend]
-    for k in sorted(range(len(legend)), key=lambda q: (-weights[q], q)):
-        if weights[k] <= 0:
-            break  # weight 0 (farmland, conservation) is never a "peak"
-        mask = circle & (shares[k] >= cfg["peak_cell_share"] * cell_px2)
-        if not mask.any():
-            continue
-        labels, n = ndi.label(mask, structure=np.ones((3, 3), dtype=bool))
-        sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
-        big = np.flatnonzero(sizes >= cfg["zone_min_cells"]) + 1
-        if big.size:
-            return {"class": k, "labels": labels, "big": big, "sizes": sizes, "mask": np.isin(labels, big)}
-    return None
+    classes = _peak_classes(legend)
+    if not classes:
+        return None
+    mask = circle & (shares[classes].sum(axis=0) >= cfg["peak_cell_share"] * cell_px2)
+    if not mask.any():
+        return None
+    labels, n = ndi.label(mask, structure=np.ones((3, 3), dtype=bool))
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
+    big = np.flatnonzero(sizes >= cfg["zone_min_cells"]) + 1
+    if not big.size:
+        return None
+    return {"classes": classes, "labels": labels, "big": big, "sizes": sizes, "mask": np.isin(labels, big)}
 
 
 def _mask_polygon(mask: np.ndarray, geo: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2007,17 +2019,18 @@ def run_evidence_stage(
         if peak:
             zone = peak["mask"]
             zones = _zone_records(peak, geo, legend)
-            entry = legend[peak["class"]]
+            entries = [legend[k] for k in peak["classes"]]
             area_km2 = float(zone.sum() * (CELL_M * geo["ground"]) ** 2 / 1e6)
-            plan_info["peak"] = {"name": entry["name"], "rgb": list(entry["rgb"]), "weight": float(entry["weight"]),
-                                 "commercial": bool(entry.get("commercial")), "cells": int(zone.sum()),
-                                 "area_km2": area_km2}
+            plan_info["peak"] = {"name": " + ".join(e["name"] for e in entries), "rgb": list(entries[0]["rgb"]),
+                                 "weight": max(float(e.get("weight", 0.0)) for e in entries),
+                                 "commercial": any(bool(e.get("commercial")) for e in entries),
+                                 "cells": int(zone.sum()), "area_km2": area_km2}
             plan_info["zones"] = zones
             region_kind = "peak_zone"
         else:
             reason_text = {"unavailable": "ดึงภาพผังเมืองไม่สำเร็จ", "blank": "ผังเมืองว่าง/นอกพื้นที่ผังเมืองรวม",
                            "mismatch": "สีผังเมืองไม่ตรง legend (ยังไม่ calibrate)",
-                           "no_peak": "ผังเมืองไม่มีโซนที่มีน้ำหนักพอ"}[plan_state]
+                           "no_peak": "ไม่พบโซนพาณิชยกรรม (สีแดง) ในวงศึกษา"}[plan_state]
             anchor_ref = composite.get("anchor") if composite else None
             if not anchor_ref or anchor_ref.get("lat") is None:
                 return finish(plan=plan_info, reason=f"{reason_text} และไม่มี anchor ถนนให้ใช้เป็นจุดค้นหา")
@@ -4385,7 +4398,7 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
     peak = plan.get("peak")
     st.caption(f"สแกนรัศมี {study['radius_m'] / 1000:g} กม. (≈ {study['area_km2']:,.0f} ตร.กม.)"
                + (f" · ผังสีสูงสุด: {peak['name']} {peak['area_km2']:.2f} ตร.กม. ({len(plan['zones'])} โซนใหญ่)"
-                  if peak else " · ไม่พบผังสีสูงสุด"))
+                  if peak else " · ไม่พบโซนแดง (พาณิชยกรรม) ในวงศึกษา"))
     if peak:
         st.markdown(_legend_swatch_row(f"rgb({peak['rgb'][0]},{peak['rgb'][1]},{peak['rgb'][2]})",
                                        f"{peak['name']} (น้ำหนัก {peak['weight']:.2f})"),

@@ -266,18 +266,35 @@ def test_legend_lut_maps_legend_colours_and_rejects_everything_else():
     assert checked > 5
 
 
-def test_peak_is_the_highest_weight_class_that_forms_a_real_zone():
+def test_peak_is_the_red_commercial_zone_and_never_a_lower_colour():
     image = plan_window([(RED, (304, 704, 200, 600))], background=ORANGE, size=1024)   # 50 x 50 cells of red
     image[8:16, 800:824] = (*RED, 255)                                                    # a 3-cell speck
     tile, peak = peak_of(image)
     assert tile["explained"] == tile["painted"]
-    assert LEGEND[peak["class"]]["name"] == "พาณิชยกรรม"
+    assert LEGEND[peak["classes"][0]]["name"] == "พาณิชยกรรม" and len(peak["classes"]) == 1
     assert peak["mask"].sum() == 50 * 50 and len(peak["big"]) == 1           # the speck is below zone_min_cells
-    # without the big block the red speck cannot be the peak: the next colour down is
+    # no red zone: a plan that is orange / brown everywhere has NO peak — the next colour down is not "the highest zone"
     only_speck = plan_window([], background=ORANGE, size=1024)
     only_speck[8:16, 800:824] = (*RED, 255)
-    _, peak = peak_of(only_speck)
-    assert LEGEND[peak["class"]]["name"] == "ที่อยู่อาศัยหนาแน่นปานกลาง"
+    assert peak_of(only_speck)[1] is None
+    brown = plan_window([], background=(153, 76, 0), size=1024)               # ที่อยู่อาศัยหนาแน่นมาก, weight 0.8
+    assert peak_of(brown)[1] is None
+
+
+def test_all_commercial_classes_form_one_zone_and_a_legend_without_flags_keeps_the_highest_weight():
+    legend = [
+        {"name": "พาณิชยกรรม", "rgb": [255, 0, 0], "weight": 1.0, "commercial": True},
+        {"name": "พาณิชยกรรมริมทาง", "rgb": [200, 40, 120], "weight": 0.9, "commercial": True},
+        {"name": "ที่อยู่อาศัย", "rgb": [255, 153, 0], "weight": 0.5, "commercial": False},
+    ]
+    image = plan_window([((255, 0, 0), (304, 504, 200, 400)), ((200, 40, 120), (504, 704, 400, 600))],
+                        background=(255, 153, 0), size=1024)                    # two touching 25 x 25-cell blocks
+    _, peak = peak_of(image, legend=legend)
+    assert peak["mask"].sum() == 2 * 25 * 25 and len(peak["big"]) == 1       # corner to corner: one 8-connected zone
+    # a custom legend that flags nothing as commercial: the highest-weight class with weight > 0 is the peak
+    flagless = [{**c, "commercial": False} for c in legend]
+    _, peak = peak_of(image, legend=flagless)
+    assert flagless[peak["classes"][0]]["name"] == "พาณิชยกรรม" and peak["mask"].sum() == 25 * 25
 
 
 def test_zero_weight_classes_are_never_a_peak_and_unknown_colours_are_not_painted_over():
@@ -575,7 +592,7 @@ def make_world(blobs=((CORE, BLOB_M),), fail=(), calls=None, memo=None, plan="ok
             if plan == "blank":
                 return np.zeros((px, px, 4), dtype=np.uint8), info
             image = np.zeros((px, px, 4), dtype=np.uint8)
-            image[...] = (*(GREEN if plan == "ok" else (120, 120, 200)), 255)
+            image[...] = (*(GREEN if plan in ("ok", "nored") else (120, 120, 200)), 255)
             if plan == "ok":
                 image[inside] = (*RED, 255)
             return image, info
@@ -701,6 +718,28 @@ def test_an_unreadable_plan_falls_back_to_the_parcels_around_the_road_anchor(pla
     assert nowhere["status"] == "unavailable" and "anchor ถนน" in nowhere["reason"]
     outside = stage(road_found(anchor=offset(CENTER, 30_000, 0)), make_world(plan=plan_kind))
     assert outside["status"] == "unavailable" and "นอกวงศึกษา" in outside["reason"]   # nothing to scan around it
+
+
+def test_with_no_red_zone_in_the_radius_the_stage_does_not_fall_to_a_lower_colour():
+    # the plan is green everywhere: no พาณิชยกรรม ⇒ no peak zone ⇒ parcels around the road anchor, flagged
+    # partial, never HIGH (a lower colour such as dense residential is never promoted to "the highest zone")
+    result = stage(road_found(anchor=CORE), make_world(plan="nored"), radius_m=10_000.0)
+    assert result["plan"]["state"] == "no_peak" and result["plan"]["peak"] is None and result["plan"]["zones"] == []
+    assert result["status"] == "partial" and result["parcel"]["region"] == "fallback_disc"
+    assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), CORE) < 300
+    assert any("พาณิชยกรรม" in n and "รอบ anchor ถนน" in n for n in result["notes"])
+    assert result["confidence"]["signals"]["zoning"] is None and result["confidence"]["level"] != "HIGH"
+
+
+def test_several_red_zones_give_the_densest_cluster_whatever_centre_was_entered():
+    town, village = CORE, offset(CENTER, -2600, -1800)
+    world = ((town, 800.0), (village, 350.0))
+    results = [stage(road_found(anchor=town), make_world(world), radius_m=10_000.0, center=center)
+               for center in (CENTER, village, offset(CENTER, 2000, 2500))]
+    for result in results:
+        assert len(result["plan"]["zones"]) == 2
+        assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), town) < 150
+    assert len({(r["evidence_anchor"]["lat"], r["evidence_anchor"]["lon"]) for r in results}) == 1
 
 
 def test_parcels_that_cannot_be_read_leave_the_centre_of_the_peak_zone():

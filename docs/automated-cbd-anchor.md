@@ -17,7 +17,7 @@ settings; configs saved by the earlier seeded search still load (their
 
 The two anchors above use road data only: no POI, population or commerce
 queries. An **opt-in evidence stage** (below) scans the whole study circle for the
-highest-weight city-plan colour (ผังสีสูงสุด) and the densest cluster of small parcels
+red city-plan zone (ผังสีสูงสุด, พาณิชยกรรม) and the densest cluster of small parcels
 (รูปแปลงที่ดินถี่) inside it, and adds a third, purple-marker anchor with a confidence level;
 it is off by default and never changes the two road anchors. Optional rent observations
 already supported by the page are used only to fit and compare the rent model (R² at the
@@ -205,10 +205,14 @@ the search button. The road search is unchanged; afterwards `run_evidence_stage`
 2. **Plan pass.** The `cityplan_dpt` tiles that touch the circle are fetched (≤ 16, ≤ 4 in
    parallel). Every pixel is classified with a 32³ look-up table built from the legend; class shares
    are counted per cell.
-3. **Peak colour (ผังสีสูงสุด).** Legend classes are visited by weight, highest first; the peak class is
-   the first with a connected zone of ≥ 4 cells (≈ 0.06 km²) in which ≥ 40 % of each cell's pixels
-   have that colour. Weight-0 classes (farmland, conservation) are never a peak. With the
-   provisional legend the peak is พาณิชยกรรม (red), weight 1.0.
+3. **Peak colour (ผังสีสูงสุด) = the red zone.** The peak zone is made of the legend classes flagged
+   `commercial` (พาณิชยกรรม, red in the provisional legend): cells where ≥ 40 % of the pixels have that
+   colour, grouped 8-connected, kept when a group has ≥ 4 cells (≈ 0.06 km²). Green farmland and every
+   other colour are never the peak, **and when the radius holds no red zone the stage does not fall to a
+   lower colour** (e.g. dense residential): it takes the fallback below. With several red zones in the
+   radius, the densest cluster over all of them wins, so the answer does not depend on the centre you
+   typed. A custom legend file that flags no class `commercial` keeps the single highest-weight class
+   (weight > 0) as the peak; such a legend can never be "commercial", so it can never reach HIGH.
 4. **Parcel pass.** `dol` tiles are fetched **only where the peak zone is**: ≤ 16 tiles, the ones
    with most zone cells first, nearest the study centre among equals. One label pass per tile
    (the same boundary-line / line-width logic as `parcel_features`) gives every lot's centroid, area
@@ -224,8 +228,8 @@ the search button. The road search is unchanged; afterwards `run_evidence_stage`
    score-weighted centroid of the best cluster**. It is not snapped to a road node (Rent Gradient only
    needs `lat`/`lon`). No cluster ⇒ the centre of the largest peak zone (`basis = "zone"`,
    LOW). No peak zone ⇒ see the fallback below.
-7. **Fallback (plan unreadable).** A blank plan, an area outside the published plan, a legend that
-   explains < 50 % of the painted pixels, or no weighted zone make the stage look at the parcels within
+7. **Fallback (no red zone / plan unreadable).** No red zone in the radius, a blank plan, an area outside the
+   published plan, or a legend that explains < 50 % of the painted pixels make the stage look at the parcels within
    1.5 km of the composite road anchor instead: `status = "partial"`, the zoning signal is unknown (never
    HIGH) and the note says why. Without a composite anchor ⇒ `unavailable`.
 8. **Confidence.** HIGH needs roads (a road anchor ≤ 300 m away), zoning (peak colour is พาณิชยกรรม
