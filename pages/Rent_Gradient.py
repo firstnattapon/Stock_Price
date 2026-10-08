@@ -1417,15 +1417,16 @@ EVIDENCE_CONFIG: Dict[str, Any] = {
     "parcel_window_m": 1000.0,      # nominal ground size of one parcel window (capture script / fixture tests)
     "parcel_layer": "dol",
     "plan_layer": "cityplan_dpt",
-    "peak_cell_share": 0.40,        # a cell belongs to the peak zone when this share of its pixels is the peak colour
+    "peak_cell_share": 0.40,        # a cell belongs to the peak zone when this share of its pixels is red
     "zone_min_cells": 4,            # a peak zone needs this many connected cells (~0.06 km²)
     "zone_top": 5,
     "plan_min_painted": 0.002,      # painted share of the plan pixels below this = blank / outside the plan
-    "legend_min_explained": 0.50,   # the legend must explain this share of the painted pixels, else colours are off
     "fallback_radius_m": 1500.0,    # plan unreadable: look this far around the composite road anchor instead
     "cover_ref": 0.50,              # a cell half covered by small lots already scores full
     "smooth_cells": 3,              # box mean over 3x3 cells before looking for hot cells
-    "hot_score": 0.50,
+    "hot_score": 0.50,              # a smoothed cell this dense is hot in absolute terms ...
+    "hot_quantile": 0.75,           # ... otherwise the densest quarter of the red zone is (never below hot_floor)
+    "hot_floor": 0.10,
     "cluster_min_cells": 3,
     "cluster_top": 5,
     "max_plan_tiles": 16,
@@ -1605,8 +1606,22 @@ def _legend_lut(legend: List[Dict[str, Any]], tolerance: float) -> np.ndarray:
     return lut
 
 
+def _is_red_family(r: int, g: int, b: int) -> bool:
+    """Red or pink at any strength: red is the channel maximum, reasonably saturated and bright, hue
+    between magenta-pink (-30°) and red-orange (+15°). Orange, brown, yellow, green, blue and purple
+    are not. Scalar twin of the vectorised test in :func:`_plan_tile_shares`."""
+    mx, mn = max(r, g, b), min(r, g, b)
+    d = mx - mn
+    return r == mx and mx >= 128 and 5 * d >= mx and 2 * (g - b) >= -d and 4 * (g - b) <= d
+
+
 def _plan_tile_shares(rgba: np.ndarray, lut: np.ndarray, n_classes: int, cells: int) -> Dict[str, Any]:
-    """Pixels of every legend class per cell of one plan tile, plus painted / explained pixel counts."""
+    """Pixels per cell of every legend class and of **red** (the last channel), plus the painted /
+    explained counts, the colour of the red pixels and a coarse colour histogram (diagnostics).
+
+    Red is recognised by hue, not by an exact legend colour: the peak colour is the user's own
+    definition ("สีแดง คือ โซนสูงสุด"), and Longdo's real shade is not known here.
+    """
     if rgba.ndim != 3 or rgba.shape[2] != 4 or rgba.shape[0] != rgba.shape[1] or rgba.shape[0] % cells:
         raise ValueError(f"unexpected plan image shape {rgba.shape}")
     painted = rgba[..., 3] > PARCEL_CONFIG["alpha_threshold"]
@@ -1614,31 +1629,46 @@ def _plan_tile_shares(rgba: np.ndarray, lut: np.ndarray, n_classes: int, cells: 
         | (rgba[..., 2] >> 3).astype(np.int32)
     cls = lut[key]
     cls[~painted] = -1
+    rgb = rgba[..., :3].astype(np.int16)
+    mx, mn = rgb.max(axis=2), rgb.min(axis=2)
+    d, gb = mx - mn, rgb[..., 1] - rgb[..., 2]
+    red = painted & (rgb[..., 0] == mx) & (mx >= 128) & (5 * d >= mx) & (2 * gb >= -d) & (4 * gb <= d)
     px = rgba.shape[0] // cells
-    shares = np.zeros((n_classes, cells, cells), dtype=np.uint16)
+    shares = np.zeros((n_classes + 1, cells, cells), dtype=np.uint16)
     for k in range(n_classes):
         shares[k] = (cls == k).reshape(cells, px, cells, px).sum(axis=(1, 3))
+    shares[n_classes] = red.reshape(cells, px, cells, px).sum(axis=(1, 3))
+    sample = painted[::4, ::4]
+    keys4 = (((rgba[::4, ::4, 0] >> 4).astype(np.int32) << 8) | ((rgba[::4, ::4, 1] >> 4).astype(np.int32) << 4)
+             | (rgba[::4, ::4, 2] >> 4).astype(np.int32))[sample]
+    values, counts = np.unique(keys4, return_counts=True)
     return {"shares": shares[:, ::-1, :], "painted": int(painted.sum()), "explained": int((cls >= 0).sum()),
-            "pixels": int(painted.size)}
+            "pixels": int(painted.size), "red_pixels": int(red.sum()),
+            "red_sum": rgb[red].sum(axis=0).astype(np.int64) if red.any() else np.zeros(3, dtype=np.int64),
+            "colours": {int(v): int(n) for v, n in zip(values, counts)}}
+
+
+def _peak_classes(legend: List[Dict[str, Any]]) -> List[int]:
+    """Legend classes that count as the peak zone besides red-by-hue: those flagged ``commercial``."""
+    return [k for k, c in enumerate(legend) if c.get("commercial")]
 
 
 def _peak_zone(shares: np.ndarray, circle: np.ndarray, legend: List[Dict[str, Any]], cell_px2: int
                ) -> Optional[Dict[str, Any]]:
-    """Highest-weight legend class that forms a real zone inside the circle (``None`` if none does)."""
+    """The red zone inside the circle: cells where ≥ ``peak_cell_share`` of the pixels are red (by hue)
+    or a legend class flagged ``commercial``, grouped 8-connected; ``None`` when no group reaches
+    ``zone_min_cells``. A lower colour is never promoted to "the highest zone" when there is no red."""
     cfg = EVIDENCE_CONFIG
-    weights = [float(c.get("weight", 0.0)) for c in legend]
-    for k in sorted(range(len(legend)), key=lambda q: (-weights[q], q)):
-        if weights[k] <= 0:
-            break  # weight 0 (farmland, conservation) is never a "peak"
-        mask = circle & (shares[k] >= cfg["peak_cell_share"] * cell_px2)
-        if not mask.any():
-            continue
-        labels, n = ndi.label(mask, structure=np.ones((3, 3), dtype=bool))
-        sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
-        big = np.flatnonzero(sizes >= cfg["zone_min_cells"]) + 1
-        if big.size:
-            return {"class": k, "labels": labels, "big": big, "sizes": sizes, "mask": np.isin(labels, big)}
-    return None
+    classes = _peak_classes(legend) + [shares.shape[0] - 1]          # the last channel is red-by-hue
+    mask = circle & (shares[classes].sum(axis=0) >= cfg["peak_cell_share"] * cell_px2)
+    if not mask.any():
+        return None
+    labels, n = ndi.label(mask, structure=np.ones((3, 3), dtype=bool))
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
+    big = np.flatnonzero(sizes >= cfg["zone_min_cells"]) + 1
+    if not big.size:
+        return None
+    return {"classes": classes, "labels": labels, "big": big, "sizes": sizes, "mask": np.isin(labels, big)}
 
 
 def _mask_polygon(mask: np.ndarray, geo: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1670,6 +1700,21 @@ def _cell_lonlat(geo: Dict[str, Any], col: float, row: float) -> Tuple[float, fl
     """``(lat, lon)`` of a (fractional) lattice-local cell position; ``+0.5`` is the cell centre."""
     lon, lat = _WEB_MERCATOR_INV.transform((geo["i0"] + col + 0.5) * CELL_M, (geo["j0"] + row + 0.5) * CELL_M)
     return float(lat), float(lon)
+
+
+def _dominant_colours(histogram: Dict[int, int], legend: List[Dict[str, Any]], top: int = 6) -> List[Dict[str, Any]]:
+    """Most common painted colours of the plan tiles (4 bits per channel), each with the legend class
+    it matches (``None`` = unknown) and whether it counts as red — what to read when colours look off."""
+    total = sum(histogram.values()) or 1
+    out = []
+    for key4, count in sorted(histogram.items(), key=lambda kv: (-kv[1], kv[0]))[:top]:
+        r, g, b = ((key4 >> 8) & 15) * 16 + 8, ((key4 >> 4) & 15) * 16 + 8, (key4 & 15) * 16 + 8
+        distances = [hypot(hypot(r - c["rgb"][0], g - c["rgb"][1]), b - c["rgb"][2]) for c in legend]
+        best = min(range(len(legend)), key=lambda k: (distances[k], k), default=None)
+        matched = legend[best]["name"] if best is not None and distances[best] <= ZONING_COLOR_TOLERANCE else None
+        out.append({"hex": "#%02x%02x%02x" % (r, g, b), "share": count / total, "legend": matched,
+                    "red": _is_red_family(r, g, b)})
+    return out
 
 
 def _zone_records(zone: Dict[str, Any], geo: Dict[str, Any], legend: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1735,6 +1780,15 @@ def _smooth_nan(score: np.ndarray, size: int) -> np.ndarray:
     return out
 
 
+def _hot_threshold(values: np.ndarray) -> float:
+    """Smoothed score from which a cell is hot: ``hot_score`` when the red zone is that dense, else the
+    densest quarter of its scored cells (never below ``hot_floor``). Real lot patterns are far less
+    regular than the synthetic ones the 0.5 was set on, so "ถี่" must also work relative to the zone;
+    how convincing the cluster is in absolute terms is left to the confidence."""
+    cfg = EVIDENCE_CONFIG
+    return float(min(cfg["hot_score"], max(cfg["hot_floor"], np.quantile(values, cfg["hot_quantile"]))))
+
+
 def _find_clusters(
     smooth: np.ndarray,
     region: np.ndarray,
@@ -1748,7 +1802,10 @@ def _find_clusters(
     """Connected hot cells inside ``region ∩ circle``, densest mass first (ties: raster order)."""
     cfg = EVIDENCE_CONFIG
     finite = np.isfinite(smooth)
-    hot = region & circle & finite & (np.where(finite, smooth, -1.0) >= cfg["hot_score"])
+    scope = region & circle & finite
+    if not scope.any():
+        return []
+    hot = scope & (np.where(finite, smooth, -1.0) >= _hot_threshold(smooth[scope]))
     labels, n = ndi.label(hot, structure=np.ones((3, 3), dtype=bool))
     if n == 0:
         return []
@@ -1977,8 +2034,10 @@ def run_evidence_stage(
         plan_out = _fetch_tiles(
             fetcher, plan_jobs,
             lambda key, image: _plan_tile_shares(image, lut, len(legend), n_plan), deadline, tally)
-        shares = np.zeros((len(legend), geo["nj"], geo["ni"]), dtype=np.uint16)
-        painted = explained = pixels = plan_ok = 0
+        shares = np.zeros((len(legend) + 1, geo["nj"], geo["ni"]), dtype=np.uint16)   # legend classes + red
+        painted = explained = pixels = plan_ok = red_pixels = 0
+        red_sum = np.zeros(3, dtype=np.int64)
+        histogram: Dict[int, int] = {}
         for (_, tx, ty), (status, value) in sorted(plan_out.items(), key=lambda kv: kv[0]):
             if status != "ok":
                 continue
@@ -1987,19 +2046,22 @@ def run_evidence_stage(
             painted += value["painted"]
             explained += value["explained"]
             pixels += value["pixels"]
+            red_pixels += value["red_pixels"]
+            red_sum += value["red_sum"]
+            for key4, count in value["colours"].items():
+                histogram[key4] = histogram.get(key4, 0) + count
         peak = None
         if plan_ok == 0:
             plan_state = "unavailable"
         elif painted < cfg["plan_min_painted"] * max(pixels, 1):
             plan_state = "blank"
-        elif explained < cfg["legend_min_explained"] * painted:
-            plan_state = "mismatch"
         else:
             peak = _peak_zone(shares, circle, legend, (cfg["px"] // n_plan) ** 2)
             plan_state = "ok" if peak else "no_peak"
         plan_info: Dict[str, Any] = {
             "state": plan_state, "tiles": len(plan_tiles), "tiles_ok": int(plan_ok),
-            "explained": (explained / painted) if painted else None, "peak": None, "zones": []}
+            "explained": (explained / painted) if painted else None, "peak": None, "zones": [],
+            "colours": _dominant_colours(histogram, legend)}
 
         # ---- search region: the peak zone, or (plan unreadable) a disc around the road anchor
         notes: List[str] = []
@@ -2007,17 +2069,15 @@ def run_evidence_stage(
         if peak:
             zone = peak["mask"]
             zones = _zone_records(peak, geo, legend)
-            entry = legend[peak["class"]]
             area_km2 = float(zone.sum() * (CELL_M * geo["ground"]) ** 2 / 1e6)
-            plan_info["peak"] = {"name": entry["name"], "rgb": list(entry["rgb"]), "weight": float(entry["weight"]),
-                                 "commercial": bool(entry.get("commercial")), "cells": int(zone.sum()),
-                                 "area_km2": area_km2}
+            seen = (red_sum / max(red_pixels, 1)).round().astype(int).tolist()     # the red Longdo really serves
+            plan_info["peak"] = {"name": "สีแดง", "rgb": seen if red_pixels else [255, 0, 0], "weight": 1.0,
+                                 "commercial": True, "cells": int(zone.sum()), "area_km2": area_km2}
             plan_info["zones"] = zones
             region_kind = "peak_zone"
         else:
             reason_text = {"unavailable": "ดึงภาพผังเมืองไม่สำเร็จ", "blank": "ผังเมืองว่าง/นอกพื้นที่ผังเมืองรวม",
-                           "mismatch": "สีผังเมืองไม่ตรง legend (ยังไม่ calibrate)",
-                           "no_peak": "ผังเมืองไม่มีโซนที่มีน้ำหนักพอ"}[plan_state]
+                           "no_peak": "ไม่พบโซนพาณิชยกรรม (สีแดง) ในวงศึกษา"}[plan_state]
             anchor_ref = composite.get("anchor") if composite else None
             if not anchor_ref or anchor_ref.get("lat") is None:
                 return finish(plan=plan_info, reason=f"{reason_text} และไม่มี anchor ถนนให้ใช้เป็นจุดค้นหา")
@@ -2055,12 +2115,18 @@ def run_evidence_stage(
                     _paste(fields[name], value[name], ti * n_parcel - geo["i0"], tj * n_parcel - geo["j0"])
         coverage = parcel_ok / needed if needed else 0.0
         parcel_info = {"region": region_kind, "tiles_needed": needed, "tiles_ok": parcel_ok,
-                       "tiles_skipped": needed - parcel_ok}
+                       "tiles_skipped": needed - parcel_ok,
+                       "lots": int(sum(v["lots"] for st_, v in parcel_out.values() if st_ == "ok")),
+                       "best_score": None, "hot_threshold": None}
         have_parcels = bool(np.isfinite(fields["score"]).any())
 
         # ---- the densest cluster inside the zone
         smooth = _smooth_nan(fields["score"], int(cfg["smooth_cells"]))
         zone_dilated = ndi.binary_dilation(zone, structure=np.ones((3, 3), dtype=bool)) & circle
+        in_scope = zone_dilated & np.isfinite(smooth)
+        if in_scope.any():
+            parcel_info["best_score"] = float(smooth[in_scope].max())
+            parcel_info["hot_threshold"] = _hot_threshold(smooth[in_scope])
         clusters = (_find_clusters(smooth, zone_dilated, circle, zone, fields, geo, int(cfg["cluster_top"]), polygons=True)
                     if have_parcels else [])
         winner = clusters[0] if clusters else None
@@ -4355,6 +4421,26 @@ def _evidence_thumbnail(rgba: np.ndarray, size: int = 340) -> Any:
     return card.convert("RGB").resize((size, size))
 
 
+def _evidence_diagnostics(evidence: Dict[str, Any]) -> None:
+    """What the stage actually read: the plan's dominant colours (and which count as red) and how many
+    lots / how dense the parcels were — the numbers to look at when the answer looks wrong."""
+    plan, parcel = evidence.get("plan") or {}, evidence.get("parcel") or {}
+    with st.expander("วินิจฉัยการอ่านภาพ (สีผังเมือง + แปลงที่ดิน)"):
+        explained = plan.get("explained")
+        st.caption(f"ผังเมือง: {plan.get('state', '—')} · อ่านได้ {plan.get('tiles_ok', 0)}/{plan.get('tiles', 0)} ไทล์"
+                   + (f" · legend อธิบายสีได้ {explained:.0%}" if explained is not None else ""))
+        if plan.get("colours"):
+            st.dataframe([{"สี": c["hex"], "สัดส่วน %": round(100 * c["share"], 1), "ตรง legend": c["legend"] or "—",
+                           "นับเป็นแดง": c["red"]} for c in plan["colours"]], hide_index=True)
+        if parcel.get("best_score") is not None:
+            st.caption(f"แปลงที่ดิน: อ่านได้ {parcel.get('lots', 0):,} แปลงใน {parcel.get('tiles_ok', 0)}/"
+                       f"{parcel.get('tiles_needed', 0)} ไทล์ · คะแนนความถี่สูงสุดในโซน {parcel['best_score']:.2f} · "
+                       f"เกณฑ์ cluster {parcel['hot_threshold']:.2f}")
+        elif parcel.get("tiles_needed"):
+            st.caption(f"แปลงที่ดิน: อ่านได้ {parcel.get('lots', 0):,} แปลงใน {parcel.get('tiles_ok', 0)}/"
+                       f"{parcel.get('tiles_needed', 0)} ไทล์ แต่ไม่มีเซลล์ที่วัดความถี่ได้")
+
+
 def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, Any]]) -> None:
     """Peak colour, dense parcel cluster, confidence and stability of the evidence stage."""
     fetch = evidence.get("fetch", {})
@@ -4363,12 +4449,14 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
                    icon="⚠️")
         return
     if evidence.get("legend_source") == "provisional":
-        st.warning("สีผังเมืองที่ใช้อ่านภาพยังเป็นค่าชั่วคราว (ยังไม่ calibrate กับภาพจริงของ Longdo) "
-                   "— ใช้เป็นหลักฐานประกอบ ไม่ใช่คำตอบสุดท้าย", icon="⚠️")
+        st.warning("โซนแดงอ่านตามเฉดสี (ไม่ผูกกับ legend) แต่สีผังเมืองอื่นยังเป็นค่าชั่วคราว "
+                   "(ยังไม่ calibrate กับภาพจริงของ Longdo) — ใช้เป็นหลักฐานประกอบ ไม่ใช่คำตอบสุดท้าย",
+                   icon="⚠️")
     if evidence.get("status") == "unavailable" or not evidence.get("evidence_anchor"):
         st.warning(f"ไม่ได้หลักฐานเสริม: {evidence.get('reason') or 'ไม่ทราบสาเหตุ'} — ใช้ผลจากถนนอย่างเดียว")
         if fetch.get("errors"):
             st.caption("; ".join(fetch["errors"][:3]))
+        _evidence_diagnostics(evidence)
         return
     anchor, confidence = evidence["evidence_anchor"], evidence["confidence"]
     study, plan, parcel = evidence["study"], evidence["plan"], evidence["parcel"]
@@ -4385,10 +4473,11 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
     peak = plan.get("peak")
     st.caption(f"สแกนรัศมี {study['radius_m'] / 1000:g} กม. (≈ {study['area_km2']:,.0f} ตร.กม.)"
                + (f" · ผังสีสูงสุด: {peak['name']} {peak['area_km2']:.2f} ตร.กม. ({len(plan['zones'])} โซนใหญ่)"
-                  if peak else " · ไม่พบผังสีสูงสุด"))
+                  if peak else " · ไม่พบโซนแดง (พาณิชยกรรม) ในวงศึกษา"))
     if peak:
         st.markdown(_legend_swatch_row(f"rgb({peak['rgb'][0]},{peak['rgb'][1]},{peak['rgb'][2]})",
-                                       f"{peak['name']} (น้ำหนัก {peak['weight']:.2f})"),
+                                       f"{peak['name']} (พาณิชยกรรม) — สีที่อ่านได้จริง "
+                                       f"rgb({peak['rgb'][0]},{peak['rgb'][1]},{peak['rgb'][2]})"),
                     unsafe_allow_html=True)
     stability = evidence.get("stability")
     if stability:
@@ -4408,6 +4497,7 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
     st.checkbox("ใช้ Evidence Anchor คำนวณ Rent Gradient", key="rent_use_evidence_anchor",
                 on_change=_on_rent_anchor_toggle,
                 help="ค่าเริ่มต้น: Rent ใช้ anchor ① Composite — ติ๊กเมื่อยอมรับหลักฐานผังเมือง/แปลงที่ดินแล้ว")
+    _evidence_diagnostics(evidence)
     with st.expander("รายละเอียดหลักฐาน (cluster + ภาพ)"):
         st.dataframe([
             {

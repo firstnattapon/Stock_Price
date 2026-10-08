@@ -17,7 +17,7 @@ settings; configs saved by the earlier seeded search still load (their
 
 The two anchors above use road data only: no POI, population or commerce
 queries. An **opt-in evidence stage** (below) scans the whole study circle for the
-highest-weight city-plan colour (ผังสีสูงสุด) and the densest cluster of small parcels
+red city-plan zone (ผังสีสูงสุด, พาณิชยกรรม) and the densest cluster of small parcels
 (รูปแปลงที่ดินถี่) inside it, and adds a third, purple-marker anchor with a confidence level;
 it is off by default and never changes the two road anchors. Optional rent observations
 already supported by the page are used only to fit and compare the rent model (R² at the
@@ -205,10 +205,17 @@ the search button. The road search is unchanged; afterwards `run_evidence_stage`
 2. **Plan pass.** The `cityplan_dpt` tiles that touch the circle are fetched (≤ 16, ≤ 4 in
    parallel). Every pixel is classified with a 32³ look-up table built from the legend; class shares
    are counted per cell.
-3. **Peak colour (ผังสีสูงสุด).** Legend classes are visited by weight, highest first; the peak class is
-   the first with a connected zone of ≥ 4 cells (≈ 0.06 km²) in which ≥ 40 % of each cell's pixels
-   have that colour. Weight-0 classes (farmland, conservation) are never a peak. With the
-   provisional legend the peak is พาณิชยกรรม (red), weight 1.0.
+3. **Peak colour (ผังสีสูงสุด) = the red zone.** Red is recognised **by hue**, not by an exact legend
+   colour: red is the largest channel, the colour is reasonably saturated (≥ 20 %) and bright, and its hue
+   lies between magenta-pink and red-orange (−30°…+15°), so pure red, dark red and pink all count while
+   orange, brown, yellow, green, blue and purple do not. (Longdo's real shade is not known here; a legend
+   class flagged `commercial` is also counted.) Cells where ≥ 40 % of the pixels are red, grouped
+   8-connected and kept when a group has ≥ 4 cells (≈ 0.06 km²), are the peak zone. Green farmland and
+   every other colour are never the peak, **and when the radius holds no red zone the stage does not fall
+   to a lower colour** (e.g. dense residential): it takes the fallback below. With several red zones in
+   the radius, the densest cluster over all of them wins, so the answer does not depend on the centre you
+   typed. The colour that was actually read is reported (`plan.peak.rgb`), together with the dominant
+   colours of the plan tiles (`plan.colours`: hex, share, matching legend class, counted as red or not).
 4. **Parcel pass.** `dol` tiles are fetched **only where the peak zone is**: ≤ 16 tiles, the ones
    with most zone cells first, nearest the study centre among equals. One label pass per tile
    (the same boundary-line / line-width logic as `parcel_features`) gives every lot's centroid, area
@@ -218,14 +225,18 @@ the search button. The road search is unchanged; afterwards `run_evidence_stage`
    0.4·clip(cover_shop/0.5) + 0.3·clip(cover_small/0.5) + 0.3·scaled ink. Coverage, not lot-count
    shares: ten shophouses beside farmland score 0.13, a shophouse quarter 0.88, town / suburb /
    rural 0.07 / 0.03 / 0.00 (synthetic scenes). A cell without drawn lines is **no data**, not low.
-6. **Dense cluster (ถี่ cluster).** 3×3 box mean over cells with data; hot cells score ≥ 0.5 and lie
-   inside the peak zone (dilated by one cell) and the circle; 8-connected groups of ≥ 3 cells are
+6. **Dense cluster (ถี่ cluster).** 3×3 box mean over cells with data; hot cells lie inside the peak
+   zone (dilated by one cell) and the circle and are dense **in absolute terms (smoothed score ≥ 0.5) or,
+   when the zone is less regular than that, among the densest quarter of its scored cells** (never below
+   0.10): real lot patterns are far less regular than the synthetic ones 0.5 was set on, so "ถี่" must also
+   work relative to the zone, while the confidence still judges the cluster in absolute terms
+   (cluster score ≥ 0.5). 8-connected groups of ≥ 3 cells are
    clusters, ranked by mass (Σ score; ties: raster order). The **evidence anchor is the
    score-weighted centroid of the best cluster**. It is not snapped to a road node (Rent Gradient only
    needs `lat`/`lon`). No cluster ⇒ the centre of the largest peak zone (`basis = "zone"`,
    LOW). No peak zone ⇒ see the fallback below.
-7. **Fallback (plan unreadable).** A blank plan, an area outside the published plan, a legend that
-   explains < 50 % of the painted pixels, or no weighted zone make the stage look at the parcels within
+7. **Fallback (no red zone / plan unreadable).** No red zone in the radius, a blank plan or an area outside the
+   published plan make the stage look at the parcels within
    1.5 km of the composite road anchor instead: `status = "partial"`, the zoning signal is unknown (never
    HIGH) and the note says why. Without a composite anchor ⇒ `unavailable`.
 8. **Confidence.** HIGH needs roads (a road anchor ≤ 300 m away), zoning (peak colour is พาณิชยกรรม
@@ -289,10 +300,11 @@ Three things in the current design are specifically unverified against the real 
   falls back to the parcels around the composite road anchor (`partial`, never HIGH). `plan_tile_m` is
   a config key; use `--radius-km 7.7` in the capture command below so its overview window equals one
   plan tile.
-- **`peak_cell_share` (0.4)** and the 50 % "legend explains the painted pixels" gate depend on how
-  outlines, labels and antialiasing look. A wrong legend shows up as `plan.state = "mismatch"` in the
-  JSON and in the notes, not as a silently wrong peak colour.
-- **The cell-score references** (`cover_ref` 0.5, hot ≥ 0.5) were set on the four synthetic scenes.
+- **`peak_cell_share` (0.4)** depends on how outlines, labels and antialiasing look. Red itself needs no
+  legend colour (hue rule), and `plan.colours` / the *วินิจฉัยการอ่านภาพ* expander list the dominant colours
+  actually read, so a shade the rule misses is visible rather than silently wrong.
+- **The cell-score references** (`cover_ref` 0.5, absolute hot 0.5, quantile 0.75, floor 0.10) were set on
+  synthetic scenes; the expander shows the lots read, the densest score found and the threshold used.
 
 To calibrate, on a machine that can reach Longdo:
 

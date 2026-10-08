@@ -266,18 +266,47 @@ def test_legend_lut_maps_legend_colours_and_rejects_everything_else():
     assert checked > 5
 
 
-def test_peak_is_the_highest_weight_class_that_forms_a_real_zone():
+def test_peak_is_the_red_commercial_zone_and_never_a_lower_colour():
     image = plan_window([(RED, (304, 704, 200, 600))], background=ORANGE, size=1024)   # 50 x 50 cells of red
     image[8:16, 800:824] = (*RED, 255)                                                    # a 3-cell speck
     tile, peak = peak_of(image)
     assert tile["explained"] == tile["painted"]
-    assert LEGEND[peak["class"]]["name"] == "พาณิชยกรรม"
     assert peak["mask"].sum() == 50 * 50 and len(peak["big"]) == 1           # the speck is below zone_min_cells
-    # without the big block the red speck cannot be the peak: the next colour down is
+    # no red zone: a plan that is orange / brown everywhere has NO peak — the next colour down is not "the highest zone"
     only_speck = plan_window([], background=ORANGE, size=1024)
     only_speck[8:16, 800:824] = (*RED, 255)
-    _, peak = peak_of(only_speck)
-    assert LEGEND[peak["class"]]["name"] == "ที่อยู่อาศัยหนาแน่นปานกลาง"
+    assert peak_of(only_speck)[1] is None
+    brown = plan_window([], background=(153, 76, 0), size=1024)               # ที่อยู่อาศัยหนาแน่นมาก, weight 0.8
+    assert peak_of(brown)[1] is None
+
+
+def test_red_is_recognised_by_hue_so_any_red_or_pink_shade_counts_and_no_other_colour_does():
+    red = [(255, 0, 0), (150, 0, 0), (214, 140, 170), (255, 170, 190), (230, 60, 60), (200, 40, 120), (255, 60, 20)]
+    other = [(255, 153, 0), (153, 76, 0), (255, 255, 0), (0, 176, 80), (0, 100, 0), (0, 0, 255), (153, 51, 255),
+             (128, 128, 128), (255, 255, 255), (0, 0, 0), (250, 230, 235), (100, 0, 0)]
+    assert all(page._is_red_family(*c) for c in red)
+    assert not any(page._is_red_family(*c) for c in other)
+    # the vectorised test used on the tiles is the same function
+    rng = np.random.default_rng(11)
+    image = np.dstack([rng.integers(0, 256, size=(128, 128, 3), dtype=np.uint8), np.full((128, 128), 255, np.uint8)])
+    tile = page._plan_tile_shares(image, page._legend_lut(LEGEND, page.ZONING_COLOR_TOLERANCE), len(LEGEND), 16)
+    assert tile["red_pixels"] == sum(page._is_red_family(*map(int, px)) for px in image.reshape(-1, 4)[:, :3])
+    assert tile["shares"][-1].sum() == tile["red_pixels"] > 100
+
+
+def test_commercial_flagged_classes_join_red_and_other_colours_never_do():
+    legend = [
+        {"name": "พาณิชยกรรม", "rgb": [255, 0, 0], "weight": 1.0, "commercial": True},
+        {"name": "ย่านการค้าสีน้ำเงิน", "rgb": [30, 144, 255], "weight": 0.9, "commercial": True},
+        {"name": "ที่อยู่อาศัย", "rgb": [255, 153, 0], "weight": 0.5, "commercial": False},
+    ]
+    image = plan_window([((255, 0, 0), (304, 504, 200, 400)), ((30, 144, 255), (504, 704, 400, 600))],
+                        background=(255, 153, 0), size=1024)                    # two 25 x 25-cell blocks, corner to corner
+    _, peak = peak_of(image, legend=legend)
+    assert peak["mask"].sum() == 2 * 25 * 25 and len(peak["big"]) == 1
+    flagless = [{**c, "commercial": False} for c in legend]                   # red still counts, blue does not
+    _, peak = peak_of(image, legend=flagless)
+    assert peak["mask"].sum() == 25 * 25
 
 
 def test_zero_weight_classes_are_never_a_peak_and_unknown_colours_are_not_painted_over():
@@ -540,18 +569,34 @@ _PARCEL_IMAGES = {}
 
 def _parcel_scene(kind):
     if kind not in _PARCEL_IMAGES:
-        _PARCEL_IMAGES[kind] = dol_window(*SCENES[kind], mpp=TILE_MPP, specks=300)
+        dims = SCENES[kind] if isinstance(kind, str) else kind
+        _PARCEL_IMAGES[kind] = dol_window(*dims, mpp=TILE_MPP, specks=300)
     return _PARCEL_IMAGES[kind]
 
 
-def make_world(blobs=((CORE, BLOB_M),), fail=(), calls=None, memo=None, plan="ok", delay=0.0):
+MID_LOTS = (8.0, 14.0)      # a mid-density town: lots of ~110 m², not ตึกแถว — scores ~0.4, below the absolute 0.5
+
+
+def make_world(blobs=((CORE, BLOB_M),), fail=(), calls=None, memo=None, plan="ok", delay=0.0,
+               red=RED, dense=None, inside_scene="shophouse", dense_scene="shophouse"):
     """A fake Longdo: ``cityplan_dpt`` is green with a red disc per blob, ``dol`` is shophouse lots
     inside a blob and suburban lots elsewhere. Pixels are placed by their Web-Mercator position, so
     any bbox of the lattice is served consistently. ``memo`` emulates the disk cache."""
-    discs = []
-    for point, radius_m in blobs:
-        x, y = page._WEB_MERCATOR.transform(point[1], point[0])
-        discs.append((x, y, radius_m / cos(radians(point[0]))))
+    def disc_list(items):
+        out = []
+        for point, radius_m in items:
+            x, y = page._WEB_MERCATOR.transform(point[1], point[0])
+            out.append((x, y, radius_m / cos(radians(point[0]))))
+        return out
+
+    discs, dense_discs = disc_list(blobs), disc_list(dense or ())
+
+    def inside_of(xs, ys, items):
+        mask = np.zeros((len(ys), len(xs)), dtype=bool)
+        for x, y, r in items:
+            if abs(xs.mean() - x) < r + (xs[-1] - xs[0]) and abs(ys.mean() - y) < r + (ys[0] - ys[-1]):
+                mask |= (xs[None, :] - x) ** 2 + (ys[:, None] - y) ** 2 <= r * r
+        return mask
 
     def fetch(layer, bbox, px):
         if delay:
@@ -567,21 +612,22 @@ def make_world(blobs=((CORE, BLOB_M),), fail=(), calls=None, memo=None, plan="ok
             return None, {"layer": layer, "error": "HTTP 500", "from_cache": False}
         xs = bbox[0] + (np.arange(px) + 0.5) * (bbox[2] - bbox[0]) / px
         ys = bbox[3] - (np.arange(px) + 0.5) * (bbox[3] - bbox[1]) / px
-        inside = np.zeros((px, px), dtype=bool)
-        for x, y, r in discs:
-            if abs(xs.mean() - x) < r + (bbox[2] - bbox[0]) and abs(ys.mean() - y) < r + (bbox[3] - bbox[1]):
-                inside |= (xs[None, :] - x) ** 2 + (ys[:, None] - y) ** 2 <= r * r
+        inside = inside_of(xs, ys, discs)
         if kind == "plan":
             if plan == "blank":
                 return np.zeros((px, px, 4), dtype=np.uint8), info
             image = np.zeros((px, px, 4), dtype=np.uint8)
-            image[...] = (*(GREEN if plan == "ok" else (120, 120, 200)), 255)
+            image[...] = (*(GREEN if plan in ("ok", "nored") else (120, 120, 200)), 255)
             if plan == "ok":
-                image[inside] = (*RED, 255)
+                image[inside] = (*red, 255)
             return image, info
         if not inside.any():
             return _parcel_scene("suburb").copy(), info
-        return np.where(inside[..., None], _parcel_scene("shophouse"), _parcel_scene("suburb")).astype(np.uint8), info
+        picture = np.where(inside[..., None], _parcel_scene(inside_scene if dense is None else "town"),
+                           _parcel_scene("suburb"))
+        if dense is not None:
+            picture = np.where(inside_of(xs, ys, dense_discs)[..., None], _parcel_scene(dense_scene), picture)
+        return picture.astype(np.uint8), info
 
     return fetch
 
@@ -606,7 +652,7 @@ def test_stage_anchors_on_the_dense_cluster_inside_the_peak_colour_zone():
     assert anchor["source"] == "Automated CBD Anchor — Evidence" and anchor["basis"] == "cluster"
     assert dist_m((anchor["lat"], anchor["lon"]), CORE) < 150               # the road anchor was 2 km away
     peak = result["plan"]["peak"]
-    assert peak["name"] == "พาณิชยกรรม" and peak["commercial"] and peak["weight"] == 1.0
+    assert peak["name"] == "สีแดง" and peak["commercial"] and peak["rgb"] == [255, 0, 0]
     assert result["plan"]["state"] == "ok" and result["plan"]["explained"] == pytest.approx(1.0)
     assert result["parcel"]["region"] == "peak_zone" and result["parcel"]["tiles_skipped"] == 0
     best = result["clusters"][0]
@@ -688,7 +734,7 @@ def test_a_slow_server_hits_the_deadline_instead_of_hanging(monkeypatch):
     assert any("หมดเวลา" in e for e in result["fetch"]["errors"])
 
 
-@pytest.mark.parametrize("plan_kind, state", [("blank", "blank"), ("mismatch", "mismatch")])
+@pytest.mark.parametrize("plan_kind, state", [("blank", "blank"), ("mismatch", "no_peak")])
 def test_an_unreadable_plan_falls_back_to_the_parcels_around_the_road_anchor(plan_kind, state):
     result = stage(road_found(anchor=CORE), make_world(plan=plan_kind))
     assert result["plan"]["state"] == state and result["plan"]["peak"] is None
@@ -701,6 +747,62 @@ def test_an_unreadable_plan_falls_back_to_the_parcels_around_the_road_anchor(pla
     assert nowhere["status"] == "unavailable" and "anchor ถนน" in nowhere["reason"]
     outside = stage(road_found(anchor=offset(CENTER, 30_000, 0)), make_world(plan=plan_kind))
     assert outside["status"] == "unavailable" and "นอกวงศึกษา" in outside["reason"]   # nothing to scan around it
+
+
+def test_with_no_red_zone_in_the_radius_the_stage_does_not_fall_to_a_lower_colour():
+    # the plan is green everywhere: no พาณิชยกรรม ⇒ no peak zone ⇒ parcels around the road anchor, flagged
+    # partial, never HIGH (a lower colour such as dense residential is never promoted to "the highest zone")
+    result = stage(road_found(anchor=CORE), make_world(plan="nored"), radius_m=10_000.0)
+    assert result["plan"]["state"] == "no_peak" and result["plan"]["peak"] is None and result["plan"]["zones"] == []
+    assert result["status"] == "partial" and result["parcel"]["region"] == "fallback_disc"
+    assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), CORE) < 300
+    assert any("พาณิชยกรรม" in n and "รอบ anchor ถนน" in n for n in result["notes"])
+    assert result["confidence"]["signals"]["zoning"] is None and result["confidence"]["level"] != "HIGH"
+
+
+def test_several_red_zones_give_the_densest_cluster_whatever_centre_was_entered():
+    town, village = CORE, offset(CENTER, -2600, -1800)
+    world = ((town, 800.0), (village, 350.0))
+    results = [stage(road_found(anchor=town), make_world(world), radius_m=10_000.0, center=center)
+               for center in (CENTER, village, offset(CENTER, 2000, 2500))]
+    for result in results:
+        assert len(result["plan"]["zones"]) == 2
+        assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), town) < 150
+    assert len({(r["evidence_anchor"]["lat"], r["evidence_anchor"]["lon"]) for r in results}) == 1
+
+
+@pytest.mark.parametrize("shade", [(214, 140, 170), (255, 170, 190), (190, 30, 30)])
+def test_the_red_zone_is_found_whatever_shade_of_red_the_server_draws(shade):
+    # Longdo's real red is not known: a legend colour that is not (255, 0, 0) must not lose the zone
+    reference = stage(road_found(anchor=OUT), make_world(), radius_m=10_000.0)
+    result = stage(road_found(anchor=OUT), make_world(red=shade), radius_m=10_000.0)
+    assert result["status"] == "ok" and result["plan"]["peak"]["rgb"] == list(shade)
+    assert result["evidence_anchor"] == reference["evidence_anchor"] | {"coverage": result["evidence_anchor"]["coverage"]}
+    seen = {c["hex"]: c for c in result["plan"]["colours"]}
+    assert any(c["red"] and c["legend"] is None for c in seen.values()) or shade == (190, 30, 30)
+    assert result["plan"]["colours"][0]["share"] > 0.5 and json.dumps(result["plan"]["colours"])
+
+
+def test_a_mid_density_town_still_gets_its_densest_cluster_and_an_honest_confidence():
+    # lots of ~110 m² score ~0.4: below the absolute 0.5, but the densest quarter of the red zone is still "ถี่"
+    dense = ((offset(CORE, 500, 0), 350.0),)
+    world = make_world(blobs=((CORE, 1000.0),), dense=dense, dense_scene=MID_LOTS)
+    result = stage(road_found(anchor=CORE), world, radius_m=10_000.0)
+    assert result["status"] == "ok" and result["evidence_anchor"]["basis"] == "cluster"
+    assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), dense[0][0]) < 250
+    parcel = result["parcel"]
+    assert 0 < parcel["best_score"] < page.EVIDENCE_CONFIG["hot_score"] and parcel["hot_threshold"] < 0.5
+    assert parcel["lots"] > 1000
+    assert result["confidence"]["signals"]["parcel"] is False and result["confidence"]["level"] != "HIGH"
+
+
+def test_the_hot_threshold_is_absolute_when_the_zone_is_dense_and_relative_when_it_is_not():
+    cfg = page.EVIDENCE_CONFIG
+    dense = np.full(100, 0.8)
+    assert page._hot_threshold(dense) == cfg["hot_score"]
+    mid = np.concatenate([np.full(75, 0.1), np.linspace(0.3, 0.45, 25)])
+    assert cfg["hot_floor"] <= page._hot_threshold(mid) < cfg["hot_score"]
+    assert page._hot_threshold(np.full(50, 0.01)) == cfg["hot_floor"]
 
 
 def test_parcels_that_cannot_be_read_leave_the_centre_of_the_peak_zone():
