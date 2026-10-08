@@ -16,12 +16,12 @@ settings; configs saved by the earlier seeded search still load (their
 `random_seed`, `restarts` and `trace` fields are ignored).
 
 The two anchors above use road data only: no POI, population or commerce
-queries. An **opt-in evidence stage** (below) can confirm the road candidates with
-the official city plan and the parcel layer and adds a third, purple-marker
-anchor with a confidence level; it is off by default and never changes the two
-road anchors. Optional rent observations already supported by the page are used
-only to fit and compare the rent model (R² at the study centre against R² at the
-anchor); they never affect the anchor score.
+queries. An **opt-in evidence stage** (below) scans the whole study circle for the
+highest-weight city-plan colour (ผังสีสูงสุด) and the densest cluster of small parcels
+(รูปแปลงที่ดินถี่) inside it, and adds a third, purple-marker anchor with a confidence level;
+it is off by default and never changes the two road anchors. Optional rent observations
+already supported by the page are used only to fit and compare the rent model (R² at the
+study centre against R² at the anchor); they never affect the anchor score.
 
 ## Overpass reliability and configuration
 
@@ -189,55 +189,84 @@ graph rebuilding), 1.8 s pivot rows and 1.8 s exact rows; the probe's extra ring
 pivots add ≈1.4 s there. These are observations on one machine, not latency
 promises, and exclude the Overpass download.
 
-## Evidence stage (opt-in): city plan + parcels confirm the road candidates
+## Evidence stage (opt-in): peak colour × dense parcel cluster, scanned over the study radius
 
-Roads find *candidates*; official zoning and the parcel structure *confirm* them.
-Tick **🗺️ ใช้ผังเมืองรวม + รูปแปลงที่ดิน ยืนยันผู้สมัคร (ทดลอง)** before pressing
-the search button. The road search is unchanged; afterwards `run_evidence_stage`:
+Roads find the *network* centre; the official plan and the parcel layer say where the
+*commercial* centre is. Tick **🗺️ Evidence: ผังสีสูงสุด + แปลงที่ดินถี่ cluster (ทดลอง)** before pressing
+the search button. The road search is unchanged; afterwards `run_evidence_stage` scans the
+**whole study circle** (the radius you set, in km) instead of confirming a few road candidates:
 
-1. **Candidates** — `find_cbd_anchors` exports the top 150 exactly-scored nodes per
-   objective (`candidate_export`); both road anchors plus the best remaining ones that
-   are ≥ 300 m apart (greedy NMS) are kept, up to 12.
-2. **Windows** — per candidate one `dol` (รูปแปลงที่ดิน, 1 km) and one `cityplan_dpt`
-   (ผังเมืองรวม, 1.5 km) GetMap at 1024 px, plus one city-plan overview of the whole
-   study circle. Same Longdo WMS endpoint, `EPSG:3857`, `version 1.1.1`, transparent
-   PNG as the map layers. ≤ 4 in parallel, ≤ 40 requests, 15 s timeout, never raises.
-   Images are cached on disk (`wms_<sha256 of the parameters>.png` + JSON sidecar; the
-   key is not part of the name), so a repeat run costs **0 requests** and the cache
-   exports with the rest of the cache bundle.
-3. **Parcel features** (`parcel_features`, Pillow + `scipy.ndimage` only) — the ink
-   ratio (thick boundary lines ⇒ dense, small parcels), the cells between boundary
-   lines (area corrected for line width, principal-axis aspect), `small_share`
-   (< 200 m² = 50 ตร.ว.), `shophouse_share` (ตึกแถว: 40–160 m² and aspect ≥ 2.5), and
-   `parcel_score` = 0.4·shophouse + 0.3·small + 0.3·scaled ink. A blank or too coarse
-   window is **no data**, not "low".
-4. **Zoning features** (`zoning_features`) — nearest legend colour per pixel (3×3
-   majority vote removes labels/outlines), class shares inside a 300 m disc,
-   `zoning_intensity` (weighted by `Geoapify_Map/cityplan_legend.json` class weights),
-   `in_commercial` / distance to the nearest พาณิชยกรรม patch. Outside the published
-   plan ⇒ **no data**.
-5. **Fusion** — `0.35·road + 0.35·parcel + 0.30·zoning` over the signals that have
-   data (weights renormalised: a missing signal lowers `coverage`, never the score);
-   the winner must have at least one non-road signal, so a failed download cannot
-   promote a road-only candidate. Ties break on node id.
-6. **Confidence** — HIGH needs coverage ≥ 0.6 and roads (an anchor ≤ 300 m away),
-   zoning (inside / ≤ 150 m from the commercial zone) and parcels (score ≥ 0.5) all
-   agreeing, and a road stability level other than *unstable*; MEDIUM needs two of
-   three and coverage ≥ 0.4; otherwise LOW. Thai reasons are listed in the sidebar and
-   in the marker popup.
-7. **Failure is boring** — no key, network error, service exception, blank layer or an
-   unreadable plan ⇒ `status = "unavailable"` with a one-line reason; the road anchors
-   are untouched. A missing layer for some candidates ⇒ `partial`.
+1. **One global grid.** Web-Mercator is cut into cells of 128 m (≈120 m on the ground at
+   20°N). Plan tiles are 16 384 m (128×128 cells, ≈15 m/px) and parcel tiles 1 024 m (8×8 cells,
+   ≈0.94 m/px, the scale at which ตึกแถว lots stay measurable). Tiles sit at fixed
+   coordinates, so a tile is the **same request and the same cache file whatever the centre or
+   radius**: a second run costs 0 requests and a wider circle fetches only the new plan tiles.
+   Window sizes of the old design depended on the candidates and were never shared.
+2. **Plan pass.** The `cityplan_dpt` tiles that touch the circle are fetched (≤ 16, ≤ 4 in
+   parallel). Every pixel is classified with a 32³ look-up table built from the legend; class shares
+   are counted per cell.
+3. **Peak colour (ผังสีสูงสุด).** Legend classes are visited by weight, highest first; the peak class is
+   the first with a connected zone of ≥ 4 cells (≈ 0.06 km²) in which ≥ 40 % of each cell's pixels
+   have that colour. Weight-0 classes (farmland, conservation) are never a peak. With the
+   provisional legend the peak is พาณิชยกรรม (red), weight 1.0.
+4. **Parcel pass.** `dol` tiles are fetched **only where the peak zone is**: ≤ 16 tiles, the ones
+   with most zone cells first, nearest the study centre among equals. One label pass per tile
+   (the same boundary-line / line-width logic as `parcel_features`) gives every lot's centroid, area
+   and aspect.
+5. **Frequency per cell.** `cover_small` and `cover_shop` are the share of a cell's ground area
+   taken by lots < 200 m² and by ตึกแถว (40–160 m², aspect ≥ 2.5); score =
+   0.4·clip(cover_shop/0.5) + 0.3·clip(cover_small/0.5) + 0.3·scaled ink. Coverage, not lot-count
+   shares: ten shophouses beside farmland score 0.13, a shophouse quarter 0.88, town / suburb /
+   rural 0.07 / 0.03 / 0.00 (synthetic scenes). A cell without drawn lines is **no data**, not low.
+6. **Dense cluster (ถี่ cluster).** 3×3 box mean over cells with data; hot cells score ≥ 0.5 and lie
+   inside the peak zone (dilated by one cell) and the circle; 8-connected groups of ≥ 3 cells are
+   clusters, ranked by mass (Σ score; ties: raster order). The **evidence anchor is the
+   score-weighted centroid of the best cluster**. It is not snapped to a road node (Rent Gradient only
+   needs `lat`/`lon`). No cluster ⇒ the centre of the largest peak zone (`basis = "zone"`,
+   LOW). No peak zone ⇒ see the fallback below.
+7. **Fallback (plan unreadable).** A blank plan, an area outside the published plan, a legend that
+   explains < 50 % of the painted pixels, or no weighted zone make the stage look at the parcels within
+   1.5 km of the composite road anchor instead: `status = "partial"`, the zoning signal is unknown (never
+   HIGH) and the note says why. Without a composite anchor ⇒ `unavailable`.
+8. **Confidence.** HIGH needs roads (a road anchor ≤ 300 m away), zoning (peak colour is พาณิชยกรรม
+   and the anchor lies in / next to it) and parcels (cluster score ≥ 0.5, ≥ 3 cells) to agree, parcel
+   coverage (tiles read ÷ tiles needed) ≥ 0.6, no *unstable* road or evidence probe, and a cluster that
+   does not touch the circle edge. MEDIUM: two of three and coverage ≥ 0.4. Otherwise LOW. Thai
+   reasons are listed in the sidebar and the marker popup.
+9. **Stability probe (indicative, free).** On the rasters already loaded the pick is repeated for a
+   radius ×0.8 and for the centre moved 0.2 R north / east / south / west; the peak class and parcel grid
+   stay those of the base run. Drift ≤ 5 % of R ⇒ 🟢, ≤ 15 % ⇒ 🟡, else 🔴; a probe that loses the cluster
+   counts as a full-radius move. A cluster cut by the circle is flagged and cannot be HIGH.
+10. **Bounded and boring.** ≤ 40 requests, 15 s per request, 60 s per run (unfinished tiles are dropped
+    and reported). No key, network error, service exception, blank layer or unreadable plan ⇒ the road
+    anchors are untouched and the panel says why.
 
-The result is published under `automated_anchor_evidence_data` (saved with the config,
-cleared with the road anchors and by any study-area change). Thumbnails are not stored;
-the expander re-reads them from the disk cache. **Rent Gradient keeps using the
-composite anchor** unless the user ticks *ใช้ Evidence Anchor คำนวณ Rent Gradient*.
+The result (`automated_anchor_evidence_data`, `schema: 2`) is saved with the config and cleared with
+the road anchors and by any study-area change. A result saved by the earlier candidate-first version
+has no `schema` and is shown as stale (and ignored by Rent) until the search is run again. Map layers
+(hidden by default): **Peak colour zone (ผังสีสูงสุด)** and **Parcel clusters (แปลงถี่)**; thumbnails
+re-read the plan and parcel tile under the anchor from the disk cache. **Rent Gradient keeps using
+the composite anchor** unless the user ticks *ใช้ Evidence Anchor คำนวณ Rent Gradient*.
+
+### What it costs (synthetic world — no network, no Longdo)
+
+| Study radius | Plan tiles (upper bound) | Requests, small town | Requests, 1.5 km zone | Seconds of compute |
+| --- | --- | --- | --- | --- |
+| 4 km | 2 (≤ 4) | 6 | 16 | 0.5–0.6 |
+| 10 km | 4 (≤ 9) | 8 | 18 | 0.2–0.6 |
+| 20 km | 11 (≤ 16) | 15 | 25 | 0.4–0.8 |
+
+The previous candidate-first stage sent 25 requests at **every** radius, none of them reusable, and
+spent ≈ 8.9 s on analysis (measured with the same kind of fake fetcher: 12 candidates × 2 windows
++ overview). A zone larger than 16 parcel tiles is truncated and reported (`coverage` drops, HIGH is
+impossible). The numbers exclude real network latency; a cold run is bounded by the 60 s deadline.
+The sidebar shows the request estimate before you press the button (`estimate_evidence_requests`).
 
 ### Calibration is still pending (read before trusting a label)
 
 The thresholds were set on **synthetic** rasters (the four scenes in
-`tests/test_anchor_evidence.py`, 1.5 m/px, 1-px lines and label specks):
+`tests/test_anchor_evidence.py`, 1-px lines and label specks; the table is from the earlier whole-window
+score, the per-cell coverage score of the current stage is quoted above):
 
 | Scene | Ink | Median cell | Cells < 200 m² | ตึกแถว share | Time |
 | --- | --- | --- | --- | --- | --- |
@@ -248,15 +277,27 @@ The thresholds were set on **synthetic** rasters (the four scenes in
 
 Real Longdo rendering (line colour/width, parcel-number labels, whether the server
 stops drawing parcels at some zoom, the exact DPT legend colours) is **unknown** here:
-the sandbox cannot reach Longdo. Until it is calibrated the page shows a warning, the
-legend file `Geoapify_Map/cityplan_legend.json` is absent so a **provisional**
-8-class legend (DPT convention) is used and labelled as such, and the checkbox is off
-by default.
+the sandbox cannot reach Longdo (HTTP 000 from here; `Geoapify_Map/fixtures/wms/` does not exist).
+Until it is calibrated the page shows a warning, the legend file
+`Geoapify_Map/cityplan_legend.json` is absent so a **provisional** 8-class legend (DPT
+convention) is used and labelled as such, and the checkbox is off by default.
+
+Three things in the current design are specifically unverified against the real service:
+
+- **Plan tiles are 16 384 Web-Mercator m at 1 024 px (≈ 15 m/px).** If `cityplan_dpt` is not drawn
+  at that scale (check `capabilities.xml` for scale limits) every plan tile reads blank and the stage
+  falls back to the parcels around the composite road anchor (`partial`, never HIGH). `plan_tile_m` is
+  a config key; use `--radius-km 7.7` in the capture command below so its overview window equals one
+  plan tile.
+- **`peak_cell_share` (0.4)** and the 50 % "legend explains the painted pixels" gate depend on how
+  outlines, labels and antialiasing look. A wrong legend shows up as `plan.state = "mismatch"` in the
+  JSON and in the notes, not as a silently wrong peak colour.
+- **The cell-score references** (`cover_ref` 0.5, hot ≥ 0.5) were set on the four synthetic scenes.
 
 To calibrate, on a machine that can reach Longdo:
 
 ```shell
-python scripts/capture_wms_fixtures.py --study-center 20.219443 100.403630 --radius-km 10 \
+python scripts/capture_wms_fixtures.py --study-center 20.219443 100.403630 --radius-km 7.7 \
     --point core 20.2194 100.4036 --point mid 20.2300 100.4200 --point outskirts 20.2600 100.4700
 ```
 
@@ -270,10 +311,12 @@ painted plan pixels and that the core scores above the outskirts (those tests ar
 skipped while the folder is absent).
 
 Limits: small parcels also occur in suburban subdivisions and informal housing, so the
-parcel signal alone is not a CBD (hence fusion with zoning and roads); DPT plans exist
-only for planned areas and can be outdated; Longdo's terms for server-side tile use
-should be checked (requests are few and cached); the evidence anchor is chosen among
-road candidates, so it cannot lie where the roads give no candidate.
+parcel signal alone is not a CBD (hence the peak-colour gate and the road agreement in the
+confidence); DPT plans exist only for planned areas and can be outdated; Longdo's terms for
+server-side tile use should be checked (requests are few and cached); the evidence anchor is the
+centre of a cluster of 120 m cells, so it is accurate to about a cell and is not snapped to a road node;
+parcel analysis covers only the peak-colour zone (≤ 16 tiles) and drops lots cut by a tile edge, which
+slightly under-counts border cells; the stability probe keeps the base run's peak class and parcel grid.
 
 ## Reproduce the checks
 
@@ -311,12 +354,16 @@ corrupt-sidecar handling; actual Streamlit button execution, invalidation and
 failure; and the map markers. They also simulate connection refusal,
 retry/failover, cache reuse, custom endpoint precedence, bounded all-server
 diagnostics, and global setting restore. `tests/test_anchor_evidence.py` covers the
-parcel/zoning features on synthetic rasters (scene separation, label clutter, rotation,
-too-coarse windows, blank layers), fusion, confidence, the cached WMS fetch and
-`run_evidence_stage` with a fake fetcher (core vs suburb, partial/unavailable, request
-budget, cache counters, JSON safety); `tests/test_wms_fixtures.py` runs the capture
-script against a fake server and validates real fixtures when present; the Streamlit
-tests cover the opt-in checkbox, third marker, Rent opt-in and invalidation.
+parcel features and the per-cell frequency score on synthetic rasters (scene separation, label clutter,
+rotation, too-coarse windows, blank layers, a few shophouses beside farmland), the global lattice
+(shared tiles across centres and radii, tile budget per radius), the colour look-up table, the peak
+colour (highest weight with a real zone, specks, weight-0 classes), cluster ranking and tie-breaks,
+confidence, the cached WMS fetch and `run_evidence_stage` against a fake Longdo that places pixels by
+Web-Mercator position (anchor on the planted quarter, independence of radius and centre, 0 requests on
+a repeat, budget and deadline, unreadable plan fallback, parcels failing, stability flip, circle-edge
+flag, JSON safety); `tests/test_wms_fixtures.py` runs the capture script against a fake server and
+validates real fixtures when present; the Streamlit tests cover the opt-in checkbox and request
+estimate, the third marker and map layers, Rent opt-in, invalidation and stale-schema results.
 `tests/test_rent_gradient_principles.py`
 adds regressions for the review fixes (betweenness keys on multigraphs, fit
 standard errors, index-mode Value Gap, restricted unpickling and bundle-import

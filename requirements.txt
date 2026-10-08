@@ -31,3 +31,4 @@ mpy-cross>=1.27.0
 networkx>=3.2
 graphviz
 seaborn
+pillow

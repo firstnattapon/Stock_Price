@@ -1,6 +1,7 @@
 """Offline correctness and Streamlit integration tests for the road-only CBD anchors."""
 import importlib.util
 import json
+from math import cos, radians
 from pathlib import Path
 import sys
 
@@ -489,27 +490,47 @@ def test_road_search_exports_candidates_for_the_evidence_stage():
 
 # ------------------------------------------------------------- evidence stage in the UI
 def _evidence_images():
-    parcel = np.zeros((1024, 1024, 4), dtype=np.uint8)
-    parcel[::16, :] = (60, 60, 60, 255)            # lot boundaries: 4 px × 16 px cells ≈ ตึกแถว at ~1 m/px
-    parcel[:, ::5] = (60, 60, 60, 255)
-    plan = np.zeros((1024, 1024, 4), dtype=np.uint8)
-    plan[...] = (0, 176, 80, 255)
-    plan[360:664, 360:664] = (255, 0, 0, 255)      # a commercial block around every window centre
-    return parcel, plan
+    """The shophouse-lot picture (4 x 15 m lots at ~1 m/px) the fake parcel layer paints inside the block."""
+    lines = np.zeros((1024, 1024, 4), dtype=np.uint8)
+    lines[::16, :] = (60, 60, 60, 255)
+    lines[:, ::5] = (60, 60, 60, 255)
+    return lines
+
+
+def _evidence_world():
+    """Fake Longdo: a red (พาณิชยกรรม) block of 700 m radius ~700 m north-east of the study centre,
+    shophouse lots inside it and nothing drawn elsewhere. Placed by Web-Mercator position."""
+    lat = CENTER[0] + 500 / 111_320.0
+    lon = CENTER[1] + 500 / (111_320.0 * cos(radians(CENTER[0])))
+    x0, y0 = page._WEB_MERCATOR.transform(lon, lat)
+    radius = 700.0 / cos(radians(lat))
+    lines = _evidence_images()
+
+    def world(layer, bbox, px):
+        xs = bbox[0] + (np.arange(px) + 0.5) * (bbox[2] - bbox[0]) / px
+        ys = bbox[3] - (np.arange(px) + 0.5) * (bbox[3] - bbox[1]) / px
+        inside = (xs[None, :] - x0) ** 2 + (ys[:, None] - y0) ** 2 <= radius ** 2
+        if layer == "cityplan_dpt":
+            plan = np.zeros((px, px, 4), dtype=np.uint8)
+            plan[...] = (0, 176, 80, 255)
+            plan[inside] = (255, 0, 0, 255)
+            return plan, {"layer": layer, "from_cache": False}
+        return np.where(inside[..., None], lines, 0).astype(np.uint8), {"layer": layer, "from_cache": False}
+
+    return world
 
 
 @pytest.fixture
 def evidence_env(monkeypatch):
-    parcel, plan = _evidence_images()
+    world = _evidence_world()
     calls = []
 
     def fetch(layer, bbox, px):
         calls.append(layer)
-        return (parcel if layer == "dol" else plan).copy(), {"layer": layer, "from_cache": False}
+        return world(layer, bbox, px)
 
     monkeypatch.setattr(page, "fetch_wms_image", fetch)
-    monkeypatch.setattr(page, "load_cached_wms_image", lambda layer, bbox, px: parcel)  # thumbnails
-    monkeypatch.setitem(page.EVIDENCE_CONFIG, "candidates", 3)
+    monkeypatch.setattr(page, "load_cached_wms_image", lambda layer, bbox, px: _evidence_images())  # thumbnails
     return calls
 
 
@@ -538,14 +559,18 @@ def test_streamlit_evidence_adds_a_third_anchor_and_rent_follows_the_opt_in(monk
     evidence = at.session_state["automated_anchor_evidence_data"]
     assert evidence["status"] in ("ok", "partial") and evidence["evidence_anchor"]
     assert evidence["context"] == at.session_state["automated_anchor_data"]["context"]
-    assert evidence["legend_source"] == "provisional" and "dol" in evidence_env and "cityplan_dpt" in evidence_env
+    assert evidence["schema"] == page.EVIDENCE_SCHEMA and evidence["legend_source"] == "provisional"
+    assert "dol" in evidence_env and "cityplan_dpt" in evidence_env
     captions = " ".join(c.value for c in at.caption)
     assert "ความเชื่อมั่น" in captions and "ดึงภาพ" in captions
     assert any("ค่าชั่วคราว" in w.value for w in at.warning)                  # provisional legend is disclosed
     assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
     markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
     assert sorted(m.icon.options["marker_color"] for m in markers) == ["darkblue", "green", "purple"]
-    assert "Evidence candidates" in rendered[-1].get_root().render()
+    html = rendered[-1].get_root().render()
+    assert "Peak colour zone" in html and "Parcel clusters" in html           # the two new map layers
+    assert evidence["plan"]["peak"]["commercial"] and evidence["clusters"]
+    assert any("ผังสีสูงสุด" in c.value for c in at.caption)
     # opt in: the rent curve is anchored on the evidence anchor, and back again
     at.checkbox(key="rent_use_evidence_anchor").check().run(timeout=30)
     assert not at.exception
@@ -604,11 +629,43 @@ def test_evidence_state_roundtrips_and_old_configs_without_it_keep_the_road_resu
     assert state["automated_anchor_evidence_data"] is None             # it confirms a road result that is gone
 
 
-def test_exported_candidates_are_diverse_enough_for_the_evidence_stage_to_pick_a_dozen():
-    found = find(road_grid(size=31, spacing=100), study_radius_m=4000)
-    anchors = [found["composite"]["anchor"], found["closeness"]["anchor"]]
-    picked = page.select_evidence_candidates(found["evidence_candidates"], anchors, 12, 300.0)
-    assert len(picked) == 12                       # 20 nodes of one cluster would give far fewer
-    spread = max(page.calculate_distance_meters(a["lat"], a["lon"], b["lat"], b["lon"])
-                 for a in picked for b in picked)
-    assert spread > 1000
+def test_streamlit_evidence_checkbox_shows_how_many_tiles_the_radius_will_cost(monkeypatch, evidence_env):
+    at = _app_test(monkeypatch)
+    assert not any("Evidence จะสแกนรัศมี" in c.value for c in at.caption)
+    at.checkbox(key="anchor_use_evidence").check().run(timeout=30)
+    shown = [c.value for c in at.caption if "Evidence จะสแกนรัศมี" in c.value]
+    assert shown and "10 กม." in shown[0] and "ไม่เกิน" in shown[0]
+    at.number_input(key="anchor_radius_km").set_value(9.5).run(timeout=30)       # half-kilometre steps
+    assert not at.exception and any("9.5 กม." in c.value for c in at.caption)
+    assert evidence_env == []                                                    # estimating costs no request
+
+
+def test_streamlit_an_evidence_result_saved_by_the_earlier_version_is_stale_not_a_crash(monkeypatch, evidence_env):
+    at, rendered = _run_anchor_with_evidence(monkeypatch)
+    context = at.session_state["automated_anchor_data"]["context"]
+    old = {"status": "ok", "context": context, "legend_source": "provisional",
+           "evidence_anchor": {"node_id": "n1", "lat": 20.3, "lon": 100.5, "score": 0.9, "coverage": 1.0,
+                               "source": "Automated CBD Anchor — Evidence"},
+           "confidence": {"level": "HIGH", "reasons": ["เก่า"]}, "candidates": [{"rank": 1, "node_id": "n1"}],
+           "commercial_zone": {"lat": 20.3, "lon": 100.5, "area_km2": 1.0}, "fetch": {}, "windows": {}}
+    at.session_state["automated_anchor_evidence_data"] = old
+    at.session_state["rent_use_evidence_anchor"] = True
+    at.run(timeout=30)
+    assert not at.exception
+    assert any("เวอร์ชันเก่า" in w.value for w in at.warning)
+    markers = [v for v in rendered[-1]._children.values() if isinstance(v, page.folium.Marker)]
+    assert sorted(m.icon.options["marker_color"] for m in markers) == ["darkblue", "green"]
+    assert at.session_state["rent_gradient_data"]["anchor"]["source"] == "Automated CBD Anchor"
+
+
+def test_rent_follows_the_evidence_anchor_only_when_it_is_current_and_opted_in(monkeypatch):
+    both = find()
+    anchor = {"lat": 20.23, "lon": 100.41, "score": 0.8, "coverage": 1.0, "source": "Automated CBD Anchor — Evidence"}
+    state = {page.StateManager.K_AUTO_ANCHOR: both["composite"], "rent_use_evidence_anchor": True,
+             page.StateManager.K_AUTO_ANCHOR_EVIDENCE: {"evidence_anchor": anchor}}      # no schema: the old shape
+    monkeypatch.setattr(page.st, "session_state", state)
+    assert page._rent_anchor_input() is both["composite"]
+    state[page.StateManager.K_AUTO_ANCHOR_EVIDENCE] = {"schema": page.EVIDENCE_SCHEMA, "evidence_anchor": anchor}
+    assert page._rent_anchor_input()["anchor"] == anchor
+    state["rent_use_evidence_anchor"] = False
+    assert page._rent_anchor_input() is both["composite"]
