@@ -223,7 +223,10 @@ def test_circle_mask_covers_the_ground_area_of_the_study_radius():
     cell_km2 = (page.CELL_M * geo["ground"]) ** 2 / 1e6
     assert circle.sum() * cell_km2 == pytest.approx(np.pi * 5.0 ** 2, rel=0.03)
     ys, xs = np.nonzero(circle)
-    assert abs(xs.mean() - (geo["ni"] - 1) / 2) < 1.5 and abs(ys.mean() - (geo["nj"] - 1) / 2) < 1.5
+    centre_i, centre_j = geo["x0"] / page.CELL_M - geo["i0"] - 0.5, geo["y0"] / page.CELL_M - geo["j0"] - 0.5
+    assert abs(xs.mean() - centre_i) < 1.0 and abs(ys.mean() - centre_j) < 1.0
+    n = page._cells_per_tile(page.EVIDENCE_CONFIG["plan_tile_m"])           # the box is made of whole plan tiles
+    assert geo["ni"] % n == 0 and geo["nj"] % n == 0 and geo["i0"] % n == 0 and geo["j0"] % n == 0
 
 
 def test_paste_clips_a_tile_that_hangs_over_the_study_box():
@@ -235,11 +238,10 @@ def test_paste_clips_a_tile_that_hangs_over_the_study_box():
 
 
 # ================================================================== plan colours → peak zone
-def peak_of(image, legend=LEGEND, circle=None):
+def peak_of(image, legend=LEGEND):
     lut = page._legend_lut(legend, page.ZONING_COLOR_TOLERANCE)
     tile = page._plan_tile_shares(image, lut, len(legend), 128)
-    ok = np.ones((128, 128), dtype=bool) if circle is None else circle
-    return tile, page._peak_zone(tile["shares"], ok, legend, 64)
+    return tile, page._peak_zone(tile["shares"], legend, 64)
 
 
 def test_legend_lut_maps_legend_colours_and_rejects_everything_else():
@@ -318,12 +320,20 @@ def test_zero_weight_classes_are_never_a_peak_and_unknown_colours_are_not_painte
     assert tile["painted"] == 1024 * 1024 and tile["explained"] == 0 and peak is None
 
 
-def test_peak_zone_stays_inside_the_study_circle():
-    image = plan_window([(RED, (0, 1024, 0, 1024))], background=ORANGE, size=1024)
+def test_red_zones_that_reach_the_circle_are_kept_whole_and_the_others_are_dropped():
+    image = plan_window([(RED, (80, 240, 80, 240)), (RED, (400, 560, 400, 560)), (RED, (800, 960, 800, 960))],
+                        background=GREEN, size=1024)                              # three 20 x 20-cell zones
+    _, peak = peak_of(image)
+    assert len(peak["big"]) == 3
+    # (the lattice is south-up: zone 1 sits at rows 8-27 / cols 100-119, zone 2 at 58-77 / 50-69, zone 3 at 98-117 / 10-29)
     circle = np.zeros((128, 128), dtype=bool)
-    circle[40:60, 40:60] = True
-    _, peak = peak_of(image, circle=circle)
-    assert peak["mask"].sum() == 400 and not peak["mask"][~circle].any()
+    circle[12:20, 104:112] = True                                                 # inside zone 1 only, partly
+    circle[58:62, 50:54] = True                                                   # a corner of zone 2
+    kept = page._zones_in_scope(peak, circle)
+    assert len(kept["big"]) == 2 and kept["mask"].sum() == 2 * 20 * 20           # whole zones: not clipped to the circle
+    circle[:] = False
+    circle[40:50, 90:100] = True                                                  # touches no red
+    assert page._zones_in_scope(peak, circle) is None
 
 
 # ================================================================== parcels: frequency of small lots
@@ -361,11 +371,15 @@ def test_cells_without_drawn_lines_are_nan_not_low():
 
 
 # ================================================================== clusters
+THREE = np.ones((3, 3), dtype=bool)
+
+
 def cluster_world(radius_m=3000.0):
     geo, circle = geometry(radius_m)
-    shape_ = (geo["nj"], geo["ni"])
-    fields = {name: np.full(shape_, np.nan) for name in ("score", "cover_small", "cover_shop")}
-    return geo, circle, fields
+    fields = {name: np.full((geo["nj"], geo["ni"]), np.nan) for name in ("score", "cover_small", "cover_shop")}
+    ci = int(floor(geo["x0"] / page.CELL_M)) - geo["i0"]          # the cell that holds the study centre
+    cj = int(floor(geo["y0"] / page.CELL_M)) - geo["j0"]
+    return geo, circle, fields, (cj, ci)
 
 
 def hot(fields, rows, cols, value=0.9):
@@ -373,54 +387,92 @@ def hot(fields, rows, cols, value=0.9):
         fields[name][rows, cols] = value if name == "score" else 0.5
 
 
-def pick(geo, circle, fields, region=None, top=5):
+def clusters_for(geo, fields, zone, scanned=None):
     smooth = page._smooth_nan(fields["score"], 3)
-    region = circle if region is None else region
-    return page._find_clusters(smooth, region, circle, region, fields, geo, top)
+    labels, n = page.ndi.label(zone, structure=THREE)
+    zones = {"labels": labels, "big": np.arange(1, n + 1), "mask": zone}
+    scanned = np.ones(zone.shape, dtype=bool) if scanned is None else scanned
+    return page._clusters_of(smooth, zones, fields, scanned, geo)["clusters"]
 
 
-def test_clusters_rank_by_mass_and_tie_break_in_raster_order():
-    geo, circle, fields = cluster_world()
-    c = geo["nj"] // 2
-    hot(fields, slice(c - 12, c - 6), slice(c - 12, c - 6))      # 6 x 6 = 36 cells, south-west
-    hot(fields, slice(c + 6, c + 10), slice(c + 6, c + 10))      # 4 x 4 = 16 cells, north-east
-    found = pick(geo, circle, fields)
-    assert [k["cells"] for k in found] == [36, 16] and [k["rank"] for k in found] == [1, 2]
-    assert found[0]["lat"] < found[1]["lat"] and found[0]["lon"] < found[1]["lon"]
-    # two equal blobs: the one met first in raster order (lower row) wins, every time
-    geo, circle, fields = cluster_world()
-    hot(fields, slice(c + 6, c + 10), slice(c - 10, c - 6))
-    hot(fields, slice(c - 10, c - 6), slice(c + 6, c + 10))
-    first = pick(geo, circle, fields)
-    assert first[0]["cells"] == first[1]["cells"] and first[0]["lat"] < first[1]["lat"]
-    assert [k["lat"] for k in pick(geo, circle, fields)] == [k["lat"] for k in first]
+def block(shape_, rows, cols):
+    mask = np.zeros(shape_, dtype=bool)
+    mask[rows, cols] = True
+    return mask
 
 
-def test_hot_cells_outside_the_zone_or_the_circle_and_tiny_clusters_are_ignored():
-    geo, circle, fields = cluster_world()
-    c = geo["nj"] // 2
-    hot(fields, slice(c - 4, c), slice(c - 4, c))                # 16 cells inside the zone
-    hot(fields, slice(c + 2, c + 3), slice(c + 1, c + 3))        # 2 cells inside the zone: below cluster_min_cells
-    hot(fields, slice(c + 8, c + 14), slice(c + 8, c + 14))      # dense, but outside the zone
-    region = np.zeros_like(circle)
-    region[c - 5:c + 3, c - 5:c + 3] = True
-    found = pick(geo, circle, fields, region=region)
+def fake_cluster(x, y, mass, first=0.0):
+    return {"_x": x, "_y": y, "mass": mass, "_first": first}
+
+
+def test_clusters_found_in_a_zone_are_whole_and_ranked_by_the_study_centre_weighted_mass():
+    geo, circle, fields, (cj, ci) = cluster_world()
+    hot(fields, slice(cj - 12, cj - 6), slice(ci - 12, ci - 6))      # 6 x 6 = 36 cells, south-west
+    hot(fields, slice(cj + 6, cj + 10), slice(ci + 6, ci + 10))      # 4 x 4 = 16 cells, north-east
+    found = clusters_for(geo, fields, circle | block(circle.shape, slice(None), slice(None)))
+    ranked = page._pick_cluster(found, geo, (geo["x0"], geo["y0"]), geo["radius_m"])
+    assert [k["cells"] for k in ranked] == [36, 16] and [k["rank"] for k in ranked] == [1, 2]
+    assert ranked[0]["lat"] < ranked[1]["lat"] and ranked[0]["lon"] < ranked[1]["lon"]
+    assert all(k["weighted_mass"] < k["mass"] and k["distance_m"] > 0 for k in ranked)
+
+
+def test_the_choice_is_a_radius_free_prior_toward_the_study_centre():
+    geo = page._evidence_geometry(CENTER, 10_000.0)
+    x0, y0 = geo["x0"], geo["y0"]
+    metre = 1.0 / geo["ground"]                                          # 3857 metres per ground metre
+    near, far = fake_cluster(x0 + 200 * metre, y0, 10.0), fake_cluster(x0 + 6000 * metre, y0, 90.0)
+    pick = lambda clusters, radius=10_000.0, centre=(x0, y0): page._pick_cluster(clusters, geo, centre, radius)
+    assert pick([near, far])[0]["_x"] == near["_x"]                      # 6 km away needs ~10x the mass ...
+    far_big = fake_cluster(x0 + 6000 * metre, y0, 110.0)
+    assert pick([near, far_big])[0]["_x"] == far_big["_x"]               # ... and a much bigger zone still wins
+    # growing the radius only adds candidates: the weights of the ones already there do not change
+    small, wide = pick([near, far], radius=7000.0), pick([near, far], radius=20_000.0)
+    assert [c["weighted_mass"] for c in wide] == [c["weighted_mass"] for c in small]
+    assert len(pick([near, far], radius=5000.0)) == 1 and len(small) == 2     # admitted by centroid, never clipped
+    # exact ties break in raster order
+    left, right = fake_cluster(x0 - 1000 * metre, y0, 5.0, first=7.0), fake_cluster(x0 + 1000 * metre, y0, 5.0, first=3.0)
+    assert [c["_first"] for c in pick([left, right])] == [3.0, 7.0] == [c["_first"] for c in pick([right, left])]
+
+
+def test_hot_cells_outside_the_zone_and_tiny_clusters_are_ignored():
+    geo, circle, fields, (cj, ci) = cluster_world()
+    hot(fields, slice(cj - 4, cj), slice(ci - 4, ci))                # 16 cells inside the zone
+    hot(fields, slice(cj + 2, cj + 3), slice(ci + 1, ci + 3))        # 2 cells inside the zone: below cluster_min_cells
+    hot(fields, slice(cj + 8, cj + 14), slice(ci + 8, ci + 14))      # dense, but outside the zone
+    zone = block(circle.shape, slice(cj - 5, cj + 3), slice(ci - 5, ci + 3))
+    found = clusters_for(geo, fields, zone)
     assert len(found) == 1 and found[0]["cells"] == 16 and found[0]["in_zone"] is True
-    assert pick(geo, np.zeros_like(circle), fields) == []
 
 
-def test_a_cluster_on_the_circle_edge_is_flagged():
-    geo, circle, fields = cluster_world()
-    c = geo["nj"] // 2
-    hot(fields, slice(c - 3, c + 1), slice(c - 3, c + 1))
-    inner = pick(geo, circle, fields)
-    assert inner[0]["touches_boundary"] is False
-    geo, circle, fields = cluster_world()
-    row = int(np.nonzero(circle.any(axis=1))[0][-1])
-    col = int(np.nonzero(circle[row])[0][0])
-    hot(fields, slice(row - 3, row + 1), slice(col, col + 4))
-    edge = pick(geo, circle, fields)
-    assert edge and edge[0]["touches_boundary"] is True
+def test_the_hot_threshold_is_decided_zone_by_zone_so_a_zone_entering_moves_nothing():
+    geo, circle, fields, (cj, ci) = cluster_world()
+    town = (slice(cj - 10, cj), slice(ci - 10, ci))                      # a mid-density zone: a gradient of 0.15 … 0.42
+    fields["score"][town] = np.linspace(0.15, 0.42, 10)[None, :]
+    for name in ("cover_small", "cover_shop"):
+        fields[name][town] = 0.3
+    zone_town = block(circle.shape, *town)
+    alone = clusters_for(geo, fields, zone_town)
+    hot(fields, slice(cj + 8, cj + 20), slice(ci + 8, ci + 20))          # a far, much denser zone enters
+    zone_both = zone_town | block(circle.shape, slice(cj + 8, cj + 20), slice(ci + 8, ci + 20))
+    both = clusters_for(geo, fields, zone_both)
+    ours = [c for c in both if c["_y"] < (geo["j0"] + cj) * page.CELL_M]
+    assert len(alone) == len(ours) == 1
+    for key in ("cells", "score", "mass", "lat", "lon", "threshold"):
+        assert ours[0][key] == pytest.approx(alone[0][key])
+    assert alone[0]["threshold"] < page.EVIDENCE_CONFIG["hot_score"] and len(both) == 2
+
+
+def test_a_cluster_is_flagged_when_it_runs_into_a_part_of_its_zone_that_was_not_scanned():
+    geo, circle, fields, (cj, ci) = cluster_world()
+    hot(fields, slice(cj - 3, cj + 1), slice(ci - 3, ci + 1))
+    zone = block(circle.shape, slice(cj - 6, cj + 6), slice(ci - 6, ci + 12))
+    assert clusters_for(geo, fields, zone)[0]["touches_boundary"] is False          # everything was read
+    scanned = np.ones(zone.shape, dtype=bool)
+    scanned[:, ci + 1:] = False                                                       # the tiles right next to the cluster failed
+    assert clusters_for(geo, fields, zone, scanned)[0]["touches_boundary"] is True
+    scanned[:] = True
+    scanned[:, ci + 8:] = False                                                       # unscanned, but not next to the cluster
+    assert clusters_for(geo, fields, zone, scanned)[0]["touches_boundary"] is False
 
 
 def test_smoothing_ignores_cells_without_data():
@@ -456,7 +508,7 @@ def test_confidence_high_needs_roads_plan_and_parcels_to_agree():
     assert confidence(stability_levels=["unstable", None])["level"] == "MEDIUM"
     assert confidence(coverage=0.5)["level"] == "MEDIUM"
     cut = confidence(cluster={**CLUSTER, "touches_boundary": True})
-    assert cut["level"] == "MEDIUM" and any("ขอบวง" in r for r in cut["reasons"])
+    assert cut["level"] == "MEDIUM" and any("ยังไม่ได้สแกน" in r for r in cut["reasons"])
 
 
 def test_confidence_medium_low_and_reasons_for_missing_or_disagreeing_evidence():
@@ -704,7 +756,7 @@ def test_request_budget_is_respected_and_what_was_skipped_is_reported(monkeypatc
     assert sum(1 for layer, _ in calls if layer == "dol") == 2
     assert result["parcel"]["tiles_needed"] > 2 and result["fetch"]["skipped_over_budget"] > 0
     assert result["status"] == "partial" and result["confidence"]["coverage"] < 0.6
-    assert result["confidence"]["level"] != "HIGH"
+    assert result["confidence"]["level"] != "HIGH" and result["clusters"][0]["touches_boundary"] is True   # cut by the budget
     monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_requests", 3)
     monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_parcel_tiles", 16)
     calls.clear()
@@ -760,15 +812,18 @@ def test_with_no_red_zone_in_the_radius_the_stage_does_not_fall_to_a_lower_colou
     assert result["confidence"]["signals"]["zoning"] is None and result["confidence"]["level"] != "HIGH"
 
 
-def test_several_red_zones_give_the_densest_cluster_whatever_centre_was_entered():
-    town, village = CORE, offset(CENTER, -2600, -1800)
-    world = ((town, 800.0), (village, 350.0))
-    results = [stage(road_found(anchor=town), make_world(world), radius_m=10_000.0, center=center)
-               for center in (CENTER, village, offset(CENTER, 2000, 2500))]
-    for result in results:
-        assert len(result["plan"]["zones"]) == 2
-        assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), town) < 150
-    assert len({(r["evidence_anchor"]["lat"], r["evidence_anchor"]["lon"]) for r in results}) == 1
+def test_several_red_zones_are_weighed_by_distance_from_the_centre_that_was_entered():
+    town, village = CORE, offset(CENTER, -2600, -1800)                  # 1.1 km / 3.2 km from CENTER, 4.3 km apart
+    world = ((town, 800.0), (village, 500.0))
+    near_town, in_village, north_east = CENTER, village, offset(CENTER, 2000, 2500)
+    anchors = {}
+    for name, centre in (("town", near_town), ("village", in_village), ("ne", north_east)):
+        result = stage(road_found(anchor=town), make_world(world), radius_m=10_000.0, center=centre)
+        assert len(result["plan"]["zones"]) == 2 and len(result["clusters"]) == 2
+        anchors[name] = (result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"])
+        assert result["clusters"][0]["weighted_mass"] >= result["clusters"][1]["weighted_mass"]
+    assert dist_m(anchors["town"], town) < 150 and dist_m(anchors["ne"], town) < 150
+    assert dist_m(anchors["village"], village) < 150                    # the centre sits in the village: it wins
 
 
 @pytest.mark.parametrize("shade", [(214, 140, 170), (255, 170, 190), (190, 30, 30)])
@@ -857,20 +912,56 @@ def test_a_bigger_quarter_far_away_keeps_winning_when_the_circle_grows():
 
 
 def test_stability_probe_calls_out_a_winner_that_flips_when_the_circle_shrinks():
-    near, far = offset(CENTER, -500, 0), offset(CENTER, 3350, 0)       # the bigger quarter sits at 84 % of R = 4 km
-    result = stage(road_found(), make_world(((near, 400.0), (far, 450.0))), radius_m=4000.0)
+    # the far zone has ~6x the mass of the near one, so it wins even after the distance weighting (centroid at 84 % of
+    # R = 4 km); shrink the circle to 80 % and the far zone is no longer admitted: the answer moves 3.9 km
+    near, far = offset(CENTER, -500, 0), offset(CENTER, 3350, 0)
+    result = stage(road_found(), make_world(((near, 400.0), (far, 1000.0))), radius_m=4000.0)
     assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), far) < 250
     assert result["stability"]["level"] == "unstable" and result["stability"]["max_drift_ratio"] > 0.15
     assert result["confidence"]["level"] != "HIGH" and any("ไม่นิ่ง" in r for r in result["confidence"]["reasons"])
     calm = stage(road_found(), make_world(), radius_m=5000.0)["stability"]
-    assert calm["level"] == "stable" and calm["cases"] == 5 and calm["max_drift_m"] <= 0.05 * 5000
+    assert calm["level"] == "stable" and calm["cases"] == 6 and calm["max_drift_m"] <= 0.05 * 5000      # ×0.8, ×1.2, 4 shifts
 
 
-def test_a_quarter_cut_by_the_circle_edge_is_flagged_and_cannot_be_high_confidence():
-    edge = offset(CENTER, 3700, 0)
-    result = stage(road_found(anchor=edge), make_world(((edge, 600.0),)), radius_m=4000.0)
-    assert result["clusters"] and result["clusters"][0]["touches_boundary"] is True
-    assert result["confidence"]["level"] != "HIGH" and any("ขอบวง" in r for r in result["confidence"]["reasons"])
+def test_a_red_zone_that_reaches_out_of_the_circle_is_read_whole_so_the_anchor_does_not_move_with_the_radius():
+    edge = offset(CENTER, 3700, 0)                                      # a 600 m zone whose far side is beyond R = 4 km
+    anchors = []
+    for radius_m in (4000.0, 6000.0, 12_000.0):
+        result = stage(road_found(anchor=edge), make_world(((edge, 600.0),)), radius_m=radius_m)
+        assert result["clusters"] and result["clusters"][0]["touches_boundary"] is False   # read in full, not clipped
+        anchors.append((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]))
+    assert len(set(anchors)) == 1 and dist_m(anchors[0], edge) < 150
+    # a zone that only grazes the rim has its centre outside the radius: no anchor outside the study area
+    rim = stage(road_found(anchor=edge), make_world(((edge, 600.0),)), radius_m=3300.0)
+    assert rim["status"] == "unavailable" and "ขอบวง" in rim["reason"]
+
+
+def test_growing_the_radius_never_moves_the_anchor_even_when_a_bigger_village_comes_into_the_circle():
+    town = CORE                                                         # the measured scenario: a red village 6.5 km east
+    patches = ((offset(town, 400, 200), 300.0), (offset(town, -500, -300), 220.0), (offset(town, 100, -700), 160.0))
+    village = offset(CENTER, 6500, 400)
+    anchors, listed = {}, {}
+    for radius_km in (4, 6, 8, 10, 12, 15, 20):
+        world = make_world(blobs=((town, 1600.0), (village, 600.0)), dense=patches + ((village, 600.0),),
+                           dense_scene=MID_LOTS)
+        result = stage(road_found(anchor=town), world, radius_m=radius_km * 1000.0)
+        anchors[radius_km] = (result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"])
+        listed[radius_km] = [(c["cells"], round(c["score"], 6)) for c in result["clusters"]]
+    assert len(set(anchors.values())) == 1                              # identical, to the last digit, at every radius
+    assert listed[4] == listed[6] == listed[20][:len(listed[4])]        # the town's clusters do not change either
+    assert len(listed[8]) == len(listed[4]) + 1                         # the village shows up from 8 km, ranked below
+
+
+def test_a_far_zone_entering_with_a_bigger_radius_does_not_evict_a_town_tile_from_a_small_budget(monkeypatch):
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_parcel_tiles", 4)
+    town, village = CORE, offset(CENTER, 6500, 400)
+    fetched = {}
+    for radius_km in (4, 15):
+        calls = []
+        stage(road_found(anchor=town), make_world(blobs=((town, 1600.0), (village, 600.0)), calls=calls),
+              radius_m=radius_km * 1000.0)
+        fetched[radius_km] = {bbox for layer, bbox in calls if layer == "dol"}
+    assert len(fetched[4]) == 4 and fetched[4] == fetched[15]           # the same four town tiles, whatever the radius
 
 
 def test_the_estimate_shown_before_a_run_matches_what_a_run_requests():
