@@ -1,4 +1,4 @@
-"""Evidence stage: parcel fragmentation + zoning features, fusion, WMS fetching (all offline).
+"""Evidence stage: peak-colour zone + dense small-parcel cluster, confidence, WMS fetching (all offline).
 
 Real Longdo tiles are not available in CI; synthetic rasters reproduce the properties the
 features rely on (line thickness, cell size, aspect, label clutter, zoning colours). Tests
@@ -7,7 +7,8 @@ that need captured real tiles live behind ``Geoapify_Map/fixtures/wms`` and are 
 import importlib.util
 import json
 import sys
-from math import cos, radians
+import time
+from math import cos, floor, hypot, radians
 from pathlib import Path
 
 import numpy as np
@@ -174,152 +175,273 @@ def test_missing_or_broken_legend_falls_back_to_the_labelled_provisional_one(tmp
     assert legend[0]["commercial"] and not legend[1]["commercial"]
 
 
-def test_zoning_centre_in_commercial_zone_scores_high():
-    image = plan_window([(RED, (156, 356, 156, 356))], background=ORANGE)   # 200 px (300 m) red square
-    z = page.zoning_features(image, LEGEND, m_per_px=1.5, radius_m=150.0)
-    assert z["data"] and z["in_commercial"] is True and z["distance_to_commercial_m"] == 0.0
-    assert z["commercial_share"] > 0.95 and z["zoning_intensity"] > 0.95
-    assert z["plan_coverage"] > 0.95
+# ================================================================== lattice
+CENTER = (20.219443, 100.403630)
 
 
-def test_zoning_distance_to_the_commercial_zone_and_intensity_of_the_surroundings():
-    image = plan_window([(RED, (60, 100, 60, 100))], background=ORANGE)     # red block ~ 230 px from the centre
-    z = page.zoning_features(image, LEGEND, m_per_px=1.5, radius_m=200.0)
-    assert z["in_commercial"] is False
-    assert z["distance_to_commercial_m"] == pytest.approx(1.5 * np.hypot(255.5 - 99, 255.5 - 99), rel=0.03)
-    assert z["commercial_share"] == pytest.approx(0.0, abs=0.01)
-    assert z["zoning_intensity"] == pytest.approx(0.5, abs=0.02)            # all ปานกลาง (weight 0.5)
-    assert set(z["class_shares"]) == {"ที่อยู่อาศัยหนาแน่นปานกลาง"}
+def offset(origin, east_m=0.0, north_m=0.0):
+    """Point ``east_m`` / ``north_m`` ground metres from ``origin`` (small distances)."""
+    return (origin[0] + north_m / 111_320.0, origin[1] + east_m / (111_320.0 * cos(radians(origin[0]))))
 
 
-def test_zoning_mixed_classes_weight_by_area():
-    image = plan_window([(YELLOW, (0, 512, 256, 512))], background=RED)     # half red, half yellow
-    z = page.zoning_features(image, LEGEND, m_per_px=1.5, radius_m=300.0)
-    assert z["commercial_share"] == pytest.approx(0.5, abs=0.05)
-    assert z["zoning_intensity"] == pytest.approx(0.5 * 1.0 + 0.5 * 0.25, abs=0.05)
+def geometry(radius_m=10_000.0, center=CENTER):
+    geo = page._evidence_geometry(center, radius_m)
+    return geo, page._circle_mask(geo, geo["x0"], geo["y0"], geo["r"])
 
 
-def test_zoning_ignores_outlines_text_and_antialiasing():
-    image = plan_window([(RED, (156, 356, 156, 356))], background=ORANGE)
-    for r in range(0, 512, 16):                                              # thin black grid + text-like specks
-        image[r, :] = (*BLACK, 255)
-        image[:, r] = (*BLACK, 255)
-    image[200:204, 250:260] = (*BLACK, 255)
-    z = page.zoning_features(image, LEGEND, m_per_px=1.5, radius_m=150.0)
-    assert set(z["class_shares"]) <= {"พาณิชยกรรม", "ที่อยู่อาศัยหนาแน่นปานกลาง"}
-    assert z["commercial_share"] > 0.9 and z["in_commercial"] is True
-    # colours that are not in the legend are "no data", never a made-up class
-    unknown = plan_window([((120, 120, 200), (0, 512, 0, 512))])
-    nothing = page.zoning_features(unknown, LEGEND, m_per_px=1.5, radius_m=150.0)
-    assert nothing["data"] is False and nothing["zoning_intensity"] is None and nothing["plan_coverage"] < 0.02
+def test_lattice_is_global_so_two_centres_share_tiles_and_alignment_is_fixed():
+    tiles = {}
+    for name, center in (("a", CENTER), ("b", offset(CENTER, 300, -200))):
+        geo, circle = geometry(10_000.0, center)
+        tiles[name] = {kind: set(page._lattice_tiles(geo, size, circle))
+                       for kind, size in (("plan", page.EVIDENCE_CONFIG["plan_tile_m"]),
+                                          ("parcel", page.EVIDENCE_CONFIG["parcel_tile_m"]))}
+    assert tiles["a"]["plan"] == tiles["b"]["plan"]                       # same 16 km tiles → same cache files
+    assert len(tiles["a"]["parcel"] & tiles["b"]["parcel"]) > 0.9 * len(tiles["a"]["parcel"])
+    bbox = page._tile_bbox(3, -2, 16384.0)
+    assert bbox == (3 * 16384.0, -2 * 16384.0, 4 * 16384.0, -1 * 16384.0)
+    assert page._wms_params("dol", bbox, 1024) == page._wms_params("dol", bbox, 1024)
 
 
-def test_outside_the_published_plan_is_no_data_not_low_density():
-    blank = page.zoning_features(np.zeros((512, 512, 4), dtype=np.uint8), LEGEND, m_per_px=1.5)
-    assert blank["data"] is False and blank["plan_coverage"] == 0.0
-    assert blank["zoning_intensity"] is None and blank["commercial_share"] is None
-    assert blank["distance_to_commercial_m"] is None
-    assert page.zoning_features(plan_window([]), [], m_per_px=1.5)["data"] is False
+@pytest.mark.parametrize("radius_km, plan_tiles", [(4, 4), (10, 9), (20, 16)])
+def test_plan_tiles_fit_the_request_budget_for_every_radius(radius_km, plan_tiles):
+    geo, circle = geometry(radius_km * 1000.0)
+    tiles = page._lattice_tiles(geo, page.EVIDENCE_CONFIG["plan_tile_m"], circle)
+    assert 1 <= len(tiles) <= plan_tiles
+    estimate = page.estimate_evidence_requests(CENTER, radius_km * 1000.0)
+    assert estimate["plan_tiles"] == len(tiles)
+    assert estimate["requests_max"] <= page.EVIDENCE_CONFIG["max_requests"]
+    assert estimate["area_km2"] == pytest.approx(np.pi * radius_km ** 2)
+    # nearest tile first: the tile that holds the centre leads
+    x, y = page._WEB_MERCATOR.transform(CENTER[1], CENTER[0])
+    size = page.EVIDENCE_CONFIG["plan_tile_m"]
+    assert tiles[0] == (int(floor(x / size)), int(floor(y / size)))
 
 
-def test_zoning_with_a_file_legend_uses_its_colours_and_weights(tmp_path):
-    legend = [{"name": "ย่านการค้า", "rgb": [180, 20, 20], "weight": 1.0, "commercial": True},
-              {"name": "บ้าน", "rgb": [240, 220, 120], "weight": 0.2, "commercial": False}]
-    image = plan_window([((180, 20, 20), (200, 312, 200, 312))], background=(240, 220, 120))
-    z = page.zoning_features(image, legend, m_per_px=1.5, radius_m=50.0)
-    assert z["in_commercial"] is True and z["class_shares"].keys() == {"ย่านการค้า"}
-    wide = page.zoning_features(image, legend, m_per_px=1.5, radius_m=150.0)   # the disc now reaches the houses
-    assert wide["class_shares"].keys() == {"ย่านการค้า", "บ้าน"}
-    assert wide["zoning_intensity"] == pytest.approx(
-        wide["class_shares"]["ย่านการค้า"] * 1.0 + wide["class_shares"]["บ้าน"] * 0.2)
+def test_circle_mask_covers_the_ground_area_of_the_study_radius():
+    geo, circle = geometry(5000.0)
+    cell_km2 = (page.CELL_M * geo["ground"]) ** 2 / 1e6
+    assert circle.sum() * cell_km2 == pytest.approx(np.pi * 5.0 ** 2, rel=0.03)
+    ys, xs = np.nonzero(circle)
+    assert abs(xs.mean() - (geo["ni"] - 1) / 2) < 1.5 and abs(ys.mean() - (geo["nj"] - 1) / 2) < 1.5
 
 
-# ================================================================== fusion and confidence
-def cand(node_id, lat, lon, score=0.5, **kw):
-    return {"node_id": node_id, "lat": lat, "lon": lon, "composite_score": score, **kw}
+def test_paste_clips_a_tile_that_hangs_over_the_study_box():
+    dst = np.zeros((6, 6))
+    page._paste(dst, np.ones((4, 4)), -2, 4)          # overlaps rows 4-5 / cols 0-1 only
+    assert dst.sum() == 4 and dst[4:, :2].all()
+    page._paste(dst, np.ones((4, 4)), 20, 20)         # fully outside: nothing happens
+    assert dst.sum() == 4
 
 
-def test_candidate_selection_puts_both_road_anchors_first_and_enforces_spacing():
-    lat0, lon0 = 20.2, 100.4
-    step = 0.001  # ~109 m of latitude
-    pool = [cand(f"n{i}", lat0 + i * step, lon0, score=1 - i * 0.01) for i in range(40)]
-    anchors = [dict(pool[17], score=0.9), dict(pool[3], score=0.8)]
-    picked = page.select_evidence_candidates(pool, anchors, limit=6, min_spacing_m=300.0)
-    ids = [c["node_id"] for c in picked]
-    assert ids[:2] == ["n17", "n3"]                                   # anchors first, in the given order
-    assert len(ids) == len(set(ids)) == 6
-    for a in picked:
-        for b in picked:
-            if a is not b:
-                assert page.calculate_distance_meters(a["lat"], a["lon"], b["lat"], b["lon"]) >= 300.0
-    # the best-ranked candidate not too close to an anchor comes right after them
-    assert picked[2]["node_id"] == "n0"
+# ================================================================== plan colours → peak zone
+def peak_of(image, legend=LEGEND, circle=None):
+    lut = page._legend_lut(legend, page.ZONING_COLOR_TOLERANCE)
+    tile = page._plan_tile_shares(image, lut, len(legend), 128)
+    ok = np.ones((128, 128), dtype=bool) if circle is None else circle
+    return tile, page._peak_zone(tile["shares"], ok, legend, 64)
 
 
-def test_fusion_drops_a_missing_signal_instead_of_scoring_it_zero():
-    w = {"road": 0.35, "parcel": 0.35, "zoning": 0.30}
-    full = {"node_id": "a", "road_signal": 0.8, "parcel": {"data": True, "score": 0.8},
-            "zoning": {"data": True, "zoning_intensity": 0.8}}
-    no_parcel = {"node_id": "b", "road_signal": 0.8, "parcel": {"data": False},
-                 "zoning": {"data": True, "zoning_intensity": 0.8}}
-    nothing = {"node_id": "c", "road_signal": 0.8, "parcel": {"data": False}, "zoning": {"data": False}}
-    fused = {c["node_id"]: c for c in page.fuse_evidence([full, no_parcel, nothing], w)}
-    assert fused["a"]["evidence_score"] == pytest.approx(0.8) and fused["a"]["coverage"] == pytest.approx(1.0)
-    assert fused["b"]["evidence_score"] == pytest.approx(0.8)       # not dragged down by the missing parcel data
-    assert fused["b"]["coverage"] == pytest.approx(0.65)
-    assert fused["c"]["evidence_score"] == pytest.approx(0.8) and fused["c"]["coverage"] == pytest.approx(0.35)
+def test_legend_lut_maps_legend_colours_and_rejects_everything_else():
+    lut = page._legend_lut(LEGEND, page.ZONING_COLOR_TOLERANCE)
+
+    def klass(rgb):
+        r, g, b = rgb
+        return int(lut[((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)])
+
+    for k, entry in enumerate(LEGEND):
+        assert klass(entry["rgb"]) == k
+        assert klass([min(255, c + 4) for c in entry["rgb"]]) == k          # a little antialiasing
+    assert klass((120, 120, 200)) == -1 and klass((0, 0, 0)) == -1
+    # against a brute-force nearest-colour oracle where the answer is not a coin flip
+    rng = np.random.default_rng(3)
+    legend = np.array([c["rgb"] for c in LEGEND], dtype=float)
+    checked = 0
+    for rgb in rng.integers(0, 256, size=(400, 3)):
+        dist = np.sqrt(((legend - rgb) ** 2).sum(axis=1))
+        order = np.sort(dist)
+        if order[0] < 40 and order[1] - order[0] > 16:
+            assert klass(tuple(int(c) for c in rgb)) == int(dist.argmin())
+            checked += 1
+    assert checked > 5
 
 
-def test_fusion_ranks_best_first_and_breaks_ties_by_node_id():
-    w = {"road": 1.0, "parcel": 1.0, "zoning": 1.0}
-    rows = [{"node_id": nid, "road_signal": r, "parcel": {"data": True, "score": p},
-             "zoning": {"data": True, "zoning_intensity": z}}
-            for nid, r, p, z in (("b", 0.5, 0.5, 0.5), ("a", 0.5, 0.5, 0.5), ("c", 0.9, 0.9, 0.9), ("d", 0.1, 0.2, 0.1))]
-    fused = page.fuse_evidence(rows, w)
-    assert [c["node_id"] for c in fused] == ["c", "a", "b", "d"]
-    assert [c["rank"] for c in fused] == [1, 2, 3, 4]
+def test_peak_is_the_highest_weight_class_that_forms_a_real_zone():
+    image = plan_window([(RED, (304, 704, 200, 600))], background=ORANGE, size=1024)   # 50 x 50 cells of red
+    image[8:16, 800:824] = (*RED, 255)                                                    # a 3-cell speck
+    tile, peak = peak_of(image)
+    assert tile["explained"] == tile["painted"]
+    assert LEGEND[peak["class"]]["name"] == "พาณิชยกรรม"
+    assert peak["mask"].sum() == 50 * 50 and len(peak["big"]) == 1           # the speck is below zone_min_cells
+    # without the big block the red speck cannot be the peak: the next colour down is
+    only_speck = plan_window([], background=ORANGE, size=1024)
+    only_speck[8:16, 800:824] = (*RED, 255)
+    _, peak = peak_of(only_speck)
+    assert LEGEND[peak["class"]]["name"] == "ที่อยู่อาศัยหนาแน่นปานกลาง"
 
 
-def winner(**kw):
-    base = {"lat": 20.2, "lon": 100.4, "coverage": 1.0,
-            "parcel": {"data": True, "score": 0.8, "small_share": 0.9, "shophouse_share": 0.7},
-            "zoning": {"data": True, "in_commercial": True, "distance_to_commercial_m": 0.0}}
-    base.update(kw)
-    return base
+def test_zero_weight_classes_are_never_a_peak_and_unknown_colours_are_not_painted_over():
+    farmland = plan_window([], background=GREEN, size=1024)
+    _, peak = peak_of(farmland)
+    assert peak is None
+    unknown = plan_window([], background=(120, 120, 200), size=1024)
+    tile, peak = peak_of(unknown)
+    assert tile["painted"] == 1024 * 1024 and tile["explained"] == 0 and peak is None
 
 
+def test_peak_zone_stays_inside_the_study_circle():
+    image = plan_window([(RED, (0, 1024, 0, 1024))], background=ORANGE, size=1024)
+    circle = np.zeros((128, 128), dtype=bool)
+    circle[40:60, 40:60] = True
+    _, peak = peak_of(image, circle=circle)
+    assert peak["mask"].sum() == 400 and not peak["mask"][~circle].any()
+
+
+# ================================================================== parcels: frequency of small lots
+TILE_MPP = 0.94         # parcel tile: 1 024 Web-Mercator m over 1 024 px at ~20°N
+
+
+def test_cell_score_separates_the_four_scenes():
+    scores = {name: page._parcel_tile_scores(dol_window(*dims, mpp=TILE_MPP), TILE_MPP, 8)
+              for name, dims in SCENES.items()}
+    mean = {name: float(np.nanmean(s["score"])) for name, s in scores.items()}
+    assert mean["shophouse"] >= 0.8
+    assert max(mean["town"], mean["suburb"], mean["rural"]) <= 0.35
+    assert scores["shophouse"]["score"].shape == (8, 8) and scores["shophouse"]["cover_shop"].mean() > 0.8
+
+
+def test_a_few_shophouses_beside_farmland_are_not_a_hot_cell():
+    image = dol_window(*SCENES["rural"], mpp=TILE_MPP)
+    patch = dol_window(*SCENES["shophouse"], mpp=TILE_MPP, specks=0)
+    image[300:353, 300:343] = patch[:53, :43]                                  # ten ตึกแถว lots, 40 x 50 m
+    result = page._parcel_tile_scores(image, TILE_MPP, 8)
+    assert np.nanmax(result["score"]) < page.EVIDENCE_CONFIG["hot_score"]
+
+
+def test_blank_or_unreadable_parcel_tiles_are_no_data():
+    assert page._parcel_tile_scores(np.zeros((SIZE, SIZE, 4), dtype=np.uint8), TILE_MPP, 8) is None
+    with pytest.raises(ValueError):
+        page._parcel_tile_scores(np.zeros((1001, 1001, 4), dtype=np.uint8), TILE_MPP, 8)   # not a multiple of 8
+
+
+def test_cells_without_drawn_lines_are_nan_not_low():
+    image = dol_window(*SCENES["shophouse"], mpp=TILE_MPP, specks=0)
+    image[:, SIZE // 2:] = 0                                                   # right half: no lines at all
+    result = page._parcel_tile_scores(image, TILE_MPP, 8)
+    assert np.isnan(result["score"][:, 4:]).all() and np.isfinite(result["score"][:, :4]).all()
+
+
+# ================================================================== clusters
+def cluster_world(radius_m=3000.0):
+    geo, circle = geometry(radius_m)
+    shape_ = (geo["nj"], geo["ni"])
+    fields = {name: np.full(shape_, np.nan) for name in ("score", "cover_small", "cover_shop")}
+    return geo, circle, fields
+
+
+def hot(fields, rows, cols, value=0.9):
+    for name in fields:
+        fields[name][rows, cols] = value if name == "score" else 0.5
+
+
+def pick(geo, circle, fields, region=None, top=5):
+    smooth = page._smooth_nan(fields["score"], 3)
+    region = circle if region is None else region
+    return page._find_clusters(smooth, region, circle, region, fields, geo, top)
+
+
+def test_clusters_rank_by_mass_and_tie_break_in_raster_order():
+    geo, circle, fields = cluster_world()
+    c = geo["nj"] // 2
+    hot(fields, slice(c - 12, c - 6), slice(c - 12, c - 6))      # 6 x 6 = 36 cells, south-west
+    hot(fields, slice(c + 6, c + 10), slice(c + 6, c + 10))      # 4 x 4 = 16 cells, north-east
+    found = pick(geo, circle, fields)
+    assert [k["cells"] for k in found] == [36, 16] and [k["rank"] for k in found] == [1, 2]
+    assert found[0]["lat"] < found[1]["lat"] and found[0]["lon"] < found[1]["lon"]
+    # two equal blobs: the one met first in raster order (lower row) wins, every time
+    geo, circle, fields = cluster_world()
+    hot(fields, slice(c + 6, c + 10), slice(c - 10, c - 6))
+    hot(fields, slice(c - 10, c - 6), slice(c + 6, c + 10))
+    first = pick(geo, circle, fields)
+    assert first[0]["cells"] == first[1]["cells"] and first[0]["lat"] < first[1]["lat"]
+    assert [k["lat"] for k in pick(geo, circle, fields)] == [k["lat"] for k in first]
+
+
+def test_hot_cells_outside_the_zone_or_the_circle_and_tiny_clusters_are_ignored():
+    geo, circle, fields = cluster_world()
+    c = geo["nj"] // 2
+    hot(fields, slice(c - 4, c), slice(c - 4, c))                # 16 cells inside the zone
+    hot(fields, slice(c + 2, c + 3), slice(c + 1, c + 3))        # 2 cells inside the zone: below cluster_min_cells
+    hot(fields, slice(c + 8, c + 14), slice(c + 8, c + 14))      # dense, but outside the zone
+    region = np.zeros_like(circle)
+    region[c - 5:c + 3, c - 5:c + 3] = True
+    found = pick(geo, circle, fields, region=region)
+    assert len(found) == 1 and found[0]["cells"] == 16 and found[0]["in_zone"] is True
+    assert pick(geo, np.zeros_like(circle), fields) == []
+
+
+def test_a_cluster_on_the_circle_edge_is_flagged():
+    geo, circle, fields = cluster_world()
+    c = geo["nj"] // 2
+    hot(fields, slice(c - 3, c + 1), slice(c - 3, c + 1))
+    inner = pick(geo, circle, fields)
+    assert inner[0]["touches_boundary"] is False
+    geo, circle, fields = cluster_world()
+    row = int(np.nonzero(circle.any(axis=1))[0][-1])
+    col = int(np.nonzero(circle[row])[0][0])
+    hot(fields, slice(row - 3, row + 1), slice(col, col + 4))
+    edge = pick(geo, circle, fields)
+    assert edge and edge[0]["touches_boundary"] is True
+
+
+def test_smoothing_ignores_cells_without_data():
+    score = np.full((5, 5), np.nan)
+    score[2, 2], score[2, 3] = 1.0, 0.0
+    smooth = page._smooth_nan(score, 3)
+    assert smooth[2, 2] == pytest.approx(0.5) and smooth[2, 3] == pytest.approx(0.5)
+    assert np.isnan(smooth[0, 0]) and np.isnan(smooth[2, 1])
+
+
+# ================================================================== confidence
 ROAD_NEAR = [{"lat": 20.2, "lon": 100.4}]
 ROAD_FAR = [{"lat": 20.25, "lon": 100.4}]
+ANCHOR = {"lat": 20.2, "lon": 100.4}
+PEAK = {"name": "พาณิชยกรรม", "commercial": True, "area_km2": 1.2}
+CLUSTER = {"cells": 40, "area_ha": 55.0, "score": 0.8, "touches_boundary": False}
+
+
+def confidence(**kw):
+    args = dict(road_anchors=ROAD_NEAR, zoning_ok=True, parcel_ok=True, coverage=1.0, peak=PEAK,
+                cluster=CLUSTER, stability_levels=["stable", "stable"])
+    args.update(kw)
+    return page.classify_anchor_confidence(
+        ANCHOR, args.pop("road_anchors"), cfg=page.EVIDENCE_CONFIG, **args)
 
 
 def test_confidence_high_needs_roads_plan_and_parcels_to_agree():
-    cfg = page.EVIDENCE_CONFIG
-    result = page.classify_anchor_confidence(winner(), ROAD_NEAR, "stable", cfg)
+    result = confidence()
     assert result["level"] == "HIGH" and result["signals"] == {"roads": True, "zoning": True, "parcel": True}
-    assert any("โซนพาณิชยกรรม" in r for r in result["reasons"])
-    # an unstable road anchor, or too little data, takes HIGH away
-    assert page.classify_anchor_confidence(winner(), ROAD_NEAR, "unstable", cfg)["level"] == "MEDIUM"
-    assert page.classify_anchor_confidence(winner(coverage=0.5), ROAD_NEAR, "stable", cfg)["level"] == "MEDIUM"
+    assert any("พาณิชยกรรม" in r for r in result["reasons"]) and any("cluster" in r for r in result["reasons"])
+    # an unstable anchor (roads or evidence), too little data, or a cluster cut by the circle take HIGH away
+    assert confidence(stability_levels=["stable", "unstable"])["level"] == "MEDIUM"
+    assert confidence(stability_levels=["unstable", None])["level"] == "MEDIUM"
+    assert confidence(coverage=0.5)["level"] == "MEDIUM"
+    cut = confidence(cluster={**CLUSTER, "touches_boundary": True})
+    assert cut["level"] == "MEDIUM" and any("ขอบวง" in r for r in cut["reasons"])
 
 
 def test_confidence_medium_low_and_reasons_for_missing_or_disagreeing_evidence():
-    cfg = page.EVIDENCE_CONFIG
-    far = page.classify_anchor_confidence(winner(), ROAD_FAR, "stable", cfg)
-    assert far["level"] == "MEDIUM" and far["signals"]["roads"] is False
-    assert any("ไม่สอดคล้อง" in r for r in far["reasons"]) and far["nearest_road_anchor_m"] > 5000
-    only_roads = page.classify_anchor_confidence(
-        winner(parcel={"data": False}, zoning={"data": False, "distance_to_commercial_m": None}, coverage=0.35),
-        ROAD_NEAR, "stable", cfg)
-    assert only_roads["level"] == "LOW" and only_roads["signals"]["zoning"] is None and only_roads["signals"]["parcel"] is None
-    assert any("ไม่มีข้อมูล" in r for r in only_roads["reasons"])
-    weak = page.classify_anchor_confidence(
-        winner(parcel={"data": True, "score": 0.1, "small_share": 0.0, "shophouse_share": 0.0},
-               zoning={"data": True, "in_commercial": False, "distance_to_commercial_m": 900.0}),
-        ROAD_FAR, "check", cfg)
-    assert weak["level"] == "LOW" and any("ไกล" in r for r in weak["reasons"])
-    near_zone = page.classify_anchor_confidence(
-        winner(zoning={"data": True, "in_commercial": False, "distance_to_commercial_m": 100.0}), ROAD_NEAR, "stable", cfg)
-    assert near_zone["signals"]["zoning"] is True and near_zone["level"] == "HIGH"
+    far = confidence(road_anchors=ROAD_FAR)
+    assert far["level"] == "MEDIUM" and far["signals"]["roads"] is False and far["nearest_road_anchor_m"] > 5000
+    assert any("ไม่สอดคล้อง" in r for r in far["reasons"])
+    no_plan = confidence(zoning_ok=None, peak=None)                          # unreadable plan: never HIGH
+    assert no_plan["level"] == "MEDIUM" and no_plan["signals"]["zoning"] is None
+    assert any("ไม่มีข้อมูล" in r for r in no_plan["reasons"])
+    assert confidence(zoning_ok=None, peak=None, parcel_ok=None, cluster=None, coverage=0.2)["level"] == "LOW"
+    weak = confidence(road_anchors=ROAD_FAR, zoning_ok=False, parcel_ok=False, cluster={**CLUSTER, "score": 0.3})
+    assert weak["level"] == "LOW" and any("นอกโซนพาณิชยกรรม" in r for r in weak["reasons"])
+    assert any("ไม่เด่น" in r for r in weak["reasons"])
+    assert confidence(road_anchors=[])["signals"]["roads"] is None
 
 
 # ====================================================================== WMS fetching
@@ -409,151 +531,249 @@ def test_wms_timeout_and_corrupt_cache_entries_are_survivable(wms_env):
     assert healed is not None and not info["from_cache"] and len(calls) == n + 1
 
 
-# ============================================================ run_evidence_stage (fake fetcher)
-CENTER = (20.219443, 100.403630)
-CORE = (20.2200, 100.4040)            # shophouse lots + commercial zone
-OUT = (20.2290, 100.4040)             # ~1 km north: suburban lots, no commercial zone
+# ============================================================ run_evidence_stage (fake world)
+CORE = offset(CENTER, 800, 800)       # a ตึกแถว quarter inside a red (พาณิชยกรรม) block, ~1.1 km from the centre
+OUT = offset(CENTER, -1500, -1500)    # suburb: a better-scoring *road* node that evidence must not prefer
+BLOB_M = 700.0                        # ground radius of the red block / shophouse quarter
+_PARCEL_IMAGES = {}
 
 
-def _near(bbox, point):
-    """True when the window centre lies within ~0.01 deg of ``point`` (by Mercator centre)."""
-    x, y = page._WEB_MERCATOR.transform(point[1], point[0])
-    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-    return abs(cx - x) < 40 and abs(cy - y) < 40
+def _parcel_scene(kind):
+    if kind not in _PARCEL_IMAGES:
+        _PARCEL_IMAGES[kind] = dol_window(*SCENES[kind], mpp=TILE_MPP, specks=300)
+    return _PARCEL_IMAGES[kind]
 
 
-def make_fetcher(core=CORE, out=OUT, fail=(), calls=None, cached=False):
-    """Serves a two-place world: a CBD-like core and a suburb; ``fail`` = kinds to fail."""
-    plan = plan_window([(RED, (360, 664, 360, 664))], background=GREEN, size=1024)
-    suburb_plan = plan_window([], background=GREEN, size=1024)
+def make_world(blobs=((CORE, BLOB_M),), fail=(), calls=None, memo=None, plan="ok", delay=0.0):
+    """A fake Longdo: ``cityplan_dpt`` is green with a red disc per blob, ``dol`` is shophouse lots
+    inside a blob and suburban lots elsewhere. Pixels are placed by their Web-Mercator position, so
+    any bbox of the lattice is served consistently. ``memo`` emulates the disk cache."""
+    discs = []
+    for point, radius_m in blobs:
+        x, y = page._WEB_MERCATOR.transform(point[1], point[0])
+        discs.append((x, y, radius_m / cos(radians(point[0]))))
 
     def fetch(layer, bbox, px):
+        if delay:
+            time.sleep(delay)
+        key = (layer, tuple(bbox))
         if calls is not None:
-            calls.append((layer, tuple(bbox), px))
+            calls.append(key)
         kind = "parcel" if layer == "dol" else "plan"
-        span = (bbox[2] - bbox[0]) * cos(radians(CENTER[0]))
+        info = {"layer": layer, "from_cache": bool(memo is not None and key in memo)}
+        if memo is not None:
+            memo.add(key)
         if kind in fail:
             return None, {"layer": layer, "error": "HTTP 500", "from_cache": False}
-        info = {"layer": layer, "from_cache": cached}
-        if layer == "dol":
-            lot = SCENES["shophouse"] if _near(bbox, core) else SCENES["suburb"]
-            return dol_window(*lot, mpp=span / px), info
-        if span > 6000:        # study-area overview: a red blob left of and below centre, green elsewhere
-            return plan_window([(RED, (600, 700, 300, 400))], background=GREEN, size=1024), info
-        return (plan if _near(bbox, core) else suburb_plan), info
+        xs = bbox[0] + (np.arange(px) + 0.5) * (bbox[2] - bbox[0]) / px
+        ys = bbox[3] - (np.arange(px) + 0.5) * (bbox[3] - bbox[1]) / px
+        inside = np.zeros((px, px), dtype=bool)
+        for x, y, r in discs:
+            if abs(xs.mean() - x) < r + (bbox[2] - bbox[0]) and abs(ys.mean() - y) < r + (bbox[3] - bbox[1]):
+                inside |= (xs[None, :] - x) ** 2 + (ys[:, None] - y) ** 2 <= r * r
+        if kind == "plan":
+            if plan == "blank":
+                return np.zeros((px, px, 4), dtype=np.uint8), info
+            image = np.zeros((px, px, 4), dtype=np.uint8)
+            image[...] = (*(GREEN if plan == "ok" else (120, 120, 200)), 255)
+            if plan == "ok":
+                image[inside] = (*RED, 255)
+            return image, info
+        if not inside.any():
+            return _parcel_scene("suburb").copy(), info
+        return np.where(inside[..., None], _parcel_scene("shophouse"), _parcel_scene("suburb")).astype(np.uint8), info
+
     return fetch
 
 
-def road_found(core_is_anchor=True, stability="stable", extra=()):
-    core = {"node_id": "core", "lat": CORE[0], "lon": CORE[1], "score": 0.80}
-    out = {"node_id": "out", "lat": OUT[0], "lon": OUT[1], "score": 0.90}
-    composite_anchor, closeness_anchor = (core, core) if core_is_anchor else (out, out)
-    candidates = [dict(core, composite_score=0.80), dict(out, composite_score=0.90), *extra]
-    return {
-        "composite": {"anchor": composite_anchor, "stability": {"level": stability}},
-        "closeness": {"anchor": closeness_anchor},
-        "evidence_candidates": candidates,
-    }
+def road_found(anchor=CORE, stability="stable"):
+    point = {"node_id": "a", "lat": anchor[0], "lon": anchor[1], "score": 0.8}
+    return {"composite": {"anchor": point, "stability": {"level": stability}}, "closeness": {"anchor": dict(point)}}
 
 
-@pytest.fixture
-def small_config(monkeypatch):
-    monkeypatch.setitem(page.EVIDENCE_CONFIG, "candidates", 4)
-    monkeypatch.setitem(page.EVIDENCE_CONFIG, "parallel", 3)
+def stage(found, fetcher, radius_m=5000.0, center=CENTER, **kw):
+    return page.run_evidence_stage(found, center, radius_m, fetcher=fetcher, **kw)
 
 
-def stage(found, fetcher, **kw):
-    return page.run_evidence_stage(found, CENTER, 5000.0, fetcher=fetcher, **kw)
+def dist_m(a, b):
+    return page.calculate_distance_meters(a[0], a[1], b[0], b[1])
 
 
-def test_stage_picks_the_core_over_a_better_road_score_when_the_evidence_says_so(small_config):
-    result = stage(road_found(core_is_anchor=False), make_fetcher())
-    assert result["status"] == "ok" and result["legend_source"] == "provisional"
-    best = result["evidence_anchor"]
-    assert best["node_id"] == "core" and best["source"] == "Automated CBD Anchor — Evidence"
-    by_id = {c["node_id"]: c for c in result["candidates"]}
-    assert by_id["core"]["evidence_score"] > by_id["out"]["evidence_score"]
-    assert by_id["core"]["parcel"]["shophouse_share"] > by_id["out"]["parcel"]["shophouse_share"]
-    assert by_id["core"]["zoning"]["in_commercial"] and not by_id["out"]["zoning"]["in_commercial"]
-    assert by_id["out"]["is_composite_anchor"] and not by_id["core"]["is_composite_anchor"]
-    # the evidence anchor sits ~1 km from the road anchors → the signals disagree: not HIGH
-    assert result["confidence"]["level"] != "HIGH" and result["confidence"]["signals"]["roads"] is False
-    assert [c["rank"] for c in result["candidates"]] == list(range(1, len(result["candidates"]) + 1))
+def test_stage_anchors_on_the_dense_cluster_inside_the_peak_colour_zone():
+    result = stage(road_found(anchor=OUT), make_world())
+    assert result["schema"] == page.EVIDENCE_SCHEMA and result["status"] == "ok" and result["reason"] is None
+    anchor = result["evidence_anchor"]
+    assert anchor["source"] == "Automated CBD Anchor — Evidence" and anchor["basis"] == "cluster"
+    assert dist_m((anchor["lat"], anchor["lon"]), CORE) < 150               # the road anchor was 2 km away
+    peak = result["plan"]["peak"]
+    assert peak["name"] == "พาณิชยกรรม" and peak["commercial"] and peak["weight"] == 1.0
+    assert result["plan"]["state"] == "ok" and result["plan"]["explained"] == pytest.approx(1.0)
+    assert result["parcel"]["region"] == "peak_zone" and result["parcel"]["tiles_skipped"] == 0
+    best = result["clusters"][0]
+    assert best["in_zone"] and best["score"] > 0.7 and best["polygon"]["type"] in ("Polygon", "MultiPolygon")
+    assert result["plan"]["zones"][0]["area_km2"] == pytest.approx(np.pi * 0.7 ** 2, rel=0.2)
+    # the road anchors disagree (2 km away), the plan and the parcels agree → not HIGH
+    assert result["confidence"]["signals"] == {"roads": False, "zoning": True, "parcel": True}
+    assert result["confidence"]["level"] == "MEDIUM"
 
 
-def test_stage_is_high_confidence_when_roads_zoning_and_parcels_agree(small_config):
-    result = stage(road_found(core_is_anchor=True), make_fetcher())
-    confidence = result["confidence"]
-    assert result["evidence_anchor"]["node_id"] == "core"
-    assert confidence["level"] == "HIGH" and confidence["coverage"] == pytest.approx(1.0)
-    assert all(confidence["signals"].values())
+def test_stage_is_high_confidence_when_roads_plan_and_parcels_agree():
+    result = stage(road_found(anchor=CORE), make_world())
+    assert result["confidence"]["level"] == "HIGH" and result["confidence"]["coverage"] == pytest.approx(1.0)
+    assert result["stability"]["level"] == "stable"
     # an unstable road anchor caps the confidence
-    unstable = stage(road_found(core_is_anchor=True, stability="unstable"), make_fetcher())
-    assert unstable["confidence"]["level"] != "HIGH"
+    assert stage(road_found(anchor=CORE, stability="unstable"), make_world())["confidence"]["level"] != "HIGH"
 
 
-def test_stage_reports_the_commercial_zone_from_the_study_area_overview(small_config):
-    zone = stage(road_found(), make_fetcher())["commercial_zone"]
-    assert zone and zone["area_km2"] > 0
-    # the blob occupies rows 600-700 / cols 300-400 of a 1024 px, 10 km overview: SW of the centre
-    assert zone["lat"] < CENTER[0] and zone["lon"] < CENTER[1]
-    assert page.calculate_distance_meters(zone["lat"], zone["lon"], *CENTER) == pytest.approx(
-        np.hypot((350 - 512) * 10000 / 1024, (650 - 512) * 10000 / 1024), rel=0.05)
+def test_the_anchor_does_not_depend_on_the_radius_or_on_where_the_circle_is_centred():
+    reference = stage(road_found(), make_world(), radius_m=5000.0)["evidence_anchor"]
+    for radius_m in (4000.0, 10_000.0, 20_000.0):
+        other = stage(road_found(), make_world(), radius_m=radius_m)["evidence_anchor"]
+        assert (other["lat"], other["lon"]) == (reference["lat"], reference["lon"])
+    shifted = stage(road_found(), make_world(), center=offset(CENTER, 300, -250))["evidence_anchor"]
+    assert dist_m((shifted["lat"], shifted["lon"]), (reference["lat"], reference["lon"])) <= 128.0
 
 
-def test_stage_without_any_image_is_unavailable_and_leaves_the_roads_alone(small_config):
+def test_a_second_run_costs_no_request_and_a_wider_circle_only_fetches_new_tiles():
+    memo, calls = set(), []
+    world = make_world(memo=memo, calls=calls)
+    first = stage(road_found(), world, radius_m=4000.0)
+    seen = set(calls)
+    assert first["fetch"]["cache_hits"] == 0 and first["fetch"]["requests"] == len(calls) > 0
+    calls.clear()
+    again = stage(road_found(), world, radius_m=4000.0)
+    assert again["fetch"]["requests"] == 0 and again["fetch"]["cache_hits"] == len(calls) and set(calls) == seen
+    calls.clear()
+    wider = stage(road_found(), world, radius_m=20_000.0)
+    new = set(calls) - seen
+    assert new and all(layer == "cityplan_dpt" for layer, _ in new)       # only more of the plan
+    assert wider["fetch"]["requests"] == len(new) and seen <= set(calls)
+    assert wider["evidence_anchor"] == again["evidence_anchor"] | {"coverage": wider["evidence_anchor"]["coverage"]}
+
+
+def test_request_budget_is_respected_and_what_was_skipped_is_reported(monkeypatch):
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_parcel_tiles", 2)
+    calls = []
+    result = stage(road_found(), make_world(calls=calls))
+    assert sum(1 for layer, _ in calls if layer == "dol") == 2
+    assert result["parcel"]["tiles_needed"] > 2 and result["fetch"]["skipped_over_budget"] > 0
+    assert result["status"] == "partial" and result["confidence"]["coverage"] < 0.6
+    assert result["confidence"]["level"] != "HIGH"
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_requests", 3)
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_parcel_tiles", 16)
+    calls.clear()
+    stage(road_found(), make_world(calls=calls))
+    assert len(calls) <= 3
+
+
+def test_a_zone_bigger_than_the_budget_is_scanned_from_the_study_centre_outwards(monkeypatch):
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_parcel_tiles", 4)
+    calls = []
+    result = stage(road_found(), make_world(blobs=((CENTER, 3000.0),), calls=calls), radius_m=5000.0)
+    x, y = page._WEB_MERCATOR.transform(CENTER[1], CENTER[0])
+    fetched = [bbox for layer, bbox in calls if layer == "dol"]
+    assert len(fetched) == 4 and result["parcel"]["tiles_needed"] > 20
+    for bbox in fetched:                                           # the 2 x 2 block of tiles around the centre
+        assert hypot((bbox[0] + bbox[2]) / 2 - x, (bbox[1] + bbox[3]) / 2 - y) < 1000
+    assert result["status"] == "partial" and result["confidence"]["level"] != "HIGH"
+
+
+def test_a_slow_server_hits_the_deadline_instead_of_hanging(monkeypatch):
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "deadline_s", 0.3)
+    monkeypatch.setitem(page.EVIDENCE_CONFIG, "parallel", 1)
+    started = time.perf_counter()
+    result = stage(road_found(), make_world(delay=0.5))
+    assert time.perf_counter() - started < 3.0
+    assert result["status"] == "unavailable" and result["fetch"]["skipped_over_budget"] > 0
+    assert any("หมดเวลา" in e for e in result["fetch"]["errors"])
+
+
+@pytest.mark.parametrize("plan_kind, state", [("blank", "blank"), ("mismatch", "mismatch")])
+def test_an_unreadable_plan_falls_back_to_the_parcels_around_the_road_anchor(plan_kind, state):
+    result = stage(road_found(anchor=CORE), make_world(plan=plan_kind))
+    assert result["plan"]["state"] == state and result["plan"]["peak"] is None
+    assert result["status"] == "partial" and result["parcel"]["region"] == "fallback_disc"
+    assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), CORE) < 300
+    assert any("รอบ anchor ถนน" in n for n in result["notes"])
+    assert result["confidence"]["signals"]["zoning"] is None and result["confidence"]["level"] != "HIGH"
+    # without a road anchor there is nowhere to look
+    nowhere = stage({}, make_world(plan=plan_kind))
+    assert nowhere["status"] == "unavailable" and "anchor ถนน" in nowhere["reason"]
+    outside = stage(road_found(anchor=offset(CENTER, 30_000, 0)), make_world(plan=plan_kind))
+    assert outside["status"] == "unavailable" and "นอกวงศึกษา" in outside["reason"]   # nothing to scan around it
+
+
+def test_parcels_that_cannot_be_read_leave_the_centre_of_the_peak_zone():
+    result = stage(road_found(anchor=CORE), make_world(fail=("parcel",)))
+    assert result["status"] == "partial" and result["evidence_anchor"]["basis"] == "zone"
+    assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), CORE) < 150
+    assert result["clusters"] == [] and result["confidence"]["level"] == "LOW"
+    assert result["confidence"]["coverage"] == 0.0 and result["fetch"]["errors"]
+
+
+def test_stage_without_any_image_is_unavailable_and_leaves_the_roads_alone():
     found = road_found()
     snapshot = json.dumps(found, sort_keys=True)
-    result = stage(found, make_fetcher(fail=("parcel", "plan")))
-    assert result["status"] == "unavailable" and result["evidence_anchor"] is None
-    assert result["confidence"] is None and result["reason"]
-    assert result["fetch"]["errors"] and "HTTP 500" in result["fetch"]["errors"][0]
+    result = stage(found, make_world(fail=("parcel", "plan")))
+    assert result["status"] == "unavailable" and result["evidence_anchor"] is None and result["confidence"] is None
+    assert result["reason"] and result["fetch"]["errors"] and "HTTP 500" in result["fetch"]["errors"][0]
     assert json.dumps(found, sort_keys=True) == snapshot            # the road result is untouched
 
 
-def test_stage_with_one_layer_missing_is_partial_and_scores_on_what_exists(small_config):
-    result = stage(road_found(core_is_anchor=False), make_fetcher(fail=("plan",)))
-    assert result["status"] == "partial" and result["evidence_anchor"]["node_id"] == "core"
-    winner = result["candidates"][0]
-    assert winner["signals"]["zoning"] is None and winner["signals"]["parcel"] is not None
-    assert winner["coverage"] == pytest.approx(0.70)                # road 0.35 + parcel 0.35
-    assert result["confidence"]["level"] != "HIGH"                  # zoning is unknown, not "agreeing"
-
-
-def test_stage_never_raises_whatever_the_fetcher_or_the_input_does(small_config):
+def test_stage_never_raises_whatever_the_fetcher_or_the_input_does():
     def exploding(layer, bbox, px):
         raise RuntimeError("proxy melted")
 
     broken = stage(road_found(), exploding)
     assert broken["status"] == "unavailable" and "proxy melted" in " ".join(broken["fetch"]["errors"])
-    for found in ({}, {"composite": None}, {"composite": {"anchor": {}}, "closeness": {}}):
-        result = stage(found, make_fetcher())
-        assert result["status"] == "unavailable" and result["reason"] and result["evidence_anchor"] is None
-    empty = stage(road_found() | {"evidence_candidates": []},
-                  make_fetcher())
-    assert empty["status"] in ("ok", "partial", "unavailable")  # roads anchors alone are still candidates
+    assert stage(road_found(), lambda layer, bbox, px: (np.zeros((7, 7, 4), dtype=np.uint8), {}))["status"] == "unavailable"
+    for found in (None, {}, {"composite": None}, {"composite": {"anchor": {}}, "closeness": {}}):
+        result = stage(found, make_world())
+        assert result["status"] in ("ok", "partial") and result["confidence"]["signals"]["roads"] is None
+    assert page.run_evidence_stage(road_found(), (float("nan"), 100.4), 5000.0, fetcher=make_world())["status"] == "unavailable"
 
 
-def test_stage_respects_the_request_budget_and_says_what_it_skipped(small_config, monkeypatch):
-    monkeypatch.setitem(page.EVIDENCE_CONFIG, "max_requests", 3)
-    calls = []
-    result = stage(road_found(), make_fetcher(calls=calls))
-    assert len(calls) == 3
-    assert result["fetch"]["skipped_over_budget"] > 0 and result["status"] != "ok"
-
-
-def test_stage_counts_cache_hits_and_requests(small_config):
-    live = stage(road_found(), make_fetcher())
-    assert live["fetch"]["cache_hits"] == 0 and live["fetch"]["requests"] > 0
-    cached = stage(road_found(), make_fetcher(cached=True))
-    assert cached["fetch"]["requests"] == 0 and cached["fetch"]["cache_hits"] == live["fetch"]["requests"]
-
-
-def test_stage_result_is_json_safe_and_deterministic(small_config):
-    first = stage(road_found(core_is_anchor=False), make_fetcher())
-    second = stage(road_found(core_is_anchor=False), make_fetcher())
+def test_stage_result_is_json_safe_deterministic_and_small():
+    first = stage(road_found(), make_world())
+    second = stage(road_found(), make_world())
     text = json.dumps(first, sort_keys=True)                          # no numpy scalars / arrays
-    for volatile in ("seconds",):
-        first["fetch"].pop(volatile), second["fetch"].pop(volatile)
+    first["fetch"].pop("seconds"), second["fetch"].pop("seconds")
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
     assert len(text) < 60_000                                         # no raster is stored in the result
+    assert "_x" not in text and "_y" not in text
+
+
+def test_a_bigger_quarter_far_away_keeps_winning_when_the_circle_grows():
+    # two quarters; the bigger one is far east. Growing the circle must not change the answer.
+    near, far = offset(CENTER, -600, 300), offset(CENTER, 3200, 0)
+    world = ((near, 450.0), (far, 800.0))
+    big = stage(road_found(), make_world(world), radius_m=5000.0)
+    assert dist_m((big["evidence_anchor"]["lat"], big["evidence_anchor"]["lon"]), far) < 200
+    wide = stage(road_found(), make_world(world), radius_m=9000.0)
+    assert (wide["evidence_anchor"]["lat"], wide["evidence_anchor"]["lon"]) == (
+        big["evidence_anchor"]["lat"], big["evidence_anchor"]["lon"])
+
+
+def test_stability_probe_calls_out_a_winner_that_flips_when_the_circle_shrinks():
+    near, far = offset(CENTER, -500, 0), offset(CENTER, 3350, 0)       # the bigger quarter sits at 84 % of R = 4 km
+    result = stage(road_found(), make_world(((near, 400.0), (far, 450.0))), radius_m=4000.0)
+    assert dist_m((result["evidence_anchor"]["lat"], result["evidence_anchor"]["lon"]), far) < 250
+    assert result["stability"]["level"] == "unstable" and result["stability"]["max_drift_ratio"] > 0.15
+    assert result["confidence"]["level"] != "HIGH" and any("ไม่นิ่ง" in r for r in result["confidence"]["reasons"])
+    calm = stage(road_found(), make_world(), radius_m=5000.0)["stability"]
+    assert calm["level"] == "stable" and calm["cases"] == 5 and calm["max_drift_m"] <= 0.05 * 5000
+
+
+def test_a_quarter_cut_by_the_circle_edge_is_flagged_and_cannot_be_high_confidence():
+    edge = offset(CENTER, 3700, 0)
+    result = stage(road_found(anchor=edge), make_world(((edge, 600.0),)), radius_m=4000.0)
+    assert result["clusters"] and result["clusters"][0]["touches_boundary"] is True
+    assert result["confidence"]["level"] != "HIGH" and any("ขอบวง" in r for r in result["confidence"]["reasons"])
+
+
+def test_the_estimate_shown_before_a_run_matches_what_a_run_requests():
+    calls = []
+    estimate = page.estimate_evidence_requests(CENTER, 10_000.0)
+    result = stage(road_found(), make_world(calls=calls), radius_m=10_000.0)
+    assert result["plan"]["tiles"] == estimate["plan_tiles"]
+    assert len(calls) <= estimate["requests_max"]
