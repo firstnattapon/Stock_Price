@@ -2,7 +2,7 @@
 # (st.dataframe / st.data_editor Arrow serialization) — pin ชุดที่ทดสอบแล้ว
 pandas>=2.2,<3
 pyarrow>=14,<22
-streamlit>=1.39.0
+streamlit>=1.50.0  # width="stretch" on button/dataframe/data_editor/plotly_chart (use_container_width is being removed)
 yfinance
 thingspeak
 plotly
