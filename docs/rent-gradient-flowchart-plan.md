@@ -177,11 +177,18 @@ the repo). No changes to `Rent_Gradient.py`.
 |---|---|---|---|---|
 | Original (a6e1571) | 346 | 198 | 16 | – |
 | Round 1 (#28) | 82 | 29 | 4 | 5,323 |
-| Round 2 | **45** | **11** | **0** | ~5,100 |
+| Round 2 | 45 | 11 | 0 | ~5,100 |
+| Round 3 (request: 45 → 20 lines) | **18** | **8** | **0** | ~4,950 |
 
-- Round 2 also fixes audit defects D1-D5 (the nearest road anchor ≤300 m, only "unstable" blocks HIGH,
+- Round 3, structural cuts (nodes 11 → 8): the Evidence on/off diamond became two labelled edges out of
+  `ANC`; the FIT/INDEX diamond became two labelled edges out of `R1`; the curve/rings/heat box moved into the
+  `GOAL` outputs. The error terminal keeps one unlabelled edge fan-in and lists its causes in its own text.
+- Round 3, formatting cuts: statements are joined with `;`, and the `%%` header, blank lines and class
+  lines were compacted. **Part of the 45 → 18 line drop is formatting, not content**: the characters barely
+  changed (~5,100 → ~4,950), so each line is longer.
+- Round 2 also fixed audit defects D1-D5 (the nearest road anchor ≤300 m, only "unstable" blocks HIGH,
   percentile ranks for the composite score, the missing reset / import / clear-anchor invalidation, and the
-  dropped evidence numbers). The text per box is longer, so the saving is in nodes and edges, not characters.
+  dropped evidence numbers).
 - `docs/rent-gradient-flowchart-facts.md`: 44 facts read from the code, each checked mechanically against
-  the diagram text (87 strings, none missing). This is a coverage check, not a proof of equivalence.
-- Node counts come from a regex script and are approximate. `Rent_Gradient.py` is unchanged.
+  the diagram text (87 strings, none missing, re-run after round 3). This is a coverage check, not a proof of
+  equivalence. Node counts come from a regex script and are approximate. `Rent_Gradient.py` is unchanged.
