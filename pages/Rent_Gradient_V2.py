@@ -5416,15 +5416,30 @@ _FLOWCHART_HEIGHT_PX = 720
 
 
 def _flowchart_html(mmd: str) -> str:
-    """HTML ในตัวเอง: พื้นขาวเพื่อให้ธีม default ของ Mermaid อ่านได้ในโหมดมืด."""
+    """HTML ในตัวเอง: พื้นขาวเพื่อให้ธีม default ของ Mermaid อ่านได้ในโหมดมืด.
+
+    Mermaid วัดขนาดข้อความตอนวาด — iframe ในแท็บที่ยังไม่เปิดมีขนาด 0 จึงขึ้น "Syntax error in text"
+    (startOnLoad ใช้ไม่ได้) ดังนั้นรอจนหน้าต่างมีขนาดจริง (เปิดแท็บ → resize) แล้ววาดครั้งเดียว.
+    """
     import html as _html
 
     return f"""
 <div style="background:#ffffff;border-radius:8px;padding:16px;overflow-x:auto">
-  <pre class="mermaid" style="margin:0;display:flex;justify-content:center">{_html.escape(mmd, quote=False)}</pre>
+  <pre id="plan" class="mermaid" style="margin:0;display:flex;justify-content:center">{_html.escape(mmd, quote=False)}</pre>
 </div>
 <script src="{_MERMAID_JS}"></script>
-<script>mermaid.initialize({{startOnLoad: true, securityLevel: "strict", flowchart: {{useMaxWidth: true}}}});</script>
+<script>
+  mermaid.initialize({{startOnLoad: false, securityLevel: "strict", flowchart: {{useMaxWidth: true}}}});
+  let drawn = false;
+  function draw() {{
+    if (drawn || !document.documentElement.clientWidth) return;
+    drawn = true;
+    mermaid.run({{querySelector: "#plan"}});
+  }}
+  draw();
+  addEventListener("resize", draw);
+  new ResizeObserver(draw).observe(document.documentElement);
+</script>
 """
 
 
