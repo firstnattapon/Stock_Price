@@ -4,6 +4,18 @@ Geoapify CBD x Longdo GIS + Network Analysis + Rent Gradient (Bid-Rent) — v2
 v2 = pages/Rent_Gradient.py ทุกอย่างเหมือนเดิม (คำนวณ/ผลลัพธ์ไม่เปลี่ยน)
      + แท็บ "🗺️ Flowchart" แสดง flowchart แบบย่อพร้อม goal ของ app
        (อ่านจาก pages/Rent_Gradient_flowchart.mmd — ดู docs/rent-gradient-flowchart-plan.md)
+Flow map (pages/Rent_Gradient_flowchart.mmd node -> code):
+  ISO  ① Isochrone/CBD   perform_calculation, calculate_intersection
+  NET  ③ Network         perform_network_analysis, _compute_centrality_impl,
+                         compute_weighted_closeness, compute_golden_land_opportunities
+  ANC  Automated Anchor  perform_automated_anchor, find_cbd_anchors, anchor_study_polygon
+  EVN  Evidence          run_evidence_stage, classify_anchor_confidence
+  R1   ④ Rent Gradient   perform_rent_gradient, resolve_cbd_anchor, compute_rent_gradient_data,
+                         fit_rent_gradient_from_samples
+  INV  invalidation      StateManager.invalidate_markers / invalidate_anchors / invalidate_rent
+                         (reset / import_config clear everything), _refresh_rent
+  ERR  stop              early return + st.error in each perform_*
+  GOAL outputs           render_analytics_panel (Ring Report, Golden Spots, Markers, Flowchart)
 Refactored: Modular Monolith Architecture
 - Section 1: Constants & Configuration
 - Section 2: State Manager (Centralized Session State)
@@ -553,6 +565,27 @@ class StateManager:
             st.session_state[cls.K_NETWORK] = None
         if "rent" in layers:
             st.session_state[cls.K_RENT_DATA] = None
+
+    # ------------------------------------------------- named invalidation rules
+    # Flowchart node INV (pages/Rent_Gradient_flowchart.mmd). Each rule calls clear_results
+    # with the same layers the call sites used before, so behaviour is unchanged.
+    _MARKER_LAYERS = ("isochrone", "intersection", "rent")
+    _ANCHOR_LAYERS = ("anchor", "anchor_closeness", "anchor_evidence")
+
+    @classmethod
+    def invalidate_markers(cls) -> None:
+        """(a) Markers or click changed: drop isochrone, CBD and rent. Network and anchors stay."""
+        cls.clear_results(list(cls._MARKER_LAYERS))
+
+    @classmethod
+    def invalidate_anchors(cls) -> None:
+        """(b) Anchor context changed / anchors cleared: drop anchors, evidence, closeness and rent."""
+        cls.clear_results(list(cls._ANCHOR_LAYERS))
+
+    @classmethod
+    def invalidate_rent(cls) -> None:
+        """(d) Evidence-anchor toggle or a new anchor: drop only the Rent Gradient."""
+        cls.clear_results(["rent"])
 
     @classmethod
     def reset(cls) -> None:
@@ -4207,7 +4240,7 @@ def _render_sidebar_marker_input(locked: bool) -> None:
         try:
             lat_str, lng_str = coords_input.strip().split(",")
             StateManager.add_marker(float(lat_str), float(lng_str))
-            StateManager.clear_results(["isochrone", "intersection", "rent"])
+            StateManager.invalidate_markers()
             st.rerun()
         except Exception:
             st.error("Format: Lat, Lng")
@@ -4221,7 +4254,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
     c1, c2 = st.columns(2)
     if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
         StateManager.pop_last_marker()
-        StateManager.clear_results(["isochrone", "intersection", "rent"])
+        StateManager.invalidate_markers()
         st.rerun()
     if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
         StateManager.reset()
@@ -4246,7 +4279,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             if is_active != prev_active:
                 StateManager.set_marker_active(i, is_active)
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_markers()
 
             if is_active:
                 style = (
@@ -4262,7 +4295,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             if col3.button("✕", key=f"del_btn_{i}", disabled=locked):
                 StateManager.remove_marker(i)
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_markers()
                 st.rerun()
 
     # Refresh active list after possible mutations
@@ -4357,7 +4390,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 disabled=locked,
             ):
                 StateManager.add_marker(top["lat"], top["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_markers()
                 st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
                 st.rerun()
 
@@ -4385,7 +4418,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 disabled=locked,
             ):
                 StateManager.add_marker(best["lat"], best["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_markers()
                 st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
 
@@ -4665,7 +4698,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                     and not _anchor_context_matches(closeness_result.get("context"), context))
                 or (evidence_result
                     and not _anchor_context_matches(evidence_result.get("context"), context))):
-            StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
+            StateManager.invalidate_anchors()
             st.rerun()
 
         if not HAS_SCIPY:
@@ -4710,7 +4743,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                 "application/json",
             )
             if st.button("ล้าง Anchor ที่ค้นหาไว้", disabled=locked):
-                StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
+                StateManager.invalidate_anchors()
                 st.rerun()
         return run_anchor
 
@@ -5533,7 +5566,7 @@ def render_analytics_panel() -> None:
             if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
                 spot = golden_spots[rank - 1]
                 StateManager.add_marker(spot["lat"], spot["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_markers()
                 st.toast(f"เพิ่ม Golden Spot อันดับ {rank} แล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
         else:
@@ -6013,8 +6046,7 @@ def perform_automated_anchor() -> None:
                     evidence["context"] = context
                     published[StateManager.K_AUTO_ANCHOR_EVIDENCE] = evidence
             st.session_state.update(published)  # all anchors become visible together
-            StateManager.clear_results(["rent"])
-            perform_rent_gradient(quiet=True)
+            _refresh_rent()
     except Exception as exc:
         st.error(f"ค้นหา Automated Anchor ไม่สำเร็จ: {exc}")
         return
@@ -6031,9 +6063,14 @@ def _rent_anchor_input() -> Optional[Dict[str, Any]]:
     return automated
 
 
-def _on_rent_anchor_toggle() -> None:
-    StateManager.clear_results(["rent"])
+def _refresh_rent() -> None:
+    """Drop the stale Rent Gradient and recompute it quietly (flow: "→ ล้าง rent → Rent quiet")."""
+    StateManager.invalidate_rent()
     perform_rent_gradient(quiet=True)
+
+
+def _on_rent_anchor_toggle() -> None:
+    _refresh_rent()
 
 
 def perform_rent_gradient(quiet: bool = False) -> None:
@@ -6086,7 +6123,7 @@ def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None
     if should_add_marker(clicked["lat"], clicked["lng"], last):
         StateManager.add_marker(clicked["lat"], clicked["lng"])
         StateManager.record_click(clicked["lat"], clicked["lng"])
-        StateManager.clear_results(["isochrone", "intersection", "rent"])
+        StateManager.invalidate_markers()
         st.rerun()
 
 
