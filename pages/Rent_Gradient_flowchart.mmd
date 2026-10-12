@@ -1,0 +1,346 @@
+flowchart TD
+%% Flowchart: pages/Rent_Gradient.py  (Geoapify CBD x Longdo GIS + Network + Rent Gradient)
+%% GOAL สูงสุดของ app
+%%   ช่วยตัดสินใจ "ซื้อที่ดินตรงไหนคุ้มที่สุด" โดยหา
+%%     (1) CBD / จุดศูนย์กลางเศรษฐกิจของเมือง  → anchor
+%%     (2) โมเดลราคา Bid-Rent  R(d) = R0 * e^(-lambda*d)  (ยิ่งไกล CBD ราคายิ่งลด)
+%%     (3) จุดที่ "เข้าถึงง่าย (closeness/degree สูง, ทราฟฟิกต่ำ) แต่ราคาคาดการณ์ยังต่ำ"
+%%         = Golden Spot / Value Gap สูง  → ที่ดินทอง undervalued
+%%   สรุป: สแกนเมืองด้วยข้อมูลเครือข่ายถนน + ผังเมือง + แปลงที่ดิน + ราคาตัวอย่างจริง
+%%         เพื่อชี้ "โซน/โหนดที่ราคายังไม่สะท้อนศักยภาพการเข้าถึง"
+
+    GOAL(["🎯 GOAL สูงสุด<br/>หา CBD → ประมาณราคาที่ดินตามระยะ R(d)=R0·e^(−λd)<br/>→ ชี้ที่ดินทอง: เข้าถึงง่าย แต่ราคาคาดการณ์ยังต่ำ"])
+
+    %% SECTION 7 : MAIN  (Streamlit rerun loop)
+    subgraph MAIN["§7 main() — วนทุกครั้งที่ Streamlit rerun"]
+        direction TB
+        M0(["เริ่ม / rerun"]) --> M1["st.set_page_config + inject CSS"]
+        M1 --> M2["StateManager.initialize()"]
+        M2 --> M3["render_sidebar()<br/>→ do_calc, do_net, do_rent, do_anchor, active_list"]
+        M3 --> Q1{"do_calc?"}
+        Q1 -- ใช่ --> P1[["perform_calculation(active_list)"]]
+        Q1 -- ไม่ --> Q2
+        P1 --> Q2{"do_net?"}
+        Q2 -- ใช่ --> P2[["perform_network_analysis()"]]
+        Q2 -- ไม่ --> Q3
+        P2 --> Q3{"do_rent?"}
+        Q3 -- ใช่ --> P3[["perform_rent_gradient()"]]
+        Q3 -- ไม่ --> Q4
+        P3 --> Q4{"do_anchor?"}
+        Q4 -- ใช่ --> P4[["perform_automated_anchor()"]]
+        Q4 -- ไม่ --> R0
+        P4 --> R0["render_header()<br/>render_metrics_row()"]
+        R0 --> R1["render_map() → folium + st_folium"]
+        R1 --> R2["render_analytics_panel() — 5 แท็บ"]
+        R2 --> R3[["handle_map_click(map_output, locked)"]]
+        R3 --> MEND(["จบรอบ"])
+    end
+
+    GOAL -.-> M0
+
+    %% INIT : StateManager
+    subgraph INIT["§2 StateManager.initialize()"]
+        direction TB
+        I1{"ครั้งแรก?<br/>markers ยังไม่อยู่ใน session_state"}
+        I1 -- ใช่ --> I2["GET JSON_URL จาก GitHub (timeout 3s)<br/>merge ค่า default + markers"]
+        I2 --> I3{"โหลดสำเร็จ?"}
+        I3 -- ไม่ --> I4["ใช้หมุด default<br/>LAT 20.2194 / LON 100.4036"]
+        I3 -- ใช่ --> I5
+        I1 -- ไม่ --> I5["setdefault ทุก key (idempotent)"]
+        I4 --> I5
+        I5 --> I6["ทุก marker มี key active"]
+    end
+    M2 --> I1
+
+    %% SIDEBAR
+    subgraph SIDE["§5 render_sidebar() — เรียงตาม pipeline"]
+        direction TB
+        S0["🔒 Lock toggle (ล็อกทุกเมนู)"]
+        S1["config: Import / Export JSON config<br/>ล้างค่า / reset"]
+        S2["ปักหมุด: ใส่พิกัด / คลิกแผนที่ + รายการหมุด (active/ลบ)"]
+        S3["Geoapify API Key"]
+        S4["ปุ่ม ① Isochrone CBD"]
+        S5["panel ③ Network: ปุ่ม, cache zip/bundle, GitHub bundle"]
+        S6["panel ④ Rent: ตารางตัวอย่างราคา lat/lon/rent + หน่วย + toggle evidence anchor"]
+        S7["map settings: style, layers, opacity, travel mode, time"]
+        S8["panel Automated Anchor: center, radius_km, evidence checkbox"]
+        S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+    end
+    M3 --> S0
+
+    %% ① ISOCHRONE → CBD ZONE
+    subgraph ISO["① perform_calculation — Isochrone → CBD Zone"]
+        direction TB
+        C1{"API key?"}
+        C1 -- ไม่มี --> CW1(["warning · return"])
+        C1 -- มี --> C2{"มี active marker ≥1?"}
+        C2 -- ไม่ --> CW1
+        C2 -- ใช่ --> C3{"เลือกช่วงเวลา?"}
+        C3 -- ไม่ --> CW1
+        C3 -- ใช่ --> C4["ranges = นาที×60 วินาที (sort)"]
+        C4 --> C5["วนทุก active marker:<br/>fetch_api_data_cached → safe_fetch_isochrone<br/>(Geoapify isoline, timeout 15s)"]
+        C5 --> C6{"features สำเร็จ?"}
+        C6 -- ไม่ --> C7["สะสม error ต่อจุด"]
+        C6 -- ใช่ --> C8["เติม properties: travel_time_minutes,<br/>original_index, active_index"]
+        C7 --> C9
+        C8 --> C9{"ครบทุกจุด?"}
+        C9 -- ยังไม่ --> C5
+        C9 -- ครบ --> C10{"มี feature ≥1?"}
+        C10 -- ไม่ --> CW2(["แสดง error · return"])
+        C10 -- ใช่ --> C11["set_isochrone_data"]
+        C11 --> C12["calculate_intersection:<br/>union ต่อหมุด → intersection ข้ามหมุด<br/>(ต้อง ≥2 หมุด, ว่าง = None)"]
+        C12 --> C13{"พบ CBD?"}
+        C13 -- ใช่ --> C14["set_intersection_data + toast 🎯"]
+        C13 -- ไม่ --> C15["intersection = None + toast ⚠️"]
+    end
+    P1 --> C1
+    C14 --> RGQ
+    C15 --> RGQ
+
+    %% ③ NETWORK ANALYSIS
+    subgraph NET["③ perform_network_analysis — โครงข่ายถนน OSM"]
+        direction TB
+        N1{"มี isochrone_data?"}
+        N1 -- ไม่ --> NE1(["error · return"])
+        N1 -- ใช่ --> N2["union_all_polygons_cached → combined WKT (unary_union)"]
+        N2 --> N3["network_type จาก travel_mode<br/>drive/walk/bike (transit→drive)"]
+        N3 --> N4["compute_centrality_cached(wkt, net_type)<br/>+ progress bar 3 stage"]
+        N4 --> NF
+        subgraph FETCH["_fetch_osm_graph — cache-first"]
+            direction TB
+            NF["cache_key = md5 ของ bounds (3 dp)"]
+            NF --> NF1{"exact_hit?<br/>pickle + sidecar footprint ครอบคลุม"}
+            NF1 -- ใช่ --> NFOK(["คืน graph (cache)"])
+            NF1 -- ไม่ --> NF2{"_reuse_covering_graph?<br/>cache ใหญ่กว่าครอบคลุม → crop"}
+            NF2 -- ใช่ --> NFOK
+            NF2 -- ไม่ --> NF3["จอง _OVERPASS_LOCK + re-check exact_hit"]
+            NF3 --> NF4["วน endpoints: ENV → default → overpass-api.de → mail.ru → private.coffee"]
+            NF4 --> NF5["ox.graph_from_polygon(truncate_by_edge)"]
+            NF5 --> NF6{"สำเร็จ?"}
+            NF6 -- ใช่ --> NF7["save_graph_to_cache (atomic write)"]
+            NF7 --> NFOK
+            NF6 -- ไม่มีข้อมูล OSM --> NFERR(["error: No OSM road data"])
+            NF6 -- ล้มเหลว --> NF8{"ยังมี endpoint?"}
+            NF8 -- ใช่ --> NF4
+            NF8 -- หมด --> NFERR
+        end
+        NFOK --> N5{"nodes ≥ 2?"}
+        NFERR --> NE2(["{error} → st.error + tips"])
+        N5 -- ไม่ --> NE2
+        N5 -- ใช่ --> N6["G → undirected"]
+        N6 --> N7["compute_weighted_closeness<br/>เฉพาะ Largest Connected Component<br/>C(v) = (N−1) / Σ d_len(v,u)"]
+        N7 --> N8{"n ≤ 3000?"}
+        N8 -- ใช่ --> N9["exact: scipy Dijkstra ทุกแถว"]
+        N8 -- ไม่ --> N10["Eppstein–Wang pivot (k=600, seed 42)"]
+        N9 --> N11
+        N10 --> N11{"nodes > 2000?"}
+        N11 -- ใช่ --> N12["edge_betweenness แบบ sample k=400"]
+        N11 -- ไม่ --> N13["edge_betweenness เต็ม (weight=length)"]
+        N12 --> N14
+        N13 --> N14["edge_scores_by_pair → max ต่อคู่ (u,v)"]
+        N14 --> N15["สร้าง edges GeoJSON<br/>สี plasma ตาม betweenness, ความหนาเส้น"]
+        N15 --> N16["สร้าง nodes GeoJSON ตาม closeness_norm<br/>+ หา top_node (Integration Center)"]
+        N16 --> N17["compute_golden_land_opportunities"]
+        subgraph GOLD["Golden Land ranking"]
+            direction TB
+            G1["score = 0.50·closeness_norm<br/>+ 0.30·degree_norm<br/>+ 0.20·(1 − edge_betweenness_norm)"]
+            G1 --> G2["เรียงคะแนนมาก→น้อย"]
+            G2 --> G3["Greedy NMS: ข้ามจุดที่ใกล้จุดที่เลือกแล้ว < 150 m"]
+            G3 --> G4["เลือก top_n = 10"]
+        end
+        N17 --> G1
+        G4 --> N18["คืน edges, nodes, golden_spots, top_node,<br/>coverage_geojson, stats"]
+        N18 --> N19["set_network_data + toast 🏆"]
+    end
+    P2 --> N1
+    N19 --> RGQ2{"มี rent_data อยู่แล้ว?"}
+    RGQ2 -- ใช่ --> RGCALL
+    RGQ2 -- ไม่ --> NEND(["จบ"])
+
+    %% AUTOMATED ANCHOR
+    subgraph ANC["perform_automated_anchor — หา CBD อัตโนมัติจากถนน"]
+        direction TB
+        A1["_anchor_search_context:<br/>study_center, radius_m, network_type"]
+        A1 --> A2["anchor_study_polygon: วงกลม + buffer 20%"]
+        A2 --> A3["_fetch_osm_graph (cache-first ดังข้างบน)"]
+        A3 --> A4{"error / graph None?"}
+        A4 -- ใช่ --> AE(["st.error ค้นหาไม่สำเร็จ · return"])
+        A4 -- ไม่ --> A5[["find_cbd_anchors(graph, center, radius)"]]
+        A5 --> FCA
+        subgraph FIND["find_cbd_anchors — deterministic ไม่ใช้ seed สุ่มของผู้ใช้"]
+            direction TB
+            FCA["ตรวจ: SciPy, 0<final_r≤R, nodes 2–100k, CRS=WGS84"]
+            FCA --> F1["_road_network: LCC + CSR (min length ต่อ parallel edge)<br/>project → เมตร (xy) · eligible = โหนดในวง"]
+            F1 --> F2["degree = จำนวนเพื่อนบ้านไม่ซ้ำ · junction = degree ≥ 3<br/>density = จำนวน junction ใน 500 m (cKDTree)"]
+            F2 --> F3["pool: composite = junctions (fallback = ทุกโหนด)<br/>closeness = ทุกโหนดในวง"]
+            F3 --> F4["reference sample 256 โหนด (seed 0)<br/>Dijkstra → exact closeness → mean/std"]
+            F4 --> F5["pivot_sum + stratified Horvitz-Thompson<br/>สำหรับวงที่ perturb (±20% รัศมี, shift N/E/S/W)"]
+            F5 --> F6{"pool ≤ rows_budget?"}
+            F6 -- ใช่ --> F7["EXACT: ensure_exact ทุกผู้สมัคร<br/>→ certified global max"]
+            F6 -- ไม่ --> F8["pivot-screen top-K (256) → exact top-K<br/>→ local climb รัศมี 150 m ≤ 40 รอบ<br/>(ไม่ certified)"]
+            F7 --> F9
+            F8 --> F9["เลือก winner: score ปัดทศนิยม 12 + tie → index ต่ำสุด"]
+            F9 --> F10["composite Score = 0.5·Φ((C−μ)/σ) + 0.3·degree_rank + 0.2·density_rank"]
+            F9 --> F11["closeness 100% Score = C/(C+1/R) → 1-median"]
+            F10 --> F12["probe stability: drift ของ anchor<br/>→ stable / check / unstable"]
+            F11 --> F12
+            F12 --> F13["warnings: ใกล้ขอบ, component ถูกตัด, ไม่ certified, ไม่นิ่ง"]
+            F13 --> F14["คืน composite + closeness + evidence_candidates + timings"]
+        end
+        F14 --> A6["วน 2 objective: composite, closeness<br/>เติม context, graph info, เวลา"]
+        A6 --> A7["เทียบ R² ของ rent fit:<br/>center เดิม vs anchor ใหม่ → delta_r2"]
+        A7 --> A8{"anchor_use_evidence?"}
+        A8 -- ไม่ --> A12["evidence = None"]
+        A8 -- ใช่ --> EV
+        subgraph EVID["run_evidence_stage — หลักฐานผังเมือง + แปลงที่ดิน (Longdo WMS)"]
+            direction TB
+            EV["โหลด legend ผังเมืองรวม + road_anchors<br/>deadline / budget requests"]
+            EV --> E1["PLAN PASS: lattice tiles ในวงศึกษา<br/>_fetch_tiles (ThreadPool, ขนาน) → WMS image"]
+            E1 --> E2["_plan_tile_shares: สี → class ตาม legend (LUT, tolerance)<br/>นับสัดส่วนสีแดง = พาณิชยกรรม"]
+            E2 --> E3{"plan_state"}
+            E3 -- ok --> E4["_peak_zone → โซนแดงในวง (mask, zones)"]
+            E3 -- unavailable / blank / no_peak --> E5["fallback disc รอบ anchor ถนน (รัศมี fallback)"]
+            E4 --> E6
+            E5 --> E6["PARCEL PASS: เลือก tile ใต้ region<br/>เรียง priority = count/(1+(d/reach)²)"]
+            E6 --> E7["_fetch_tiles parcel → _parcel_tile_scores<br/>score, cover_small, cover_shop (แปลงเล็ก/ตึกแถวถี่)"]
+            E7 --> E8["smooth_nan → _clusters_of (threshold ร้อน)<br/>_pick_cluster ด้วย prior ใกล้ศูนย์ศึกษา"]
+            E8 --> E9{"พบ winner cluster?"}
+            E9 -- ใช่ --> E10["point = cluster centroid · basis=cluster"]
+            E9 -- ไม่ --> E11{"มีโซนแดงในรัศมี?"}
+            E11 -- ใช่ --> E12["point = กลางโซนใหญ่สุด · basis=zone"]
+            E11 -- ไม่ --> EVF(["finish(reason) — ไม่มี evidence anchor"])
+            E10 --> E13
+            E12 --> E13["_evidence_stability → classify_anchor_confidence"]
+            E13 --> CONF{"สัญญาณเห็นตรงกัน?<br/>roads ≤ agree_radius · zoning · parcel"}
+            CONF -- "coverage สูง ∧ ตรง 3/3 ∧ นิ่ง ∧ ไม่ชนขอบ" --> CH(["HIGH"])
+            CONF -- "coverage กลาง ∧ ตรง ≥2" --> CM(["MEDIUM"])
+            CONF -- อื่นๆ --> CL(["LOW"])
+            CH --> E14
+            CM --> E14
+            CL --> E14["คืน status ok/partial, plan, parcel, clusters,<br/>evidence_anchor, confidence, fetch stats"]
+        end
+        E14 --> A12
+        EVF --> A12
+        A12 --> A13["st.session_state.update(published)<br/>ทุก anchor ปรากฏพร้อมกัน (atomic)"]
+        A13 --> A14["clear_results rent"]
+        A14 --> A15[["perform_rent_gradient quiet=True"]]
+        A15 --> A16(["st.rerun()"])
+    end
+    P4 --> A1
+    A15 --> RGCALL
+
+    %% ④ RENT GRADIENT
+    RGQ["perform_calculation: เรียก perform_rent_gradient quiet=True"] --> RGCALL
+    subgraph RENT["④ perform_rent_gradient → compute_rent_gradient_data  (pure math, ไม่เรียก API)"]
+        direction TB
+        RGCALL[["perform_rent_gradient"]] --> RG0{"มี isochrone หรือ automated anchor?"}
+        RG0 -- ไม่ --> RGE(["error (ถ้าไม่ quiet) · return"])
+        RG0 -- ใช่ --> RG1["_rent_anchor_input:<br/>ถ้า evidence ถูกต้อง ∧ toggle rent_use_evidence_anchor<br/>→ ใช้ evidence_anchor แทน composite"]
+        RG1 --> RG2["resolve_cbd_anchor — ลำดับความน่าเชื่อถือ"]
+        subgraph RESOLVE["resolve_cbd_anchor"]
+            direction TB
+            RS0{"มี automated anchor?"}
+            RS0 -- ใช่ --> RSA(["0) ใช้ automated anchor"])
+            RS0 -- ไม่ --> RS1{"มี CBD intersection?"}
+            RS1 -- ใช่ --> RSB(["1) centroid ของ CBD Zone"])
+            RS1 -- ไม่ --> RS2{"มี top_node จาก Network?"}
+            RS2 -- ใช่ --> RSC(["2) Integration Center"])
+            RS2 -- ไม่ --> RS3{"มี isochrone?"}
+            RS3 -- ใช่ --> RSD(["3) centroid ของ Travel Areas"])
+            RS3 -- ไม่ --> RS4{"มี active marker?"}
+            RS4 -- ใช่ --> RSE(["4) ค่าเฉลี่ยตำแหน่งหมุด"])
+            RS4 -- ไม่ --> RSN(["None → error ไม่พบจุดยึด CBD"])
+        end
+        RG2 --> RS0
+        RSA --> RG3
+        RSB --> RG3
+        RSC --> RG3
+        RSD --> RG3
+        RSE --> RG3["d_max = isochrone_max_distance_km<br/>(มุม bbox ไกลสุด, ≥ 0.3 km; ไม่มีก็ 5 km)<br/>ถ้า anchor-only → d_max = study_radius"]
+        RSN --> RGE
+        RG3 --> RG4["fit_rent_gradient_from_samples"]
+        subgraph FIT["Log-linear OLS:  ln R = ln R0 − λ·d"]
+            direction TB
+            FT0["ตัวอย่างแต่ละจุด: d = haversine(anchor, จุด)<br/>ทิ้งถ้า rent ≤ 0 / ข้อมูลพัง"]
+            FT0 --> FT1{"จุดใช้ได้ ≥ 2 ∧ ระยะต่างกัน (Sxx > 0)?"}
+            FT1 -- ไม่ --> FTN(["None → โหมดดัชนี"])
+            FT1 -- ใช่ --> FT2["slope = Sxy/Sxx · λ = −slope · R0 = e^intercept"]
+            FT2 --> FT3["R² = 1 − SSres/SStot"]
+            FT3 --> FT4{"dof = n−2 > 0?"}
+            FT4 -- ใช่ --> FT5["adj R², SE(λ), CI95 ด้วย t-critical,<br/>half-distance CI = ln2/λ (ถ้า CI ไม่คร่อม 0)"]
+            FT4 -- ไม่ --> FT6["ไม่มี interval (n=2 → R²=1 ไม่มีข้อมูล)"]
+            FT5 --> FT7["low_confidence = n < 5"]
+            FT6 --> FT7
+        end
+        RG4 --> FT0
+        FTN --> RG5I["โหมดดัชนี: R0=100, λ = ln 4 / d_max<br/>(ลดเหลือ 1/4 ที่ขอบ), is_index=True"]
+        FT7 --> RG5F["โหมด fit: ใช้ R0, λ, R² จริง<br/>d_max = max(d_max, ตัวอย่างไกลสุด × 1.05)"]
+        RG5I --> RG6
+        RG5F --> RG6["inverted = λ<0 · d½ = ln2/|λ|"]
+        RG6 --> RG7["curve: 80 จุด R(d)=R0·e^(−λd)"]
+        RG7 --> RG8["build_rent_rings_geojson<br/>6 วงแหวน · สีตามค่าเช่ากึ่งกลางวง (normalize ด้วย min/max)"]
+        RG8 --> RG9["build_rent_nodes_geojson<br/>ทาสีโหนด Network ตาม R(d) → Rent Heat"]
+        RG9 --> RG10["count_nodes_per_ring → ป้ายจำนวนโหนดใน tooltip"]
+        RG10 --> RG11["คืน {anchor, model, curve, samples_scatter, rings, rent_nodes}"]
+        RG11 --> RG12{"มี error?"}
+        RG12 -- ใช่ --> RGE
+        RG12 -- ไม่ --> RG13["set_rent_data + toast<br/>(โหมด/คุณภาพ fit/คำเตือนตัวอย่างน้อย)"]
+    end
+
+    %% MAP CLICK
+    subgraph CLICK["handle_map_click"]
+        direction TB
+        K1{"locked?"} -- ใช่ --> KE(["ไม่ทำอะไร"])
+        K1 -- ไม่ --> K2{"มี last_clicked?"}
+        K2 -- ไม่ --> KE
+        K2 -- ใช่ --> K3{"should_add_marker?<br/>ผ่าน debounce 0.5 s ∧ ห่างคลิกก่อน ≥ 10 m"}
+        K3 -- ไม่ --> KE
+        K3 -- ใช่ --> K4["add_marker + record_click"]
+        K4 --> K5["clear_results isochrone, intersection, rent"]
+        K5 --> K6(["st.rerun()"])
+    end
+    R3 --> K1
+
+    %% RENDER MAP + ANALYTICS
+    subgraph RENDER["§5 Render ผลลัพธ์"]
+        direction TB
+        V1["metrics row: จำนวนหมุด, CBD area km², nodes, λ, R², d½ ..."]
+        V2["render_map: folium base style + Longdo WMS (ผังเมือง, DOL, ประชากร, จราจร, รถไฟ)"]
+        V3["layers: markers, isochrone (สีตามนาที, ขอบตามหมุด), CBD zone,<br/>edges betweenness, nodes closeness, Golden Spots,<br/>Rent Rings, Rent Heat, Anchors (composite/closeness/evidence),<br/>evidence clusters/zone polygons, KML เวนคืนรถไฟ, legend"]
+        V1 --> V2 --> V3
+        V3 --> T1["📈 Bid-Rent Curve<br/>plotly: เส้นโค้ง + scatter ตัวอย่าง + สมการ + fit quality"]
+        V3 --> T2["🧾 Ring Report<br/>รายวง: ระยะ, พื้นที่, ค่าเช่า, โหนด, ความหนาแน่น,<br/>closeness, Golden Spots, Value Gap"]
+        V3 --> T3["💎 Golden Spots<br/>ตาราง top-10 + Value Gap = Closeness − ราคา normalize"]
+        V3 --> T4["📍 หมุด & ราคาประเมิน<br/>ตัวอย่างราคาจริง"]
+        V3 --> T5["📐 หลักการ<br/>ทฤษฎี Alonso-Muth-Mills"]
+    end
+    R0 -.-> V1
+    R2 -.-> T1
+
+    %% OUTPUT = GOAL
+    RG13 --> OUT
+    N19 --> OUT
+    T2 --> OUT
+    T3 --> OUT
+    OUT(["✅ ผลลัพธ์สุดท้าย<br/>ที่ดินทอง = closeness/degree สูง · ทราฟฟิกต่ำ · ราคา R(d) ยังต่ำ<br/>(Value Gap บวกมาก) อยู่ในวงแหวนที่คุ้มซื้อ"])
+    OUT -.-> GOAL
+
+    %% PERSISTENCE (side flow)
+    subgraph PERSIST["Persistence & Cache (ด้านข้าง)"]
+        direction TB
+        PS1["export_config / import_config<br/>SESSION_KEYS_TO_SAVE + RESULT_KEYS_TO_SAVE (schema v2)"]
+        PS2["disk cache ./cache/osm_graph_md5.pkl + sidecar footprint<br/>safe_pickle_loads = RestrictedUnpickler (whitelist)"]
+        PS3["export/import cache zip · bundle zip + sha256 manifest<br/>download_github_bundle (Chiang Khong zip)"]
+        PS4["WMS tile cache (fetch_wms_image / load_cached_wms_image)"]
+    end
+    S1 -.-> PS1
+    S5 -.-> PS3
+    NF7 -.-> PS2
+    E1 -.-> PS4
+
+    classDef goal fill:#fff3cd,stroke:#b8860b,stroke-width:3px,color:#000
+    classDef orch fill:#d6eaff,stroke:#2a78d6,color:#000
+    classDef err fill:#ffd6d6,stroke:#c0392b,color:#000
+    class GOAL,OUT goal
+    class P1,P2,P3,P4,A5,A15,RGCALL,R3 orch
+    class CW1,CW2,NE1,NE2,AE,RGE,NFERR,EVF,KE err
