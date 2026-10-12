@@ -100,3 +100,15 @@ def test_refresh_rent_clears_rent_then_recomputes_quietly(monkeypatch):
     monkeypatch.setattr(v2, "perform_rent_gradient", lambda quiet=False: calls.append(("rent", quiet)))
     v2._refresh_rent()
     assert calls == ["clear", ("rent", True)]
+
+
+def test_flowchart_html_draws_only_once_the_frame_has_a_size():
+    """Mermaid measures text while drawing: in a hidden tab the frame is 0 px wide and it prints
+    "Syntax error in text" (seen in Chromium on Streamlit 1.65 with ``startOnLoad``). The HTML must
+    therefore wait for a real window size (tab opened -> resize) and draw once."""
+    html = v2._flowchart_html("flowchart TD\n    A --> B")
+    assert "startOnLoad: false" in html and "startOnLoad: true" not in html
+    assert "document.documentElement.clientWidth" in html          # skip while the frame is hidden
+    assert 'addEventListener("resize"' in html and "ResizeObserver" in html
+    assert html.count("mermaid.run(") == 1 and "if (drawn" in html  # ... and draw only once
+    assert "A --&gt; B" in html                                      # the diagram text is escaped
