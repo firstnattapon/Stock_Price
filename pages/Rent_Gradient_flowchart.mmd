@@ -1,82 +1,44 @@
+%%{init: {"flowchart": {"wrappingWidth": 560, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TD
-%% Rent_Gradient.py — GOAL: หา CBD (anchor) → โมเดลราคา R(d)=R0·e^(−λd) → ชี้ "ที่ดินทอง"
-%% = เข้าถึงง่าย (closeness/degree สูง, ทราฟฟิกต่ำ) แต่ราคาคาดการณ์ยังต่ำ (Value Gap สูง)
+%% Rent_Gradient.py — GOAL: หา CBD → R(d)=R0·e^(−λd) → ชี้ที่ดินทอง (ตรวจเทียบโค้ดด้วย docs/rent-gradient-flowchart-facts.md)
 
-    GOAL(["🎯 GOAL สูงสุด<br/>ที่ดินทอง = เข้าถึงง่าย แต่ราคา R(d) ยังต่ำ"])
-    UI["Streamlit rerun: ปุ่มที่กด → ① ③ ④ Anchor (ตามลำดับ) → render"]
-    ERR(["⛔ error/warning — หยุด ไม่ publish ไม่ rerun"])
+    GOAL(["🎯 GOAL สูงสุด: ที่ดินทอง = เข้าถึงง่าย แต่ราคา R(d) ยังต่ำ<br/>ผลลัพธ์ = Ring Report · Golden table · Markers (R(d) ต่อหมุด)<br/>Value Gap = Closeness − clamp(R/R0, 0..1) เฉพาะ network ∧ FIT (โหมดดัชนีซ่อน)"])
+    ERR(["⛔ หยุด: แจ้ง error/warning ไม่ publish ไม่ rerun"])
 
-    subgraph ISO["① Isochrone → CBD"]
-        I1{"API key ∧ ≥1 active marker ∧ เลือกเวลา?"}
-        I2["Geoapify isoline ต่อ marker"]
-        I3{"ได้ feature ≥1?"}
-        I4["CBD = ∩ ของ union ต่อ marker<br/>ต้อง ≥2 marker ∧ ทุกจุดได้ polygon ∧ ไม่ว่าง ไม่งั้น None<br/>(ไม่มี CBD ก็ยัง refresh Rent)"]
-        I1 -->|ใช่| I2 --> I3 -->|ใช่| I4
-    end
+    ISO["① Isochrone — ต้องมี API key ∧ ≥1 active marker ∧ เลือกเวลา<br/>Geoapify isoline ต่อ marker (ไม่ได้ feature เลย → หยุด)<br/>CBD = ∩ ของ union ต่อ marker: ต้อง ≥2 marker ∧ ทุกจุดได้ polygon ∧ ไม่ว่าง ไม่งั้น None<br/>แล้ว Rent quiet เสมอ (แม้ไม่มี CBD)"]
 
-    subgraph NET["③ Network (OSM)"]
-        N1{"มี Isochrone?"}
-        N2["union polygon ทั้งหมด → OSM graph<br/>cache → covering cache → Overpass · ต้อง nodes ≥2"]
-        N3["Closeness บน LCC: exact ≤3000 / pivot k=600<br/>Edge betweenness: exact ≤2000 / sample k=400<br/>→ top node"]
-        N4["Golden = .5C + .3deg + .2(1−bet̄)<br/>NMS 150 m · top 10"]
-        N5{"มี rent อยู่แล้ว?"}
-        N1 -->|ใช่| N2 --> N3 --> N4 --> N5
-    end
+    NET["③ Network — ต้องมี isochrone<br/>union polygon ทั้งหมด → OSM graph (nodes ≥2)<br/>Closeness บน LCC: exact ถ้า n ≤3000 ไม่งั้น pivot k=600<br/>Edge betweenness: exact ถ้า nodes ≤2000 ไม่งั้น sample k=400 → top node<br/>Golden = .5·C + .3·deg/max + .2·(1−bet) · NMS 150 m · top 10"]
 
-    subgraph ANC["Automated Anchor"]
-        A1["วงศึกษา R 4–20 กม. +20% → OSM graph (2–100k nodes)"]
-        A2["composite: junction deg≥3 (ไม่มี=ทุกโหนด) .5Φ(C)+.3deg+.2dens<br/>closeness-100%: 1-median<br/>exact ถ้า pool พอดีงบ ไม่งั้น pivot-screen + refine"]
-        A3{"เปิด Evidence?"}
-        A4["โซนแดงผังเมือง (ไม่มี=disc รอบ anchor ถนน) → cluster แปลงเล็กถี่<br/>rank = mass/(1+(d/reach)²) · ไม่เจอ cluster → กลางโซนแดงถ้าอยู่ในวง ไม่งั้นไม่มี evidence anchor"]
-        A5["confidence: HIGH = coverage ∧ ถนน(ทั้ง 2 anchor) ∧ ผังเมือง ∧ แปลง ∧ composite นิ่ง ∧ ไม่ชนขอบ<br/>MEDIUM = coverage กลาง ∧ ตรง ≥2 · อื่นๆ LOW"]
-        A6["publish พร้อมกัน → ล้าง rent → Rent quiet → rerun"]
-        A1 --> A2 --> A3
-        A3 -->|ใช่| A4 --> A5 --> A6
-        A3 -->|ไม่| A6
-    end
+    ANC["Automated Anchor — R 4–20 กม. +20% buffer · graph 2–100k nodes<br/>composite: junction deg≥3 (ไม่มี=ทุกโหนด) · .5Φ(C) + .3·rank(deg) + .2·rank(density 500 m)<br/>closeness-100%: 1-median ทุกโหนด · Rent ใช้เฉพาะ composite<br/>exact ถ้า pool พอดีงบ ไม่งั้น pivot-screen + refine"]
+    EV{"เปิด Evidence?"}
+    EVN["Evidence: โซนแดงผังเมือง (ไม่มี/ว่าง = disc 1.5 กม. รอบ composite) → cluster แปลงเล็กถี่ ≥3 เซลล์<br/>rank = mass/(1+(d/2000 m)²) · ไม่เจอ cluster → กลางโซนแดงถ้าอยู่ในวง ไม่งั้นไม่มี evidence anchor<br/>ถนน = anchor ถนนที่ใกล้สุด ≤300 m · แปลง = score ≥0.50<br/>HIGH = coverage ≥0.60 ∧ ถนน ∧ ผังเมือง ∧ แปลง ∧ ไม่ unstable (drift >15% ของรัศมี) ∧ ไม่ชนขอบ<br/>MEDIUM = coverage ≥0.40 ∧ ตรง ≥2 · อื่นๆ LOW"]
 
-    subgraph RENT["④ Rent Gradient (คำนวณล้วน ไม่เรียก API)"]
-        R0{"มี Isochrone ∨ auto anchor?"}
-        R1["anchor: composite auto (→ evidence ถ้า toggle ∧ มีผล) > กลาง CBD > top node<br/>> กลาง isochrone > เฉลี่ยหมุด / error"]
-        R2["d_max = isochrone bbox (≥0.3 km, ไม่มี=5) · auto ∧ ไม่มี iso = R"]
-        R3{"ตัวอย่างราคา valid ≥2 ∧ ระยะต่างกัน?<br/>(แก้ตาราง = sync อย่างเดียว)"}
-        R4["FIT: OLS ln R = ln R0 − λd → R², CI95<br/>d_max ≥ ตัวอย่างไกลสุด ×1.05"]
-        R5["INDEX: R0=100, λ=ln4/d_max"]
-        R6["curve 80 จุด · 6 วงแหวน · Rent Heat บนโหนด (ถ้ามี network)"]
-        R0 -->|ใช่| R1 --> R2 --> R3
-        R3 -->|ใช่| R4 --> R6
-        R3 -->|ไม่| R5 --> R6
-    end
+    R1["④ Rent — ต้องมี isochrone ∨ auto anchor<br/>anchor: composite auto (→ evidence anchor ถ้า toggle ∧ มีผล) > กลาง CBD > top node > กลาง isochrone > เฉลี่ยหมุด/error<br/>d_max = isochrone bbox (≥0.3 กม., ไม่มี=5) · auto ∧ ไม่มี iso = R"]
+    FIT{"ตัวอย่างราคา valid ≥2 ∧ ระยะต่างกัน?<br/>(แก้ตาราง = sync อย่างเดียว ไม่ fit ใหม่)"}
+    R6["curve 80 จุด · 6 วงแหวน · Rent Heat บนโหนด (ถ้ามี network)"]
 
-    OUT["ผลลัพธ์: Ring Report + Golden table + Markers tab (R(d) ต่อหมุด)<br/>Value Gap = Closeness − clamp(R/R0, 0..1) เฉพาะ network ∧ FIT (โหมดดัชนีซ่อน)"]
+    INV["ล้างผล → rerun<br/>(a) คลิกแผนที่ (debounce 0.5 s, ≥10 m) · เพิ่ม/ลบ/toggle หมุด · เพิ่ม top node/Golden เป็นหมุด → ล้าง iso, CBD, rent (network + anchor คงไว้)<br/>(b) เปลี่ยน center/radius/travel mode · ล้าง Anchor → ล้าง anchors + rent<br/>(c) รีเซ็ต / import config → ล้างทุกอย่าง (import แล้วโหลดผลที่บันทึก)<br/>(d) toggle Evidence-anchor → ล้าง rent → Rent quiet"]
 
-    INV1["คลิกแผนที่ (unlocked, debounce 0.5 s, ≥10 m) · แก้/เพิ่ม/ลบ/toggle หมุด · เพิ่ม top node / Golden เป็นหมุด<br/>→ ล้าง iso, CBD, rent (network + anchor คงไว้) → rerun"]
-    INV2["เปลี่ยน center / radius / travel mode → ล้าง anchors + rent → rerun"]
-    TOG["toggle Evidence-anchor → ล้าง rent → Rent quiet"]
+    ISO --> R1
+    NET -.->|"ถ้ามี rent อยู่แล้ว → Rent quiet"| R1
+    ANC --> EV
+    EV -->|ใช่| EVN
+    EV -->|"ไม่: publish พร้อมกัน → ล้าง rent → Rent quiet → rerun"| R1
+    EVN -->|"publish พร้อมกัน → ล้าง rent → Rent quiet → rerun"| R1
+    R1 --> FIT
+    FIT -->|"ใช่ FIT: OLS ln R = ln R0 − λd → R², CI95 · d_max ≥ ตัวอย่างไกลสุด ×1.05"| R6
+    FIT -->|"ไม่ INDEX: R0=100, λ=ln4/d_max"| R6
+    R6 --> GOAL
+    NET --> GOAL
+    GOAL -.->|"เพิ่ม Golden เป็นหมุด"| INV
+    INV -.->|"(d)"| R1
 
-    UI -->|do_calc| I1
-    UI -->|do_net| N1
-    UI -->|do_anchor| A1
-    UI -->|do_rent| R0
-    I1 -->|ไม่| ERR
-    I3 -->|ไม่| ERR
-    N1 -->|ไม่| ERR
-    N2 -.->|ผิดพลาด| ERR
-    A1 -.->|exception| ERR
-    R0 -->|ไม่| ERR
-    I4 --> R0
-    N5 -->|ใช่| R0
-    N4 --> OUT
-    A6 --> R0
-    TOG --> R0
-    R6 --> OUT --> GOAL
-    GOAL -.->|เพิ่ม Golden เป็นหมุด| INV1
-    INV1 -.-> UI
-    INV2 -.-> UI
+    ISO -.->|"guard ไม่ผ่าน / ไม่ได้ feature"| ERR
+    NET -.->|"ไม่มี isochrone / OSM ผิดพลาด"| ERR
+    ANC -.->|"exception"| ERR
+    R1 -.->|"ไม่มี iso ∧ ไม่มี auto"| ERR
 
     classDef goal fill:#fff3cd,stroke:#b8860b,stroke-width:3px,color:#000
     classDef err fill:#ffd6d6,stroke:#c0392b,color:#000
-    classDef act fill:#d6eaff,stroke:#2a78d6,color:#000
     class GOAL goal
     class ERR err
-    class UI,INV1,INV2,TOG act
