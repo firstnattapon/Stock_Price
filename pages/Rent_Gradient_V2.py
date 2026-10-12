@@ -5379,7 +5379,7 @@ def _build_golden_spots_df(
 
 _FLOWCHART_PATH = Path(__file__).with_name("Rent_Gradient_flowchart.mmd")
 _MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js"
-_FLOWCHART_HEIGHT_PX = 2300
+_FLOWCHART_HEIGHT_PX = 1150
 
 
 def _flowchart_html(mmd: str) -> str:
