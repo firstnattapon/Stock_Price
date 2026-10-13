@@ -2,7 +2,7 @@
 
 > **Goal** — `loop optimize` · Refactor architecture & structure · Simplification กระชับ/สั้นสุด · **ไม่เปลี่ยน output เลย**
 >
-> **สถานะ**: นี่คือ *แผน* — ยังไม่ได้แก้ `pages/Rent_Gradient.py` สักบรรทัด. ตัวเลขมาจากโค้ดจริง (base `3c03d6c`, 6,095 บรรทัด) และจาก spike บนสำเนาใน scratch (ไม่ได้ commit). ป้าย **[วัด]** = วัดแล้ว · **[ประมาณ]** = ยังไม่ได้ทำ.
+> **สถานะ**: แผน + บันทึกการลงมือ. **Step 0–2 (S-1…S-5) ทำแล้วใน PR นี้ เป็นหน้าใหม่ `pages/Rent_Gradient_v2.py` บน package `rg_lib/` — `pages/Rent_Gradient.py` ไม่ถูกแก้สักบรรทัด** (เหมือน `main` ทุก byte) และใช้เป็นตัวเทียบ. §0–§8 คือแผนกับตัวเลขที่วัดบนสำเนาตอนวางแผน (base `3c03d6c`, 6,095 บรรทัด); **ตัวเลขจริงของสิ่งที่ลงมือแล้วอยู่ใน §9** และ §0 ถูกปรับตามนั้น. ป้าย **[วัด]** = วัดแล้ว · **[ประมาณ]** = ยังไม่ได้ทำ.
 >
 > **พฤติกรรมอ้างอิง (ห้ามเปลี่ยน)**: `pages/Rent_Gradient_flowchart.mmd` (8 โหนด) และ `docs/rent-gradient-flowchart-facts.md` (44 facts).
 
@@ -13,11 +13,11 @@
 
    | ตัวชี้วัด | ก่อน | หลัง | ที่มา |
    |---|---|---|---|
-   | หน้า `pages/Rent_Gradient.py` | 6,095 L | **133 L** | Step 1: ย้ายแบบ verbatim 188 definition + บล็อก SciPy → 15 module [วัด] |
-   | ไฟล์ที่ใหญ่สุดที่ต้องอ่าน | 6,095 L | 704 L (`ui_sidebar`) | Step 1 [วัด] |
-   | โค้ดรวมทั้งหมด | 6,095 L | ≈ 6,190 L (แยก) · ≈ 5,945 L (ไฟล์เดียว) | แยกเพิ่ม boilerplate +244 [วัด]; Step 2 ลด −123 [วัด] − ≈ 25 [ประมาณ] |
-   | จุดที่ชั้นล่างเรียกชั้นบน | 3 (4 จุดเรียก) | 0 | Step 1 [วัด: mover ปฏิเสธ import ขึ้นบน] |
-   | ฟังก์ชันยาวสุด · CC สูงสุด | 456 L · 70 | ≤ 150 L · ≤ 15 | Step 3 (ทางเลือก) [ประมาณ] |
+   | หน้า (ไฟล์ที่ Streamlit รัน) | 6,095 L (`Rent_Gradient.py`) | **142 L** (`Rent_Gradient_v2.py`; หน้าเดิมคงเดิม) | ย้ายแบบ verbatim 188 definition + บล็อก SciPy → 15 module [วัด] |
+   | ไฟล์ที่ใหญ่สุดที่ต้องอ่าน | 6,095 L | 699 L (`ui_sidebar`) | [วัด] |
+   | โค้ดรวมทั้งหมด | 6,095 L | 6,293 L (หน้า 142 + `rg_lib` 6,151) | การแยกเพิ่ม import/docstring +315 [วัด]; Step 2 (S-1…S-5) ลด −117 [วัด]; S-6…S-8 ≈ −25 [ประมาณ] ยังไม่ทำ |
+   | จุดที่ชั้นล่างเรียกชั้นบน | 3 (4 จุดเรียก) | 0 | [วัด: `tests/test_rg_lib_layers.py`] |
+   | ฟังก์ชันยาวสุด · CC สูงสุด | 456 L · 70 | เท่าเดิม (Step 3 ทางเลือก ยังไม่ได้ทำ: ≤ 150 L · ≤ 15 [ประมาณ]) | — |
 
 3. **test เดิม 223 ตัวรับประกัน "output ไม่เปลี่ยน" ไม่ได้** [วัด]: ผ่านหมดแต่ coverage 77.6% และเมื่อจงใจแก้ output ทีละจุด (ข้อความ UI, ปัดเศษ, น้ำหนักคะแนน, กฎ invalidation, `<`/`<=`) test เดิมจับได้ **2/23** ส่วน golden master (44 digest) จับได้ **17/23** (§3.2, Appendix B) → **Step 0 ต้องมาก่อนแตะโค้ด**.
 4. **ลำดับ**: Step 0 safety net → Step 1 ย้ายแบบ verbatim ตามชั้น (พิสูจน์ด้วย AST) → Step 2 simplify ภายใน module → Step 3 (เลือก) ลด CC → Step 4 แก้ docs. **1 transformation = 1 commit**; gate ไม่ผ่าน = revert. การย้ายกับการแก้ **ไม่อยู่ใน commit เดียวกัน**.
@@ -60,13 +60,13 @@ V1 `_evidence_summary` ผูก `on_change=_on_rent_anchor_toggle` (ฝั่�
 
 ```mermaid
 flowchart TB
-    PAGE["pages/Rent_Gradient.py · 133 L<br/>set_page_config · CSS · main() · facade of 111 names"]
-    UIL["UI · st.* allowed · 1,669 L<br/>ui_sidebar 704 · ui_map 458 · ui_panels 507"]
-    CT["controllers · 488 L<br/>perform_* · cache_data wrappers · map click"]
-    SES["session · 473 L<br/>state 349 · bundle 124"]
-    IOL["I/O · no st.* · 1,095 L<br/>osm 456 · evidence 356 · network 283"]
-    ENGL["pure engines · 1,921 L<br/>rent 662 · vision 628 · roads 631"]
-    CORE["core · 559 L<br/>compat 13 · config 388 · geo 158"]
+    PAGE["pages/Rent_Gradient_v2.py · 142 L<br/>set_page_config · CSS · main() · facade of 111 names"]
+    UIL["UI · st.* allowed · 1,579 L<br/>ui_sidebar 699 · ui_map 370 · ui_panels 510"]
+    CT["controllers · 491 L<br/>perform_* · cache_data wrappers · map click"]
+    SES["session · 462 L<br/>state 335 · bundle 127"]
+    IOL["I/O · no st.* · 1,104 L<br/>osm 459 · evidence 359 · network 286"]
+    ENGL["pure engines · 1,930 L<br/>rent 665 · vision 631 · roads 634"]
+    CORE["core · 571 L<br/>compat 20 · config 390 · geo 161"]
     PAGE --> UIL --> CT --> SES --> IOL --> ENGL --> CORE
     PAGE --> CT
     CT --> IOL
@@ -75,7 +75,7 @@ flowchart TB
     IOL --> CORE
 ```
 
-ตัวเลข = บรรทัดของ module ที่ได้จากการย้ายแบบ verbatim [วัด]. กติกาเดียวคือ **ห้าม import ย้อนขึ้นบน** — ชั้นบนอ่านชั้นล่างข้ามชั้นได้ (เช่น UI อ่าน `StateManager`/`rent` ตรง ๆ) ลูกศรในรูปแสดงเฉพาะลำดับหลัก. กติกานี้ตรวจโดยเครื่องมือ (mover ปฏิเสธ import ขึ้นบน; ไม่มี SCC) ไม่ใช่รูปที่วาดเอา. ชั้น "I/O" และ "pure engines" (6 module) ไม่มีโค้ดเรียก `streamlit`/`StateManager`/`session_state` เลย [วัด: grep 0 จุด].
+ตัวเลข = บรรทัดจริงของ module ใน PR หลัง Step 2 [วัด] (รวม `rg_lib/__init__.py` 14 บรรทัด = 6,293). กติกาเดียวคือ **ห้าม import ย้อนขึ้นบน** — ชั้นบนอ่านชั้นล่างข้ามชั้นได้ (เช่น UI อ่าน `StateManager`/`rent` ตรง ๆ) ลูกศรในรูปแสดงเฉพาะลำดับหลัก. กติกานี้ตรวจโดยเครื่องมือ (mover ปฏิเสธ import ขึ้นบน; ไม่มี SCC) ไม่ใช่รูปที่วาดเอา. ชั้น "I/O" และ "pure engines" (6 module) ไม่มีโค้ดเรียก `streamlit`/`StateManager`/`session_state` เลย [วัด: grep 0 จุด].
 
 ### 1.3 Behavior contract → โค้ด → module ปลายทาง
 
@@ -86,7 +86,7 @@ flowchart TB
 | ANC | `perform_automated_anchor` · `find_cbd_anchors` · `anchor_study_polygon` | controllers · roads · geo |
 | EVN | `run_evidence_stage` · `classify_anchor_confidence` | evidence · vision |
 | R1 ④ | `perform_rent_gradient` · `_rent_anchor_input` · `resolve_cbd_anchor` · `compute_rent_gradient_data` · `fit_rent_gradient_from_samples` | controllers · rent |
-| INV | `StateManager.clear_results` (+ `invalidate_*`) | state |
+| INV | `StateManager.clear_results` · `StateManager.invalidate_inputs` (S-3) | state |
 | ERR | guard ใน `perform_*` | controllers |
 | GOAL | `render_analytics_panel` (Ring Report · Golden table · Markers) | ui_panels |
 
@@ -96,7 +96,7 @@ flowchart TB
 flowchart TD
     S0["Step 0 · safety net<br/>golden master + characterization tests<br/>baseline row in the ledger"] --> PICK
     PICK["pick next transformation T<br/>moves before edits · best lines saved ÷ risk"] --> APPLY["apply T on the branch · 1 T = 1 commit"]
-    APPLY --> GATES{{"gates, in order<br/>G1 compile · ruff F · moved defs AST-identical<br/>G2 223 pass · 3 skip · no test edits after Step 0.3 · ./cache not grown<br/>G3 golden master 44 of 44 digests equal<br/>G4 facade: every page.name still resolves"}}
+    APPLY --> GATES{{"gates, in order<br/>G1 compile · ruff F · moved defs AST-identical<br/>G2 256 pass · 3 skip · no test edits after Step 0.3 · ./cache not grown<br/>G3 golden master 46 of 46 digests equal<br/>G4 facade: every page.name still resolves"}}
     GATES -->|all pass| LOG["log the metrics row → commit"]
     GATES -->|any fail| REV["git revert T<br/>record: blocked · gate · reason"]
     REV --> PICK
@@ -170,41 +170,43 @@ flowchart TD
 
 | # | Oracle | พิสูจน์ | จุดบอด | ผลวัด |
 |---|---|---|---|---|
-| O1 | test เดิม (ไฟล์ไม่ถูกแก้ ยกเว้น Step 0.3) | ตัวเลขของ engine (anchor, evidence, cache, rent) | UI/ข้อความ/ปัดเศษ/invalidation, flow ① ③ | จับ mutation **2/23** |
-| O2 | **golden master** (A/B ใน environment เดียวกัน) | ทุก output ที่สังเกตได้แบบ bit-for-bit: 37 เคส engine/IO + 7 เคส AppTest (widget tree, toast/error/map/state หลังคลิกแต่ละครั้ง) = **44 digest** | ผลต่างที่ไม่ปรากฏบนข้อมูลทดสอบ (equivalent mutant) | deterministic: 3 process → 44/44 เหมือนกัน · จับ mutation **17/23** · coverage รวมกับ O1 **92.3% (test เดิม 77.6% · golden master เดี่ยว ๆ 85.7%)** |
-| O3 | AST-identity ของ definition ที่ย้าย | การย้ายไม่ได้แก้ definition ใด ๆ | statement ระดับ module (เช่น `CACHE_DIR.mkdir`), การ resolve ชื่อข้าม module, edit — ให้ O1/O2/O4 กัน | **พิสูจน์ได้เด็ดขาดในขอบเขตนี้** [วัด: 189/189 ก่อนแก้ KML, 188/189 หลัง] |
-| O4 | facade check | ชื่อที่ test/scripts/golden master อ่านจากเพจ (85 + 21) resolve ได้ และ `page.X is <module>.X` | — | [วัด: 0 missing] |
-| O5 | compile · `ruff --select F` · layer check | ไม่มี undefined name, ไม่มี import ขึ้นบน, ไม่มี SCC | — | [วัด] |
+| O1 | test เดิม (ไฟล์ไม่ถูกแก้ ยกเว้น Step 0.3: path ของหน้า + `patch_everywhere`) | ตัวเลขของ engine (anchor, evidence, cache, rent) | UI/ข้อความ/ปัดเศษ/invalidation, flow ① ③ | จับ mutation **2/23** |
+| O2 | **golden master** (A/B ใน environment เดียวกัน) | ทุก output ที่สังเกตได้แบบ bit-for-bit: 37 เคส engine/IO + 9 เคส AppTest (widget tree, toast/error/map/state หลังคลิกแต่ละครั้ง) = **46 digest** (44 จากต้นแบบ + 2 เคสที่เพิ่มใน PR: คลิกแผนที่ · import bundle) | ผลต่างที่ไม่ปรากฏบนข้อมูลทดสอบ (equivalent mutant) | deterministic: 3 process → 44/44 เหมือนกัน · จับ mutation **17/23** · coverage รวมกับ O1 **92.3% (test เดิม 77.6% · golden master เดี่ยว ๆ 85.7%)** |
+| O3 | AST-identity ของ definition ที่ย้าย | การย้ายไม่ได้แก้ definition ใด ๆ | statement ระดับ module (เช่น `CACHE_DIR.mkdir`), การ resolve ชื่อข้าม module, edit — ให้ O1/O2/O4 กัน | **พิสูจน์ได้เด็ดขาดในขอบเขตนี้** [วัด: `tests/test_rg_v2_equivalence.py` — จาก 189 definition ของหน้าเดิม 179 เหมือนเดิม · 9 แก้ (ระบุเหตุผลทีละตัว) · 1 ลบ] |
+| O4 | facade check | ชื่อที่ test/scripts/golden master อ่านจากเพจ (85 + 21) resolve ได้ และ `page.X is <module>.X` | — | [วัด: suite เดิมทั้งชุดผ่านบนหน้า v2 + `test_the_names_the_page_re_exports_are_the_defining_modules_objects`] |
+| O5 | compile · `ruff --select F` · layer check | ไม่มี undefined name, ไม่มี import ขึ้นบน, ไม่มี SCC, ชั้น core/engine/I/O ไม่แตะ streamlit | — | [วัด: `tests/test_rg_lib_layers.py`] |
 
-Golden master เก็บ digest ข้าม environment ไม่ได้ (numpy/GEOS ต่างเวอร์ชัน → float ต่าง) จึงรันแบบ **A/B**: ชุด base จาก `git worktree` ของ commit ฐาน vs ชุดที่แก้ ใน venv เดียวกัน แล้ว `cmp`. ค่าที่ไม่คงที่ถูก normalize (timings, `created_at_utc`, `integrity_checksums`, hash ของ `/mock/media`, id 32-hex ของ folium, ตัวเลขวินาทีใน caption).
+Golden master เก็บ digest ข้าม environment ไม่ได้ (numpy/GEOS ต่างเวอร์ชัน → float ต่าง) จึงรันแบบ **A/B** ใน venv เดียวกัน: เพราะหน้าเดิมยังอยู่ใน PR นี้ จึงเทียบ `pages/Rent_Gradient.py` กับ `pages/Rent_Gradient_v2.py` ใน checkout เดียวได้เลย (แผนเดิมใช้ `git worktree` ของ commit ฐาน) แล้ว `--compare`. ค่าที่ไม่คงที่ถูก normalize (timings, `created_at_utc`, `integrity_checksums`, hash ของ `/mock/media`, id 32-hex ของ folium, ตัวเลขวินาทีใน caption).
 
-### 3.3 Gates (รันตามลำดับ ทุก commit ≈ 2 นาที)
+### 3.3 Gates (รันตามลำดับ; ครบทั้งชุด ≈ 5 นาที)
 
 ```bash
 # G1 static
-python -m py_compile pages/*.py rg_lib/*.py && ruff check --select F pages rg_lib
-python scripts/refactor_astcheck.py "$BASE"     # definition ที่ย้ายต้อง AST-identical
-# G2 tests: 223 passed · 3 skipped · ./cache ต้องไม่โต
-python -m pytest -q -p no:cacheprovider tests
-# G3 golden master (A/B ใน venv เดียวกัน)
-python scripts/golden_master.py --page "$BASE/pages/Rent_Gradient.py" --out base.json
-python scripts/golden_master.py --page pages/Rent_Gradient.py --out new.json && cmp base.json new.json
-# G4 facade + layers
-python scripts/refactor_facade_check.py && python scripts/refactor_layers.py
+python -m py_compile pages/Rent_Gradient_v2.py rg_lib/*.py && ruff check --select F pages/Rent_Gradient_v2.py rg_lib
+# G1/G4 definition ที่ย้ายต้อง AST-identical (ยกเว้นที่ระบุเหตุผลไว้) · ชั้นล่างห้าม import ชั้นบน · core/engine/I/O ห้ามแตะ streamlit
+python -m pytest -q -p no:cacheprovider tests/test_rg_v2_equivalence.py tests/test_rg_lib_layers.py
+# G2 test ทั้งชุดบนหน้าเดิมและหน้า v2: 256 passed · 3 skipped (223 เดิม + 33 ใหม่) · ./cache ต้องไม่โต
+IGN="--ignore=tests/test_rent_gradient_flow.py --ignore=tests/test_rent_gradient_v2.py"   # 2 ไฟล์ที่ import หน้าที่ถูกลบไปแล้ว (§2.2)
+python -m pytest -q -p no:cacheprovider $IGN tests
+RENT_GRADIENT_PAGE=pages/Rent_Gradient_v2.py python -m pytest -q -p no:cacheprovider $IGN tests
+# G3 golden master (A/B ใน venv เดียวกัน): 46/46 digest ต้องเท่ากัน
+python scripts/rg_golden_master.py pages/Rent_Gradient.py    /tmp/v1.json
+python scripts/rg_golden_master.py pages/Rent_Gradient_v2.py /tmp/v2.json
+python scripts/rg_golden_master.py --compare /tmp/v1.json /tmp/v2.json
 ```
 
 ## 4. Backlog ของ transformation
 
 ### 4.0 Step 0 — safety net (ก่อนแตะโค้ดทุกบรรทัด)
 
-| ID | งาน | หมายเหตุ |
-|---|---|---|
-| 0.1 | เอา test ค้าง 2 ไฟล์ออก (หรือแก้ให้โหลดเพจที่มีอยู่) | ทำให้ baseline เขียวและเทียบได้ |
-| 0.2 | เพิ่ม `scripts/golden_master.py` (A/B) + `refactor_astcheck.py` + `refactor_facade_check.py` + `refactor_layers.py` | **ต้นแบบผ่านแล้วใน scratch** (Appendix A; ชื่อในนั้นคือ `astcheck.py` · `facadecheck.py` · `modules.py`) |
-| 0.3 | `tests/_rg_patch.py` (`patch_everywhere`, 8 บรรทัด) + แทน `monkeypatch.setattr(page, "NAME", …)` 22 จุด | **ทำบนไฟล์เดียวได้และต้องผ่านก่อน** [วัด: 168 passed · 3 skipped] — หลังจากนี้การย้ายไม่ต้องแก้ test อีก |
-| 0.4 | `_KML_FILE_PATH` ให้ไม่ขึ้นกับตำแหน่งไฟล์: `Path(__file__).resolve().parent.parent / "pages" / "…kml"` (ค่าเท่าเดิมในเพจ, ถูกต้องเมื่ออยู่ใน `rg_lib/` ด้วย) | edit บรรทัดเดียว; digest `kml.parse` กำกับ — ต้องทำ **ก่อน** stage 1a เพราะ `config` ย้ายไปใน stage นั้น |
-| 0.5 | ปิดจุดบอด: golden master ให้ coverage +14.7 จุด (77.6% → 92.3%). ที่ยังไม่ถูกครอบคลุม (7.7%): ปุ่ม import bundle จากไฟล์/GitHub (`_render_sidebar_config_section` 29%), เส้นทางคลิกแผนที่จริง (`handle_map_click` 57%), `clear_disk_cache`, ทางผิดพลาดของ `perform_network_analysis`, และ 3 เคสของ mutant ที่รอด (Appendix B: กราฟ > 3,000 โหนด · anchor ถนน 250/350 ม. · โซนแดง 2×2 เซลล์) → เขียนเพิ่มก่อนเริ่ม Step 1 | gate ของ Step 1–3 ใช้ O1+O2 รวมกัน |
-| 0.6 | บันทึกแถวฐานใน ledger (§5) | |
+| ID | งาน | หมายเหตุ | สถานะใน PR |
+|---|---|---|---|
+| 0.1 | เอา test ค้าง 2 ไฟล์ออก (หรือแก้ให้โหลดเพจที่มีอยู่) | ทำให้ baseline เขียวและเทียบได้ | ยังไม่ทำ (D2) — suite รันด้วย `--ignore` สองไฟล์นั้น |
+| 0.2 | เครื่องมือตรวจ: golden master (A/B) · AST-identity · facade · layers | ต้นแบบผ่านใน scratch (Appendix A) | **ทำแล้ว**: `scripts/rg_golden_master.py` · `tests/test_rg_v2_equivalence.py` (AST) · `tests/test_rg_lib_layers.py` (layers) · facade ตรวจด้วยการรัน suite เดิมทั้งชุดบนหน้า v2 |
+| 0.3 | `tests/_rg_patch.py` (`patch_everywhere`, 8 บรรทัด) + แทน `monkeypatch.setattr(page, "NAME", …)` 22 จุด | ใช้ได้ทั้งบนไฟล์เดียวและหลังแยก | **ทำแล้ว** + `RENT_GRADIENT_PAGE` เลือกหน้าใน 6 test และ 3 script (ค่าเริ่มต้น = หน้าเดิม จึงไม่มีอะไรเปลี่ยนสำหรับหน้าเดิม) |
+| 0.4 | `_KML_FILE_PATH` ให้ถูกต้องเมื่ออยู่ใน `rg_lib/` | edit บรรทัดเดียว; digest `kml.parse` กำกับ | **ทำแล้ว** ใน `rg_lib/config.py` (หน้าเดิมไม่ถูกแก้ จึงไม่มี commit แยก) |
+| 0.5 | ปิดจุดบอด: golden master ให้ coverage +14.7 จุด (77.6% → 92.3%). ที่ยังไม่ถูกครอบคลุม: ปุ่ม import bundle จากไฟล์/GitHub, เส้นทางคลิกแผนที่จริง, `clear_disk_cache`, ทางผิดพลาดของ `perform_network_analysis`, และ 3 เคสของ mutant ที่รอด (Appendix B: กราฟ > 3,000 โหนด · anchor ถนน 250/350 ม. · โซนแดง 2×2 เซลล์) | gate ของ Step 1–3 ใช้ O1+O2 รวมกัน | **ทำบางส่วน**: เพิ่ม 2 เคส (คลิกแผนที่ · import bundle จาก GitHub และจากไฟล์ รวม 6 สถานการณ์ย่อย) = 46 digest เพราะ S-3/S-5 แตะเส้นทางเหล่านี้; ที่เหลือยังเปิดอยู่ (§9.4) |
+| 0.6 | บันทึกแถวฐานใน ledger (§5) | | **ทำแล้ว** (§5) |
 
 ### 4.1 Step 1 — ย้ายแบบ verbatim (ไม่แก้ semantics ใน commit เดียวกัน)
 
@@ -218,11 +220,11 @@ python scripts/refactor_facade_check.py && python scripts/refactor_layers.py
 | 1d | `state` · `bundle` | `StateManager` · bundle export/import (V2 หายเอง: `bundle` อยู่เหนือ `state`) | 349 · 124 | 2,453 | (วัดรวมใน 1f) | (วัดรวมใน 1f) |
 | 1e | `controllers` | `perform_*` · cache_data wrapper · KML · map click (V1 หายเอง: callback อยู่ชั้นล่างของ UI) | 488 | 2,011 | (วัดรวมใน 1f) | (วัดรวมใน 1f) |
 | 1f | `ui_map` · `ui_sidebar` · `ui_panels` | `render_map` · sidebar · tabs | 458 · 704 · 507 | 421 | (วัดรวมใน 1g) | (วัดรวมใน 1g) |
-| 1g | (ไม่ย้าย) trim facade | เหลือ 111 ชื่อ = 85 ที่ test/scripts ใช้ + 21 ที่ golden master ใช้ + ที่ `main()` ใช้, อัดเป็นบรรทัดหนาแน่น, ทิ้งหัวข้อ section ที่ว่างเปล่า | — | **133** | 168 ✓ · 3 skip | 44/44 |
+| 1g | (ไม่ย้าย) trim facade | เหลือ 111 ชื่อ = 85 ที่ test/scripts ใช้ + 21 ที่ golden master ใช้ + ที่ `main()` ใช้, อัดเป็นบรรทัดหนาแน่น, ทิ้งหัวข้อ section ที่ว่างเปล่า | — | **133** (ต้นแบบ; ใน PR จัดด้วยมือ = 142) | 168 ✓ · 3 skip | 44/44 |
 
 ตัวเลข test ของแต่ละ stage = 6 ไฟล์ที่แตะหน้านี้ (168 passed + 3 skipped = 171; อีก 55 ตัวเป็นของ `Design.py` ไม่เกี่ยว) และ `./cache` ไม่โตทุก stage. ถ้าไม่ทำ Step 0.3: stage **1a พัง 0 ตัว** (62 ฟังก์ชันที่ย้ายไม่อ่าน global ที่ถูก patch เลย), stage **1b พัง 3 ตัว** — ตรงกับ 3 จุดที่คาดไว้ (`csgraph_dijkstra` ×2, `HAS_SCIPY` ×1) [วัด].
 
-Edit ที่ต้องทำแยก commit (ไม่ใช่การย้าย): `CACHE_DIR.mkdir(exist_ok=True)` ย้ายไปอยู่กับ `CACHE_DIR` (stage 1c) · ชื่อสำรอง `None` ของบล็อก SciPy (stage 1a) · `evidence` อ่าน `osm.CACHE_DIR` ผ่าน attribute (stage 1c) — ทุกข้อมี digest ของตัวเองกำกับ.
+**ใน PR นี้** การย้ายทำครั้งเดียว (commit `031c6dc`) เพราะหน้าเดิมไม่ถูกแก้ จึงไม่ต้องคงหน้าที่ใช้งานได้ระหว่างทาง — ตาราง stage ข้างบนคือผลทดลองบนสำเนาเพื่อหาว่าอะไรพังเมื่อย้ายชั้นไหน. สิ่งที่ **ต่างจาก verbatim จริง ๆ** มี 2 อย่าง (จดทั้งคู่ใน `tests/test_rg_v2_equivalence.py`): `_KML_FILE_PATH` ชี้ไป `pages/` (นิยามอยู่ลึกกว่าเดิมหนึ่งระดับ) และบล็อก SciPy ใน `compat` มีชื่อสำรอง `None` เพื่อให้ `rg_lib` import ผ่านเมื่อไม่มี SciPy เหมือนหน้าเดิม (`test_rg_lib_still_imports_when_scipy_is_missing`). `CACHE_DIR.mkdir(exist_ok=True)` ยังอยู่ที่หน้า (รันทุก rerun เหมือนเดิม) และ `evidence` ใช้ `CACHE_DIR` ตัวเดียวกับ `osm` — เทสต์ patch ถึงทั้งสองที่ด้วย `patch_everywhere`.
 
 ### 4.2 Step 2 — simplify ภายใน module (ทีละข้อ ผ่าน O1+O2)
 
@@ -238,7 +240,9 @@ Edit ที่ต้องทำแยก commit (ไม่ใช่การย
 | S-7 | HTML ของแท็บ "หลักการ" (`st.html("""…""")`, string 199 บรรทัด [วัด]) → constant `GUIDE_HTML` (ชื่อที่เสนอ) ใน `content.py` (module ที่ 16) | ≈ −200 จาก `ui_panels` (+≈ 200 ที่ `content`; รวม ≈ 0) [ประมาณ] | ต่ำ | proto ของ `st.html` ใน `ui.rich*` |
 | S-8 | badge ความนิ่ง (dict ซ้ำ 2 ที่) → constant · `_base_url()` แทน normalize endpoint ซ้ำ 2 ที่ | ≈ −2 [ประมาณ] | ต่ำ | `osm.fetch_paths`, `ui.rich` |
 
-S-1…S-5 รวม **−123 L [วัด]** (6,095 → 5,972 ในไฟล์เดียว) — compile ผ่าน, `ruff F` ผ่าน, test (6 ไฟล์ที่แตะหน้านี้) **168 passed · 3 skipped, ./cache ไม่โต**, golden master **44/44 digest เท่าเดิม** (รวม folium HTML ของ 4 สถานการณ์ที่เปิดทุก layer).
+S-1…S-5 บนต้นแบบไฟล์เดียวรวม **−123 L [วัด]** (6,095 → 5,972) — compile ผ่าน, `ruff F` ผ่าน, test (6 ไฟล์ที่แตะหน้านี้) **168 passed · 3 skipped, ./cache ไม่โต**, golden master **44/44 digest เท่าเดิม** (รวม folium HTML ของ 4 สถานการณ์ที่เปิดทุก layer).
+
+**ผลจริงใน PR** (1 commit ต่อข้อ; golden master 44/44 ทุก commit [วัด]): S-1 −1 · S-2a −11 · S-2b −11 (ไม่ใช่ −17 ตามต้นแบบ: เขียนเป็น `layer in layers` เพื่อคงความหมายเดิมกับ container ทุกชนิด และคง docstring) · S-3 +5 · S-4 −91 · S-5 −8 = **−117**. ยังไม่ทำ: S-6…S-8 (≈ −25 บรรทัดแลกกับการแตะปุ่ม 17 จุด) และ Step 3 — รอสั่ง. S-3 และ S-5 แตะเส้นทางที่ test เดิมกับ 44 digest แรกไม่ครอบคลุม (คลิกแผนที่, import bundle) จึงเพิ่ม 2 เคสใน golden master (46 digest) แล้วรันบนหน้าเดิมก่อน (2 รอบ ผลเหมือนกัน) จึงเทียบกับ v2: เท่ากัน; mutant ที่ใส่เจตนา (ไอคอน toast ผิด · ลืม `st.rerun()` · ลืมล้าง layer rent) ทำให้ digest เปลี่ยน.
 
 ### 4.3 Step 3 — ลดความซับซ้อน (ทางเลือก; ไม่ลดบรรทัด)
 
@@ -269,19 +273,19 @@ S-1…S-5 รวม **−123 L [วัด]** (6,095 → 5,972 ในไฟล์
 4. บันทึกแถว ledger: ชนิด · LOC หน้า · LOC รวม · upward edge · test · digest · AST (+ #fn และ max CC จาก `radon` — ฐาน 139 fn · CC 70 — เพิ่มเป็นคอลัมน์ตอนทำจริง).
 5. **หยุดเมื่อ** ไม่เหลือ candidate ที่ ΔLOC ≤ −5 หรือเอา upward edge ออกได้ หรือลด block ที่ CC ≥ 20 → fixpoint → Step 4.
 
-| commit | ชนิด | L หน้า | L รวม | upward | test | digest | AST |
+| commit | ชนิด | L หน้า v2 | L `rg_lib` | L รวม | upward | digest | definition ของหน้าเดิม: เหมือน / แก้ / ลบ |
 |---|---|---|---|---|---|---|---|
-| base `3c03d6c` | — | 6,095 | 6,095 | 3 | 168 ✓ · 3 skip | 44/44 | 189/189 |
-| 0.3 retarget | edit (test) | 6,095 | 6,095 | 3 | 168 passed · 3 skipped | 44/44 | 189/189 |
-| 0.4 `_KML_FILE_PATH` | edit | 6,095 | 6,095 | 3 | (วัดรวมใน 1a) | (วัดรวมใน 1a) | 188/189 |
-| 1a | move | 4,494 | 6,344 | – | 168 ✓ · 3 skip (แก้ test 0 จุด) | 44/44 | 188/189 |
-| 1b | move | 3,887 | 6,368 | – | 168 ✓ · 3 skip | 44/44 | 188/189 |
-| 1c | move | 2,886 | 6,462 | – | 168 ✓ · 3 skip | 44/44 | 188/189 |
-| 1f (facade เต็ม) | move | 421 | 6,627 | **0** | (วัดรวมใน 1g) | (วัดรวมใน 1g) | 188/189 |
-| 1g (trim facade) | edit | 133 | 6,339 | 0 | 168 ✓ · 3 skip | 44/44 | 188/189 |
-| จบ Step 2 | edit | ≈ 135 | ≈ 6,190 | 0 | 168 ✓ · 3 skip (เป้า) | 44/44 (เป้า) | — |
+| base `3c03d6c` | — | (หน้าเดิม 6,095) | — | 6,095 | 3 | 44/44 (อ้างอิง) | 189 / 0 / 0 |
+| `031c6dc`…`4bc7a70` | move + test + tool | 142 | 6,268 | 6,410 | **0** | 44/44 | 188 / 1 / 0 |
+| S-1 `c7ac6cd` | edit | 142 | 6,267 | 6,409 | 0 | 44/44 | 187 / 1 / 1 |
+| S-2a `64e4281` | edit | 142 | 6,256 | 6,398 | 0 | 44/44 | 186 / 2 / 1 |
+| S-2b `101d1f3` | edit | 142 | 6,245 | 6,387 | 0 | 44/44 | 186 / 2 / 1 |
+| S-3 `f3c8ce0` | edit | 142 | 6,250 | 6,392 | 0 | 44/44 | 181 / 7 / 1 |
+| S-4 `59432d5` | edit | 142 | 6,159 | 6,301 | 0 | 44/44 | 180 / 8 / 1 |
+| S-5 `fe8bb02` | edit | 142 | 6,151 | 6,293 | 0 | 44/44 | 179 / 9 / 1 |
+| HEAD (golden master ขยายเป็น 46) | tool | 142 | 6,151 | 6,293 | 0 | **46/46** | 179 / 9 / 1 |
 
-หมายเหตุ: **test** = 6 ไฟล์ที่ import หน้านี้ (171 ตัว = 168 passed + 3 skipped); G2 จริงรันเต็มชุด 223/3 (อีก 55 ตัวเป็นของ `Design.py` ซึ่งไม่ import หน้านี้). **upward `–`** = ไม่ได้วัดรายขั้น — mover ปฏิเสธ import ขึ้นบนทุก stage จึงไม่เพิ่ม, 3 จุดเดิมหายเมื่อ module ปลายทางครบ (1c: V3 · 1d: V2 · 1e: V1) และวัดได้ **0** ที่ต้นไม้เต็ม. แถว 0.4 ถูกวัดรวมกับ 1a (ต้นไม้ของ stage มี edit นี้อยู่แล้ว); 1d/1e ไม่ได้วัดแยก. เมื่อทำจริงทุกแถวต้องวัดเองและแทนที่ค่าในตารางนี้.
+หมายเหตุ: **ทุกแถว** ผ่าน compile · `ruff --select F` · `tests/test_rg_v2_equivalence.py` + `tests/test_rg_lib_layers.py` (33 ตัว) และ golden master (รันแยกต่อ commit ใน worktree ของ commit นั้น). **pytest เต็มชุด** รันที่ `4bc7a70` และ `fe8bb02` (ปลายทางของ Step 2): ทั้งสองครั้ง **256 passed · 3 skipped บนทั้งหน้าเดิมและหน้า v2, `./cache` ไม่โต** (256 = 223 เดิม + 33 ใหม่). 3 skipped คือ WMS fixtures ที่ยังไม่ได้ capture (เท่ากับ baseline). คอลัมน์ "L หน้า v2" คงที่เพราะ Step 2 แตะแต่ `rg_lib`. ถ้าทำ S-6…S-8 / Step 3 ต่อ ให้เพิ่มแถวตามวิธีใน loop ข้างบน.
 
 ## 6. ความเสี่ยงที่รู้แล้ว และวิธีกัน
 
@@ -296,32 +300,77 @@ S-1…S-5 รวม **−123 L [วัด]** (6,095 → 5,972 ในไฟล์
 
 ## 7. สิ่งที่ผู้ใช้ต้องตัดสิน
 
-| # | คำถาม | แนะนำ |
-|---|---|---|
-| D1 | แยกเป็น package `rg_lib/` (15 ไฟล์) หรือคงไฟล์เดียว? | **แยก** — ถ้าไม่แยก: Step 0 + 2 + 3 ในไฟล์เดียว ได้ ≈ −2.5% และยังเหลือ 3 upward edge |
-| D2 | ลบของค้าง §2.4 (`pages/Rent_Gradient`, `pages/Rent_Gradient_V2`, test ค้าง 2, docs V2/Flow 2)? | ลบ (ประวัติอยู่ใน git) |
-| D3 | `_OVERPASS_LOCK` กลายเป็น lock ระดับ process จริง (ผลลัพธ์เท่าเดิม, การรอคิวเปลี่ยน) | ยอมรับ — เป็นเจตนาที่คอมเมนต์เดิมเขียนไว้ |
-| D4 | API key ที่ฝังใน `DEFAULT_CONFIG` | แยกงาน: ย้ายไป `st.secrets`/env (เปลี่ยน default → นอก refactor) |
-| D5 | `use_container_width` 24 จุด (Streamlit 1.65 เตือน "removed after 2025-12-31") | งานเข้ากันได้แยกต่างหาก ทำหลัง S-6 ที่เดียว |
-| D6 | เพิ่มเครื่องมือ 4 สคริปต์ + golden master เข้า `scripts/` และ `tests/_rg_patch.py`? | เพิ่ม (Step 0.2–0.3) |
+| # | คำถาม | แนะนำ | ใน PR นี้ |
+|---|---|---|---|
+| D1 | แยกเป็น package `rg_lib/` (15 ไฟล์) หรือคงไฟล์เดียว? | **แยก** — ถ้าไม่แยก: Step 0 + 2 + 3 ในไฟล์เดียว ได้ ≈ −2.5% และยังเหลือ 3 upward edge | **แยก**, และสร้างเป็น **หน้าใหม่** `Rent_Gradient_v2.py` ข้างหน้าเดิม (ตามที่ผู้ใช้สั่ง: ไม่ทับของเก่า) |
+| D2 | ลบของค้าง §2.4 (`pages/Rent_Gradient`, `pages/Rent_Gradient_V2`, test ค้าง 2, docs V2/Flow 2)? | ลบ (ประวัติอยู่ใน git) | ยังไม่ทำ (ไม่ได้ถูกสั่ง) |
+| D3 | `_OVERPASS_LOCK` กลายเป็น lock ระดับ process จริง (ผลลัพธ์เท่าเดิม, การรอคิวเปลี่ยน) | ยอมรับ — เป็นเจตนาที่คอมเมนต์เดิมเขียนไว้ | **เกิดขึ้นแล้วใน v2** (§9.3) |
+| D4 | API key ที่ฝังใน `DEFAULT_CONFIG` | แยกงาน: ย้ายไป `st.secrets`/env (เปลี่ยน default → นอก refactor) | ไม่แตะ (ย้ายไป `rg_lib/config.py` ตามเดิม) |
+| D5 | `use_container_width` 24 จุด (Streamlit 1.65 เตือน "removed after 2025-12-31") | งานเข้ากันได้แยกต่างหาก ทำหลัง S-6 ที่เดียว | ไม่แตะ (24 จุดเท่าหน้าเดิม) |
+| D6 | เพิ่มเครื่องมือ 4 สคริปต์ + golden master เข้า `scripts/` และ `tests/_rg_patch.py`? | เพิ่ม (Step 0.2–0.3) | เพิ่ม golden master เป็น script + AST/layer เป็น pytest + `_rg_patch.py`; mover/mutation ยังอยู่ใน scratch |
 
 ## 8. การส่งมอบ
 
-- Branch `claude/great-lovelace-lxdmck` (หรือ branch ใหม่ต่อ Step); commit ตาม ledger; **PR เมื่อผู้ใช้สั่ง**.
-- Step 4 (docs): แทนเลขบรรทัด 207 จุดด้วย `module.function` แล้วเขียนสคริปต์ตรวจด้วย AST ว่าทุกฟังก์ชันที่อ้างยังมีอยู่ (ยังไม่มีสคริปต์แบบนี้ใน repo); จัดการเอกสาร V2/Flow ตาม D2.
-- Definition of done: ledger ครบ · 4 gate เขียวทุก commit · `wc -l pages/Rent_Gradient.py` ≈ 135 · upward edge = 0 · docs ไม่มีเลขบรรทัด.
+- Branch `claude/great-lovelace-lxdmck`, commit ตาม ledger (§5); PR เปิดตามที่ผู้ใช้สั่ง.
+- Step 4 (docs) ยังไม่ทำ: แทนเลขบรรทัด 207 จุดด้วย `module.function` แล้วเขียนสคริปต์ตรวจด้วย AST ว่าทุกฟังก์ชันที่อ้างยังมีอยู่ (ยังไม่มีสคริปต์แบบนี้ใน repo); จัดการเอกสาร V2/Flow ตาม D2.
+- Definition of done: ledger ครบ ✓ · gate ใน §3.3 เขียว ✓ · `wc -l pages/Rent_Gradient_v2.py` = 142 · upward edge = 0 ✓ · docs ไม่มีเลขบรรทัด ✗ (Step 4).
 
-## Appendix A — ต้นแบบที่ผ่านแล้ว (scratch, ไม่ได้ commit)
+## 9. ผลการลงมือใน PR นี้
 
-| เครื่องมือ | ทำอะไร | ผลที่วัด |
-|---|---|---|
-| `golden_master.py` | 37 เคส engine/IO + 7 เคส AppTest → digest ต่อเคส; `patched()` รู้จัก alias ข้าม module | 44 digest ≈ 45 s; 3 process เหมือนกันทุกตัว |
-| `mutants.py` | 23 mutant (น้ำหนักคะแนน, ปัดเศษ, ข้อความ, style แผนที่, กฎ invalidation, `<`/`<=`, ลำดับ float, พารามิเตอร์ engine …) แต่ละตัวสร้างต้นไม้ของ repo แล้วรันทั้ง test เดิมและ golden master | test เดิมจับ **2/23** · golden master **17/23** |
-| `mover.py` | ตัด definition ตามชื่อ → module (verbatim), รันเป็น stage, ตรวจ DAG | 195 ชื่อ → 15 module |
-| `astcheck.py` | เทียบ `ast.dump` ของทุก definition ก่อน/หลัง | 189/189 |
-| `facadecheck.py` | 85 ชื่อที่ test/scripts ใช้ resolve ได้และเป็น object เดียวกัน | 0 missing |
-| `modules.py` | call graph (ไม่มี SCC) · import ขึ้นบน · ฟังก์ชันที่อ่าน global ที่ test patch | V1–V3 |
-| `trim_facade.py` | เหลือเฉพาะ import ที่เพจ / test / golden master ใช้ | 421 → 133 L |
+PR สร้างหน้า **`pages/Rent_Gradient_v2.py`** (แท็บใหม่ "Rent Gradient v2") ข้างหน้าเดิม โดย **ไม่แตะ `pages/Rent_Gradient.py`** (`git diff origin/main -- pages/Rent_Gradient.py` ว่าง).
+
+### 9.1 สิ่งที่เพิ่ม/แก้ (31 ไฟล์: 22 ใหม่ · 9 แก้ — `git diff --stat origin/main`)
+
+| ไฟล์ | หน้าที่ |
+|---|---|
+| `pages/Rent_Gradient_v2.py` (142 L) | หน้าใหม่: `main()` เดิมทุกตัวอักษร + import ที่ re-export 111 ชื่อให้ test/script เดิมอ่านจากเพจได้ |
+| `rg_lib/` (15 module + `__init__`, 6,151 L) | โค้ดของหน้าเดิมแยกตามชั้น (§1.2) |
+| `tests/test_rg_lib_layers.py` · `tests/test_rg_v2_equivalence.py` | กฎชั้น · "v1 == v2" ระดับ AST (33 test, ~7 s) |
+| `tests/_rg_patch.py` + แก้ 6 test และ 3 script | รัน suite เดิมกับหน้าไหนก็ได้ด้วย `RENT_GRADIENT_PAGE` (ค่าเริ่มต้น = หน้าเดิม) |
+| `scripts/rg_golden_master.py` | golden master 46 digest (`--compare`) |
+| `docs/Rent_Gradient_flowchart_Refactor_plan.md` | เอกสารนี้ |
+
+### 9.2 ผลวัด (environment เดียวกัน: Python 3.13 · Streamlit 1.65 · pandas 2.3.3 · numpy 2.5.4 · networkx 3.7 · osmnx 2.1.1)
+
+| ตรวจ | ผล |
+|---|---|
+| pytest เต็มชุดบนหน้าเดิม | 256 passed · 3 skipped · `./cache` ไม่โต |
+| pytest เต็มชุดบนหน้า v2 (`RENT_GRADIENT_PAGE=pages/Rent_Gradient_v2.py`) | 256 passed · 3 skipped · `./cache` ไม่โต |
+| golden master หน้าเดิม vs v2 | **46/46 digest เท่ากัน** (44 ตัวแรกเท่ากับที่จับไว้ก่อนแก้อะไรเลย; หน้าเดิมรัน 2 รอบเท่ากัน) |
+| golden master ทีละ commit ของ Step 2 | 44/44 ทุก commit (S-1 … S-5) |
+| AST ของ definition หน้าเดิม 189 ตัว | 179 เหมือนเดิม · 9 แก้ (มีเหตุผลกำกับ) · 1 ลบ; ใหม่ 2 (`_geojson`, `_apply_bundle`) + `ROOT` ในหน้า |
+| ชั้น | 0 import ขึ้นบน · core/engine/I/O ไม่แตะ streamlit · `rg_lib` import ผ่านเมื่อไม่มี SciPy |
+| เบราว์เซอร์จริง (Streamlit 1.65 + Chromium headless, ทั้งสองแท็บในเมนูซ้าย) | โหลดหน้า + เพิ่มหมุดผ่านช่อง "Coords": ข้อความ sidebar/main · รายการปุ่ม · alert เท่ากัน, ไม่มี exception, screenshot เท่ากันทุก pixel นอกรายการเมนูที่ถูกเลือก (ยกเว้น 2×14 px ที่ขอบ checkbox หลังเพิ่มหมุด = transition) |
+
+### 9.3 ความต่างของพฤติกรรมที่ตั้งใจ / ที่ควรรู้
+
+1. **`_OVERPASS_LOCK` เป็น lock ระดับ process จริง.** Streamlit รัน script ของหน้าใหม่ทุก rerun จึงสร้าง `threading.RLock()` ใหม่ทุกครั้ง (หน้าเดิมไม่เคยกันข้าม session จริง); ใน `rg_lib` ถูกสร้างครั้งเดียว. ผลของ session เดียวเท่าเดิม; หลาย session ที่ดาวน์โหลด Overpass พร้อมกันจะต่อคิวและไม่แย่งแก้ `ox.settings.overpass_url` — ตรงกับคอมเมนต์ใน `_fetch_osm_graph` (fast path อยู่นอก lock, re-check ใน lock).
+2. **ทั้งสองแท็บใช้ `st.session_state` ร่วมกัน** (key เดียวกัน): ผลที่คำนวณในแท็บหนึ่งเห็นในอีกแท็บ.
+3. **`st.cache_data` แยกกัน** (key ผูกกับฟังก์ชัน/โมดูล): เปิด v2 ครั้งแรกคำนวณใหม่ (ttl 3600 s), ผลเท่าเดิม.
+4. **API ภายในของ `StateManager`:** alias `K_SHOW_*`/`K_CITYPLAN_OPACITY` ถูกลบ (key เดิมไม่เปลี่ยน), เพิ่ม `invalidate_inputs()` และ `_LAYERS`.
+5. **ชื่อไฟล์:** `Rent_Gradient_v2.py` (v ตัวเล็ก) — บน macOS/Windows (ชื่อไฟล์ไม่แยกตัวพิมพ์) จะชนกับ `Rent_Gradient_V2.py` ที่ถูกลบไปแล้ว ทำให้ `tests/test_rent_gradient_v2.py` ที่ค้าง (ซึ่ง import หน้า V2 เก่าและพังอยู่แล้ว) ไปโหลดหน้านี้แทน.
+
+### 9.4 ยังไม่ได้ทำ / ต่อยอด
+
+- D2 (ลบของค้าง) · Step 0.1 · Step 0.5 ส่วนที่เหลือ (กราฟ > 3,000 โหนด · anchor ถนนห่าง 250/350 ม. · โซนแดง 2×2 เซลล์ [M21–M23]; ปุ่ม export/ล้าง cache; ทางผิดพลาดของ `perform_network_analysis`) · S-6…S-8 · Step 3 · Step 4 · D4 · D5.
+- เมื่อพอใจแล้วเลิกใช้หน้าเดิม: ลบ `pages/Rent_Gradient.py` และ `tests/test_rg_v2_equivalence.py` (ข้ามการเทียบเองเมื่อไม่มีหน้าเดิม) แล้วเปลี่ยนค่าเริ่มต้นของ `RENT_GRADIENT_PAGE` เป็น v2.
+
+### 9.5 ทบทวน / ทำซ้ำ
+
+- โครงสร้าง: `rg_lib/__init__.py`. อะไรต่างจากหน้าเดิม: `INTENTIONAL_CHANGES` / `REMOVED` / `ADDED` ใน `tests/test_rg_v2_equivalence.py` (ทุกรายการมีเหตุผล).
+- ทำซ้ำทั้งหมด: คำสั่งใน §3.3.
+
+## Appendix A — เครื่องมือ: ตอนนี้อยู่ที่ไหน
+
+| เครื่องมือ | ทำอะไร | ผลที่วัด | ตอนนี้ |
+|---|---|---|---|
+| `golden_master.py` | 37 เคส engine/IO + AppTest → digest ต่อเคส; `patched()` รู้จัก alias ข้าม module | 44 digest ≈ 45 s; 3 process เหมือนกันทุกตัว | **ใน repo**: `scripts/rg_golden_master.py` (46 digest ≈ 75 s, มี `--compare`) |
+| `mutants.py` | 23 mutant (น้ำหนักคะแนน, ปัดเศษ, ข้อความ, style แผนที่, กฎ invalidation, `<`/`<=`, ลำดับ float, พารามิเตอร์ engine …) แต่ละตัวสร้างต้นไม้ของ repo แล้วรันทั้ง test เดิมและ golden master | test เดิมจับ **2/23** · golden master **17/23** | scratch เท่านั้น (ผลอยู่ใน Appendix B) |
+| `mover.py` | ตัด definition ตามชื่อ → module (verbatim), รันเป็น stage, ตรวจ DAG | 195 ชื่อ → 15 module | scratch เท่านั้น: ใช้สร้าง `rg_lib/` ครั้งเดียว; `tests/test_rg_v2_equivalence.py` พิสูจน์ผลลัพธ์แทน |
+| `astcheck.py` | เทียบ `ast.dump` ของทุก definition ก่อน/หลัง | 189 definition | **ใน repo**: `tests/test_rg_v2_equivalence.py` |
+| `facadecheck.py` | ชื่อที่ test/scripts ใช้ resolve ได้และเป็น object เดียวกัน | 85 ชื่อ · 0 missing | ครอบด้วย suite เดิมบนหน้า v2 + `test_the_names_the_page_re_exports_are_the_defining_modules_objects` |
+| `modules.py` | call graph (ไม่มี SCC) · import ขึ้นบน · ฟังก์ชันที่อ่าน global ที่ test patch | V1–V3 | **ใน repo**: `tests/test_rg_lib_layers.py` (กฎเดียว: import ลงล่างเท่านั้น) |
+| `trim_facade.py` | เหลือเฉพาะ import ที่เพจ / test / golden master ใช้ | 421 → 133 L | scratch เท่านั้น (หน้า v2 จัดด้วยมือ → 142 L) |
 
 ## Appendix B — Mutation: ใครจับอะไรได้
 
