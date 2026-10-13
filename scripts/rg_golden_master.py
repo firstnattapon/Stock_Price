@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Golden master of a Rent_Gradient page: a SHA-256 digest of every observable output (44 cases).
+"""Golden master of a Rent_Gradient page: a SHA-256 digest of every observable output (46 cases).
 
     python scripts/rg_golden_master.py pages/Rent_Gradient.py    /tmp/v1.json
     python scripts/rg_golden_master.py pages/Rent_Gradient_v2.py /tmp/v2.json
@@ -50,10 +50,13 @@ sys.modules[spec.name] = page
 spec.loader.exec_module(page)
 
 def _holders(obj, name):
-    """The page plus every package module that re-exports the very same object under ``name`` (layout-independent)."""
+    """The page plus every package module that re-exports the very same object under ``name`` (layout-independent).
+    A name the page does not re-export at all is patched in every package module that has it."""
+    package = [m for n, m in list(sys.modules.items()) if m is not None and n.startswith("rg_lib.") and hasattr(m, name)]
+    if not hasattr(obj, name):
+        return package
     original = getattr(obj, name)
-    return [obj] + [m for n, m in list(sys.modules.items())
-                    if m is not None and n.startswith("rg_lib.") and getattr(m, name, None) is original]
+    return [obj] + [m for m in package if getattr(m, name) is original]
 
 
 def set_everywhere(obj, name, value):
@@ -679,19 +682,38 @@ def ui_snapshot(at, rendered):
 
 EVENTS = []
 RENDERED = []
+CALLS = []
 
 
-def run_app(seed=None, interact=None):
+@contextlib.contextmanager
+def recorded(*names):
+    """Log every call (with its arguments) of the given ``streamlit`` functions while the page runs. A toast or a warning
+    shown just before ``st.rerun()`` is gone from the final render, but the user saw it."""
+    def wrap(name, real):
+        def call(*args, **kwargs):
+            CALLS.append([name, [repr(a) for a in args], {k: repr(v) for k, v in sorted(kwargs.items())}])
+            return real(*args, **kwargs)
+        return call
+    with contextlib.ExitStack() as stack:
+        for name in names:
+            stack.enter_context(mock.patch.object(page.st, name, wrap(name, getattr(page.st, name))))
+        yield
+
+
+def run_app(seed=None, interact=None, map_output=None, record=()):
+    """Render the page with AppTest. ``map_output`` is what the (patched) map component returns on every run — a click is
+    ``{"last_clicked": {"lat": .., "lng": ..}}`` — and ``record`` names the streamlit functions whose calls are logged."""
     from streamlit.testing.v1 import AppTest
     rendered = RENDERED
     rendered.clear()
     EVENTS.clear()
+    CALLS.clear()
 
     def app():
         import rg_gm_page
         rg_gm_page.main()
-    with patched(page, st_folium=lambda m, **kw: rendered.append(m) or {}, _fetch_osm_graph=lambda *a: (GRID, True, None)), \
-            mock.patch.object(page.StateManager, "_load_remote_defaults", staticmethod(lambda d: None)):
+    with patched(page, st_folium=lambda m, **kw: rendered.append(m) or (map_output or {}), _fetch_osm_graph=lambda *a: (GRID, True, None)), \
+            mock.patch.object(page.StateManager, "_load_remote_defaults", staticmethod(lambda d: None)), recorded(*record):
         at = AppTest.from_function(app, default_timeout=90)
         for k, v in (seed or {}).items():
             at.session_state[k] = v
@@ -700,6 +722,8 @@ def run_app(seed=None, interact=None):
             interact(at)
         snap = ui_snapshot(at, rendered)
         snap["events"] = [dict(e) for e in EVENTS]
+        if record:
+            snap["calls"] = [list(c) for c in CALLS]
         return snap
 
 
@@ -821,6 +845,55 @@ def _():
         at.checkbox(key="active_chk_0").uncheck().run()
         next(b for b in at.button if b.label == "🔄 รีเซ็ต").click().run()
     return run_app(rich_seed(), interact)
+
+
+def bundle_bytes():
+    state = dict(page.StateManager._DEFAULTS)
+    state.update(markers=[dict(m) for m in MARKERS], rent_samples=SAMPLE_SETS["five"], automated_anchor_data=COMPUTED["auto"],
+                 rent_gradient_data=COMPUTED["runs"]["cbd_fit_net"])
+    with mock.patch.object(page.st, "session_state", state):
+        return page.export_bundle_zip()
+
+
+@case("ui.flow.map_click")
+def _():
+    """A click on the map adds a marker and makes the isochrone / CBD / rent stale; nothing happens while locked."""
+    payload = {"last_clicked": {"lat": 20.31, "lng": 100.52}}
+    return {"rich": run_app(rich_seed(), map_output=payload),
+            "locked": run_app(rich_seed(locked=True), map_output=payload),
+            "no_click": run_app(rich_seed(), map_output={"last_clicked": None})}
+
+
+@case("ui.flow.bundle_import")
+def _():
+    """The sidebar's two ways to import a bundle (GitHub button, uploaded file): success, failure, empty and tampered."""
+    good = bundle_bytes()
+    tampered = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(good)) as zin, zipfile.ZipFile(tampered, "w") as zout:
+        for name in zin.namelist():
+            zout.writestr(name, zin.read(name) + (b"x" if name == "config/config.json" else b""))
+    shown = ("toast", "warning", "error", "rerun")
+
+    def from_github(outcome):
+        def interact(at):
+            with patched(page, download_github_bundle=lambda: outcome):
+                click(at, "นำเข้า Bundle จาก GitHub")
+        return run_app({"markers": []}, interact, record=shown)
+
+    class Upload:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self):
+            return self.data
+
+    def from_file(data):
+        with mock.patch.object(page.st, "file_uploader", lambda *a, **k: Upload(data)):
+            return run_app({"markers": []}, lambda at: click(at, "ยืนยันการโหลด Bundle"), record=shown)
+
+    return {"github_ok": from_github((good, None)), "github_error": from_github((None, "HTTP 500")),
+            "github_empty": from_github((None, None)), "github_tampered": from_github((tampered.getvalue(), None)),
+            "upload_ok": from_file(good), "upload_garbage": from_file(b"not a zip")}
 
 
 # ------------------------------------------------------------------ write
