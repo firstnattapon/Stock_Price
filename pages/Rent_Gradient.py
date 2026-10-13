@@ -4244,7 +4244,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
         # สร้าง bundle เฉพาะเมื่อผู้ใช้กดปุ่ม — ไม่ zip cache ก้อนใหญ่ทุก rerun
-        if st.button("📦 เตรียม Bundle (.zip)", use_container_width=True, disabled=locked):
+        if st.button("📦 เตรียม Bundle (.zip)", width="stretch", disabled=locked):
             st.session_state["_bundle_bytes"] = export_bundle_zip()
         if st.session_state.get("_bundle_bytes"):
             st.download_button(
@@ -4252,7 +4252,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
                 st.session_state["_bundle_bytes"],
                 "rent_gradient_bundle.zip",
                 "application/zip",
-                use_container_width=True,
+                width="stretch",
                 disabled=locked,
             )
 
@@ -4261,7 +4261,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
             type=["zip"],
             key="bundle_uploader",
         )
-        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", use_container_width=True, disabled=locked):
+        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", width="stretch", disabled=locked):
             bundle_result = import_bundle_zip(uploaded_bundle.read())
             if bundle_result["success"]:
                 mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
@@ -4276,7 +4276,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
         st.markdown("---")
         st.markdown("##### Import Bundle from GitHub")
         st.caption("แหล่งข้อมูลคงที่: เชียงของ.zip")
-        if st.button("นำเข้า Bundle จาก GitHub", use_container_width=True, disabled=locked):
+        if st.button("นำเข้า Bundle จาก GitHub", width="stretch", disabled=locked):
             bundle_bytes, err = download_github_bundle()
             if err:
                 st.error(err)
@@ -4305,7 +4305,7 @@ def _render_sidebar_marker_input(locked: bool) -> None:
         key="manual_coords",
         disabled=locked,
     )
-    if c2.button("เพิ่ม", use_container_width=True, disabled=locked):
+    if c2.button("เพิ่ม", width="stretch", disabled=locked):
         try:
             lat_str, lng_str = coords_input.strip().split(",")
             StateManager.add_marker(float(lat_str), float(lng_str))
@@ -4321,11 +4321,11 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
     # Delete last / Reset buttons
     c1, c2 = st.columns(2)
-    if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
+    if c1.button("❌ ลบจุดล่าสุด", width="stretch", disabled=locked) and markers:
         StateManager.pop_last_marker()
         StateManager.clear_results(["isochrone", "intersection", "rent"])
         st.rerun()
-    if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
+    if c2.button("🔄 รีเซ็ต", width="stretch", disabled=locked):
         StateManager.reset()
         st.rerun()
 
@@ -4398,7 +4398,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
 
             if st.button(
                 "📤 Export Cache (.zip)",
-                use_container_width=True,
+                width="stretch",
                 key="export_cache_btn",
                 disabled=locked,
             ):
@@ -4409,12 +4409,12 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                     data=st.session_state["_cache_zip_bytes"],
                     file_name="osmnx_cache.zip",
                     mime="application/zip",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             if st.button(
                 "🗑️ ล้าง Cache",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -4428,7 +4428,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
         st.markdown("---")
         do_network: bool = st.button(
             "🚀 Run Network Analysis",
-            use_container_width=True,
+            width="stretch",
             disabled=(not can_analyze) or locked,
         )
 
@@ -4454,7 +4454,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
 
             if st.button(
                 "➕ เพิ่มจุดนี้ลงในรายการ",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -4482,7 +4482,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
             best = golden_spots[0]
             if st.button(
                 "➕ เพิ่มจุดทำเลที่ดินทองอันดับ 1",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -4776,7 +4776,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
         run_anchor = st.button(
             "🎯 ค้นหา CBD Anchor อัตโนมัติ",
             disabled=locked or not HAS_SCIPY or not center_valid,
-            use_container_width=True,
+            width="stretch",
         )
 
         if result:
@@ -4843,7 +4843,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
             df,
             num_rows="dynamic",
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             disabled=locked,
             column_config={
                 "lat": st.column_config.NumberColumn("Lat", format="%.5f"),
@@ -4863,7 +4863,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
         do_rent: bool = st.button(
             "🧮 คำนวณ Rent Gradient",
-            use_container_width=True,
+            width="stretch",
             disabled=(not can_run) or locked,
         )
 
@@ -4974,7 +4974,7 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         do_calc: bool = st.button(
             "🧩 ① คำนวณหา Isochrone CBD",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=ui_locked,
         )
         st.markdown("---")
@@ -5516,7 +5516,6 @@ def render_analytics_panel() -> None:
             model = rent_data["model"]
             st.plotly_chart(
                 _build_bid_rent_figure(rent_data),
-                use_container_width=True,
                 config={"displayModeBar": False},
             )
             eq_r0 = f"{model['r0']:,.1f}" if not model["is_index"] else f"{model['r0']:.0f}"
@@ -5541,7 +5540,7 @@ def render_analytics_panel() -> None:
             )
             has_net_cols = bool(net_data and "error" not in net_data and net_data.get("nodes", {}).get("features"))
             df_rings = pd.DataFrame(ring_rows)
-            st.dataframe(df_rings, use_container_width=True, hide_index=True)
+            st.dataframe(df_rings, width="stretch", hide_index=True)
 
             csv_bytes = df_rings.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
@@ -5578,7 +5577,7 @@ def render_analytics_panel() -> None:
     with tab_gold:
         if golden_spots:
             df_gold = _build_golden_spots_df(golden_spots, rent_data)
-            st.dataframe(df_gold, use_container_width=True, hide_index=True)
+            st.dataframe(df_gold, width="stretch", hide_index=True)
             if has_rent:
                 if rent_data["model"].get("is_index"):
                     st.caption(
@@ -5598,7 +5597,7 @@ def render_analytics_panel() -> None:
                 csv_bytes,
                 "golden_spots.csv",
                 "text/csv",
-                use_container_width=True,
+                width="stretch",
             )
             rank = c2.selectbox(
                 "เพิ่มอันดับลงแผนที่",
@@ -5606,7 +5605,7 @@ def render_analytics_panel() -> None:
                 label_visibility="collapsed",
                 format_func=lambda r: f"➕ เพิ่มอันดับ {r} ลงแผนที่",
             )
-            if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
+            if c2.button("ยืนยันเพิ่มหมุด", width="stretch", disabled=locked):
                 spot = golden_spots[rank - 1]
                 StateManager.add_marker(spot["lat"], spot["lon"])
                 StateManager.clear_results(["isochrone", "intersection", "rent"])
@@ -5635,7 +5634,7 @@ def render_analytics_panel() -> None:
                         predict_rent(d_km, model["r0"], model["lam"]), model
                     )
                 rows.append(row)
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
             if not has_rent:
                 st.caption("คำนวณ Rent Gradient เพื่อดูราคาประเมินของแต่ละหมุด")
         else:

@@ -241,3 +241,32 @@ def test_streamlit_a_failing_calculation_step_does_not_stop_the_page(monkeypatch
     assert len(at.tabs) == 5
 
 
+# ------------------------------------------------- no deprecated width keyword
+def test_only_st_folium_still_passes_use_container_width():
+    tree = ast.parse(PAGE_PATH.read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and any(k.arg == "use_container_width" for k in node.keywords):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "?")
+            if name != "st_folium":             # streamlit-folium's own parameter, not a Streamlit one
+                offenders.append((node.lineno, name))
+    assert offenders == []
+
+
+def test_streamlit_default_render_logs_no_deprecation_warning(monkeypatch):
+    records = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Collect(level=logging.WARNING)
+    logger = logging.getLogger("streamlit.deprecation_util")
+    logger.addHandler(handler)
+    try:
+        at = app_test(monkeypatch).run(timeout=30)
+    finally:
+        logger.removeHandler(handler)
+    assert not at.exception
+    assert [m for m in records if "use_container_width" in m] == []
