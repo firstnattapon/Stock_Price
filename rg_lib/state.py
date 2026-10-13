@@ -33,20 +33,9 @@ class StateManager:
     K_MAP_STYLE: str = "map_style_name"
     K_TRAVEL_MODE: str = "travel_mode"
     K_TIME_INTERVALS: str = "time_intervals"
-    K_SHOW_DOL: str = "show_dol"
-    K_SHOW_CITYPLAN: str = "show_cityplan"
-    K_CITYPLAN_OPACITY: str = "cityplan_opacity"
-    K_SHOW_POPULATION: str = "show_population"
-    K_SHOW_TRAFFIC: str = "show_traffic"
-    K_SHOW_BETWEENNESS: str = "show_betweenness"
-    K_SHOW_CLOSENESS: str = "show_closeness"
-    K_SHOW_RAILWAY: str = "show_railway"
-    K_SHOW_GOLDEN: str = "show_golden_spots"
     K_UI_LOCKED: str = "ui_locked"
     K_RENT_SAMPLES: str = "rent_samples"
     K_RENT_DATA: str = "rent_gradient_data"
-    K_SHOW_RENT_RINGS: str = "show_rent_rings"
-    K_SHOW_RENT_NODES: str = "show_rent_nodes"
     K_RENT_UNIT: str = "rent_unit_label"
     K_AUTO_ANCHOR: str = "automated_anchor_data"
     K_AUTO_ANCHOR_CLOSENESS: str = "automated_anchor_closeness_data"
@@ -69,20 +58,20 @@ class StateManager:
         K_MAP_STYLE: "Esri Light Gray (แนะนำสำหรับดูผังเมือง)",
         K_TRAVEL_MODE: "drive",
         K_TIME_INTERVALS: [5],
-        K_SHOW_DOL: False,
-        K_SHOW_CITYPLAN: False,
-        K_CITYPLAN_OPACITY: 0.7,
-        K_SHOW_POPULATION: False,
-        K_SHOW_TRAFFIC: False,
-        K_SHOW_BETWEENNESS: False,
-        K_SHOW_CLOSENESS: False,
-        K_SHOW_RAILWAY: False,
-        K_SHOW_GOLDEN: True,
+        "show_dol": False,
+        "show_cityplan": False,
+        "cityplan_opacity": 0.7,
+        "show_population": False,
+        "show_traffic": False,
+        "show_betweenness": False,
+        "show_closeness": False,
+        "show_railway": False,
+        "show_golden_spots": True,
         K_UI_LOCKED: False,
         K_RENT_SAMPLES: [],
         K_RENT_DATA: None,
-        K_SHOW_RENT_RINGS: True,
-        K_SHOW_RENT_NODES: False,
+        "show_rent_rings": True,
+        "show_rent_nodes": False,
         K_RENT_UNIT: "บาท/ตร.ว./เดือน",
         K_AUTO_ANCHOR: None,
         K_AUTO_ANCHOR_CLOSENESS: None,
