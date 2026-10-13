@@ -21,6 +21,7 @@ import requests
 from shapely.geometry import shape, mapping, box
 from shapely.ops import unary_union
 from shapely import wkt
+import copy
 import json
 import networkx as nx
 import osmnx as ox
@@ -39,7 +40,7 @@ import zipfile
 import io
 import xml.etree.ElementTree as ET
 import pandas as pd
-from math import radians, sin, cos, sqrt, atan2, log, exp, pi, floor, hypot
+from math import radians, sin, cos, sqrt, atan2, log, exp, pi, floor, hypot, isfinite
 
 # Automated CBD search uses metric coordinates, independent of map projection.
 from pyproj import CRS, Transformer
@@ -126,7 +127,10 @@ TIME_OPTIONS: List[int] = [5, 10, 15, 20, 30, 45, 60]
 
 # Cache Directory (disk-based OSM graph storage)
 CACHE_DIR: Path = Path("./cache")
-CACHE_DIR.mkdir(exist_ok=True)
+try:
+    CACHE_DIR.mkdir(exist_ok=True)
+except OSError:
+    pass  # read-only deployment: every cache read and write below already degrades to "no cache"
 
 # Network Analysis Configuration
 NETWORK_CONFIG: Dict[str, Any] = {
@@ -196,7 +200,20 @@ OVERPASS_CONFIG: Dict[str, Any] = {
     "attempts_per_endpoint": 1,
     "retry_backoff_seconds": 1.0,
 }
-_OVERPASS_LOCK = threading.RLock()
+
+
+@st.cache_resource(show_spinner=False)
+def _overpass_lock() -> Any:
+    """The one lock of the server process.
+
+    Streamlit executes this script again on every rerun, so a bare module-level
+    ``threading.RLock()`` would be a different lock for every run and session and
+    would serialise nothing.
+    """
+    return threading.RLock()
+
+
+_OVERPASS_LOCK = _overpass_lock()
 
 # Rent Gradient (Bid-Rent Model: Alonso-Muth-Mills) Configuration
 # หลักการ: ค่าเช่า/มูลค่าที่ดินลดลงแบบ negative exponential ตามระยะจาก CBD
@@ -273,6 +290,32 @@ GITHUB_BUNDLE_URL: str = (
 # ============================================================================
 # SECTION 2: STATE MANAGER (Centralized Session State)
 # ============================================================================
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
+
+
+def _importable(key: str, value: Any) -> bool:
+    """Whether the page's own code can consume ``value`` for ``key`` (remote defaults, config import).
+
+    Only structures that plain Python indexes or iterates on every rerun are checked —
+    ``markers``, ``colors``, ``rent_samples`` and the saved results — because a bad one raises
+    before the sidebar (and its Reset button) is reached. Widget-bound settings are left alone.
+    """
+    if key == "markers":
+        return isinstance(value, list) and all(
+            isinstance(m, dict) and _is_number(m.get("lat")) and _is_number(m.get("lng")) for m in value)
+    if key == "colors":
+        return isinstance(value, dict) and all(
+            isinstance(value.get(step), str) for step in ("step1", "step2", "step3", "step4"))
+    if key == "rent_samples":
+        return isinstance(value, list) and all(
+            isinstance(s, dict) and all(_is_number(s.get(field)) for field in ("lat", "lon", "rent"))
+            for s in value)
+    if key in RESULT_KEYS_TO_SAVE:
+        return value is None or isinstance(value, dict)
+    return True
+
 
 class StateManager:
     """
@@ -371,8 +414,9 @@ class StateManager:
         """
         first_run = cls.K_MARKERS not in st.session_state
 
-        # Resolve starting defaults (possibly from remote)
-        defaults = dict(cls._DEFAULTS)
+        # Resolve starting defaults (possibly from remote). Deep copy: the class-level
+        # dict/list defaults must never be the objects a session mutates.
+        defaults = copy.deepcopy(cls._DEFAULTS)
         if first_run:
             defaults[cls.K_MARKERS] = cls._load_remote_defaults(defaults)
 
@@ -397,11 +441,12 @@ class StateManager:
             )
             if resp.status_code == 200:
                 data: Dict[str, Any] = resp.json()
-                # Merge remote settings into defaults
-                for k in defaults:
-                    if k in data:
-                        defaults[k] = data[k]
-                return data.get("markers")
+                if not isinstance(data, dict):
+                    return None
+                # Merge the remote settings the page can use into defaults
+                usable = {k: data[k] for k in defaults if k in data and _importable(k, data[k])}
+                defaults.update(usable)
+                return usable.get("markers")
         except Exception:
             pass
         return None
@@ -559,14 +604,26 @@ class StateManager:
         cls.clear_results()
 
     @classmethod
-    def import_config(cls, data: Dict[str, Any]) -> None:
-        """Import settings + optional precomputed outputs from config."""
-        if "markers" in data:
+    def import_config(cls, data: Dict[str, Any]) -> List[str]:
+        """Import settings + optional precomputed outputs from config.
+
+        Returns the keys that were skipped because the page cannot use their value
+        (see ``_importable``); a config exported by this page skips nothing.
+        """
+        skipped: List[str] = []
+
+        def usable(key: str, value: Any) -> bool:
+            if _importable(key, value):
+                return True
+            skipped.append(key)
+            return False
+
+        if "markers" in data and usable("markers", data["markers"]):
             st.session_state[cls.K_MARKERS] = data["markers"]
 
         settings = data.get("settings", {})
         for k, v in settings.items():
-            if k in SESSION_KEYS_TO_SAVE:
+            if k in SESSION_KEYS_TO_SAVE and usable(k, v):
                 st.session_state[k] = v
 
         # The combined coordinate widget is UI-only. Keep it synchronized with
@@ -583,13 +640,15 @@ class StateManager:
 
         precomputed_results = data.get("precomputed_results", {})
         for result_key in RESULT_KEYS_TO_SAVE:
-            if result_key in precomputed_results:
+            if result_key in precomputed_results and usable(result_key, precomputed_results[result_key]):
                 st.session_state[result_key] = precomputed_results[result_key]
 
         # Backward compatibility: allow old flat structure.
         for result_key in RESULT_KEYS_TO_SAVE:
-            if result_key in data:
+            if result_key in data and usable(result_key, data[result_key]):
                 st.session_state[result_key] = data[result_key]
+
+        return list(dict.fromkeys(skipped))
 
     @classmethod
     def export_config(cls) -> str:
@@ -3540,6 +3599,14 @@ def export_bundle_zip() -> bytes:
     return out.getvalue()
 
 
+def _read_member(zf: zipfile.ZipFile, name: str, limit: int) -> Optional[bytes]:
+    """Bytes of an archive member, or ``None`` when it is larger than ``limit`` once inflated.
+
+    ``file_size`` is the inflated size, so a zip bomb is refused before any of it is read.
+    """
+    return zf.read(name) if zf.getinfo(name).file_size <= limit else None
+
+
 def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
     """Import bundle.zip with validation and fallback policy."""
     result = {"success": False, "config_loaded": False, "cache_loaded": False, "warnings": [], "errors": []}
@@ -3561,8 +3628,8 @@ def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
                 return result
 
             config_bytes = zf.read("config/config.json")
-            cache_bytes = zf.read("cache/cache.zip")
-            if len(cache_bytes) > MAX_CACHE_ENTRY_BYTES:
+            cache_bytes = _read_member(zf, "cache/cache.zip", MAX_CACHE_ENTRY_BYTES)
+            if cache_bytes is None:
                 result["warnings"].append("cache ใหญ่เกินกำหนด ระบบจะโหลดเฉพาะ config")
                 cache_bytes = b""
 
@@ -3574,8 +3641,10 @@ def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
                 result["warnings"].append("checksum cache ไม่ถูกต้อง โหลดเฉพาะ config")
                 cache_bytes = b""
 
-            StateManager.import_config(json.loads(config_bytes.decode("utf-8")))
+            skipped = StateManager.import_config(json.loads(config_bytes.decode("utf-8")))
             result["config_loaded"] = True
+            if skipped:
+                result["warnings"].append("ข้ามค่าใน config ที่ใช้งานไม่ได้: " + ", ".join(skipped))
             if cache_bytes:
                 cache_result = import_cache_from_zip(cache_bytes)
                 if cache_result.get("success"):
