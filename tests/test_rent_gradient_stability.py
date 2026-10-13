@@ -197,3 +197,47 @@ def test_bundle_cache_member_over_the_limit_is_not_inflated(monkeypatch):
     assert any("ใหญ่เกินกำหนด" in warning for warning in result["warnings"])
 
 
+# ------------------------------------------------- one failing section does not blank the page
+def app_test(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    def app():
+        import rent_gradient_stability_test
+        rent_gradient_stability_test.main()
+
+    monkeypatch.setattr(page.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
+    return AppTest.from_function(app)
+
+
+def explode(*args, **kwargs):
+    raise RuntimeError("section exploded")
+
+
+def test_streamlit_a_failing_header_section_still_renders_the_rest_of_the_page(monkeypatch):
+    monkeypatch.setattr(page, "render_metrics_row", explode)
+    at = app_test(monkeypatch).run(timeout=30)
+    assert [e.value for e in at.exception] == ["section exploded"]    # shown in place, like Streamlit's own box
+    assert len(at.tabs) == 5                                          # the analytics panel after it still renders
+    assert any(b.label == "🚀 Run Network Analysis" for b in at.sidebar.button)
+
+
+def test_streamlit_a_failing_sidebar_panel_keeps_the_other_panels_and_reset(monkeypatch):
+    monkeypatch.setattr(page, "_render_sidebar_network_panel", explode)
+    at = app_test(monkeypatch).run(timeout=30)
+    assert [e.value for e in at.exception] == ["section exploded"]
+    labels = {b.label for b in at.sidebar.button}
+    assert {"🔄 รีเซ็ต", "🧮 คำนวณ Rent Gradient", "🎯 ค้นหา CBD Anchor อัตโนมัติ"} <= labels
+    assert len(at.tabs) == 5
+
+
+def test_streamlit_a_failing_calculation_step_does_not_stop_the_page(monkeypatch):
+    monkeypatch.setattr(page, "perform_rent_gradient", explode)
+    at = app_test(monkeypatch)
+    at.session_state["isochrone_data"] = {"type": "FeatureCollection", "features": []}    # enables the button
+    at.run(timeout=30)
+    assert not at.exception
+    next(b for b in at.sidebar.button if b.label == "🧮 คำนวณ Rent Gradient").click().run(timeout=30)
+    assert [e.value for e in at.exception] == ["section exploded"]
+    assert len(at.tabs) == 5
+
+

@@ -4937,6 +4937,20 @@ def _render_sidebar_map_settings(locked: bool) -> None:
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
+def _guarded(step: Callable[..., Any], *args: Any, default: Any = None) -> Any:
+    """Run one step of the page; if it raises, show the traceback where the step would have
+    drawn and carry on with the rest of the page.
+
+    Without this, one failing section stops the whole script run — the sidebar and its Reset
+    button included. Streamlit's rerun/stop signals derive from ``BaseException`` and pass through.
+    """
+    try:
+        return step(*args)
+    except Exception as exc:
+        st.exception(exc)
+        return default
+
+
 def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     """
     Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
@@ -4949,13 +4963,13 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         st.header("⚙️ การตั้งค่า")
 
         ui_locked = st.toggle("🔒 Lock Active Markers + เมนูทั้งหมด", key=StateManager.K_UI_LOCKED)
-        _render_sidebar_config_section(ui_locked)
+        _guarded(_render_sidebar_config_section, ui_locked)
         st.markdown("---")
-        _render_sidebar_marker_input(ui_locked)
+        _guarded(_render_sidebar_marker_input, ui_locked)
 
         st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
 
-        active_list = _render_sidebar_marker_list(ui_locked)
+        active_list = _guarded(_render_sidebar_marker_list, ui_locked, default=[])
 
         do_calc: bool = st.button(
             "🧩 ① คำนวณหา Isochrone CBD",
@@ -4965,14 +4979,14 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         )
         st.markdown("---")
 
-        do_network = _render_sidebar_network_panel(ui_locked)
+        do_network = _guarded(_render_sidebar_network_panel, ui_locked, default=False)
         st.markdown("---")
 
-        do_rent = _render_sidebar_rent_panel(ui_locked)
+        do_rent = _guarded(_render_sidebar_rent_panel, ui_locked, default=False)
         st.markdown("---")
 
-        _render_sidebar_map_settings(ui_locked)
-        do_anchor = _render_sidebar_anchor_panel(ui_locked)
+        _guarded(_render_sidebar_map_settings, ui_locked)
+        do_anchor = _guarded(_render_sidebar_anchor_panel, ui_locked, default=False)
 
     return do_calc, do_network, do_rent, do_anchor, active_list
 
@@ -6171,29 +6185,30 @@ def main() -> None:
     StateManager.initialize()
 
     # 2. Render Sidebar → capture user intents
-    do_calc, do_net, do_rent, do_anchor, active_list = render_sidebar()
+    do_calc, do_net, do_rent, do_anchor, active_list = _guarded(
+        render_sidebar, default=(False, False, False, False, []))
 
     # 3. Execute Business Logic (based on user intents)
     if do_calc:
-        perform_calculation(active_list)
+        _guarded(perform_calculation, active_list)
 
     if do_net:
-        perform_network_analysis()
+        _guarded(perform_network_analysis)
 
     if do_rent:
-        perform_rent_gradient()
+        _guarded(perform_rent_gradient)
 
     if do_anchor:
-        perform_automated_anchor()
+        _guarded(perform_automated_anchor)
 
     # 4. Render Header + Metrics + Map + Analytics
-    render_header()
-    render_metrics_row()
-    map_output = render_map()
-    render_analytics_panel()
+    _guarded(render_header)
+    _guarded(render_metrics_row)
+    map_output = _guarded(render_map)
+    _guarded(render_analytics_panel)
 
     # 5. Handle Map Click → mutate state & rerun
-    handle_map_click(map_output, st.session_state[StateManager.K_UI_LOCKED])
+    _guarded(handle_map_click, map_output, st.session_state[StateManager.K_UI_LOCKED])
 
 
 if __name__ == "__main__":
