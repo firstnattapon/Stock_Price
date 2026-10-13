@@ -22,11 +22,19 @@ MODULES = sorted(p for p in (ROOT / "rg_lib").glob("*.py") if p.stem != "__init_
 
 needs_old_page = pytest.mark.skipif(not OLD_PAGE.exists(), reason="pages/Rent_Gradient.py was retired; the comparison is done")
 
+S3 = 'S-3: the eight identical clear_results(["isochrone", "intersection", "rent"]) calls are StateManager.invalidate_inputs()'
+
 # name -> why the definition differs from pages/Rent_Gradient.py
 INTENTIONAL_CHANGES = {
     "_KML_FILE_PATH": "the KML file stays in pages/; the module that defines the path is one directory up (rg_lib/config.py)",
     "StateManager": ("S-2a: the 11 K_SHOW_* / K_CITYPLAN_OPACITY aliases that only fed _DEFAULTS are inlined as its string keys; "
-                     "S-2b: clear_results() is driven by the _LAYERS table instead of six if-blocks"),
+                     "S-2b: clear_results() is driven by the _LAYERS table instead of six if-blocks; "
+                     "S-3: invalidate_inputs() names the rule 'a marker changed, so isochrone, CBD and rent are stale'"),
+    "handle_map_click": S3,
+    "render_analytics_panel": S3,
+    "_render_sidebar_marker_input": S3,
+    "_render_sidebar_marker_list": S3,
+    "_render_sidebar_network_panel": S3,
 }
 # name -> why a definition of the old page no longer exists
 REMOVED = {

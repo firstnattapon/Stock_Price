@@ -487,5 +487,5 @@ def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None
     if should_add_marker(clicked["lat"], clicked["lng"], last):
         StateManager.add_marker(clicked["lat"], clicked["lng"])
         StateManager.record_click(clicked["lat"], clicked["lng"])
-        StateManager.clear_results(["isochrone", "intersection", "rent"])
+        StateManager.invalidate_inputs()
         st.rerun()

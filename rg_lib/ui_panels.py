@@ -274,7 +274,7 @@ def render_analytics_panel() -> None:
             if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
                 spot = golden_spots[rank - 1]
                 StateManager.add_marker(spot["lat"], spot["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_inputs()
                 st.toast(f"เพิ่ม Golden Spot อันดับ {rank} แล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
         else:

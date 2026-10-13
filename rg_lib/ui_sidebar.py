@@ -92,7 +92,7 @@ def _render_sidebar_marker_input(locked: bool) -> None:
         try:
             lat_str, lng_str = coords_input.strip().split(",")
             StateManager.add_marker(float(lat_str), float(lng_str))
-            StateManager.clear_results(["isochrone", "intersection", "rent"])
+            StateManager.invalidate_inputs()
             st.rerun()
         except Exception:
             st.error("Format: Lat, Lng")
@@ -106,7 +106,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
     c1, c2 = st.columns(2)
     if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
         StateManager.pop_last_marker()
-        StateManager.clear_results(["isochrone", "intersection", "rent"])
+        StateManager.invalidate_inputs()
         st.rerun()
     if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
         StateManager.reset()
@@ -131,7 +131,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             if is_active != prev_active:
                 StateManager.set_marker_active(i, is_active)
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_inputs()
 
             if is_active:
                 style = (
@@ -147,7 +147,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             if col3.button("✕", key=f"del_btn_{i}", disabled=locked):
                 StateManager.remove_marker(i)
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_inputs()
                 st.rerun()
 
     # Refresh active list after possible mutations
@@ -242,7 +242,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 disabled=locked,
             ):
                 StateManager.add_marker(top["lat"], top["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_inputs()
                 st.toast("เพิ่มจุดใหม่เรียบร้อย! กรุณากดคำนวณใหม่", icon="✅")
                 st.rerun()
 
@@ -270,7 +270,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 disabled=locked,
             ):
                 StateManager.add_marker(best["lat"], best["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
+                StateManager.invalidate_inputs()
                 st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
 

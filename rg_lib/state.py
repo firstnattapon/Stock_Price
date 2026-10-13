@@ -269,6 +269,11 @@ class StateManager:
                     st.session_state[key] = None
 
     @classmethod
+    def invalidate_inputs(cls) -> None:
+        """Rule (a): a marker was added, removed, toggled or clicked, so the isochrone, CBD and rent are stale."""
+        cls.clear_results(["isochrone", "intersection", "rent"])
+
+    @classmethod
     def reset(cls) -> None:
         """Reset to factory defaults."""
         st.session_state[cls.K_MARKERS] = [dict(cls._DEFAULT_MARKER)]
