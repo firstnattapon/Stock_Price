@@ -1,5 +1,6 @@
 """Offline correctness and Streamlit integration tests for the road-only CBD anchors."""
 import importlib.util
+import os
 import json
 from math import cos, radians
 from pathlib import Path
@@ -11,8 +12,10 @@ import pytest
 from pyproj.enums import TransformDirection
 from scipy.stats import rankdata
 
+from _rg_patch import patch_everywhere  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("rent_gradient_test", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("rent_gradient_test", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = page
 spec.loader.exec_module(page)
@@ -253,7 +256,7 @@ def test_bad_graphs_and_resource_limits(monkeypatch):
     del graph.nodes[3]["x"]
     with pytest.raises(ValueError, match="x/y"):
         find(graph)
-    monkeypatch.setattr(page, "HAS_SCIPY", False)
+    patch_everywhere(monkeypatch, page, "HAS_SCIPY", False)
     with pytest.raises(RuntimeError, match="SciPy"):
         find()
 
@@ -358,7 +361,7 @@ def _app_test(monkeypatch, graph_factory=road_grid, fetch=None):
         rent_gradient_test.main()
 
     monkeypatch.setattr(page.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
-    monkeypatch.setattr(page, "_fetch_osm_graph",
+    patch_everywhere(monkeypatch, page, "_fetch_osm_graph",
                         fetch or (lambda *args: (graph_factory(), True, None)))
     return AppTest.from_function(app).run(timeout=30)
 
@@ -439,7 +442,7 @@ def test_streamlit_download_failure_does_not_publish_partial_result(monkeypatch)
 
 def test_map_shows_both_anchors_and_no_search_path_layers(monkeypatch):
     rendered = []
-    monkeypatch.setattr(page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
+    patch_everywhere(monkeypatch, page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
     at = _app_test(monkeypatch)
     _anchor_button(at).click().run(timeout=30)
     assert not at.exception
@@ -454,7 +457,7 @@ def test_map_shows_both_anchors_and_no_search_path_layers(monkeypatch):
 
 def test_old_saved_results_with_trace_still_render(monkeypatch):
     rendered = []
-    monkeypatch.setattr(page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
+    patch_everywhere(monkeypatch, page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
     at = _app_test(monkeypatch)
     legacy = dict(find()["composite"], restarts=[{"seed": {"lat": 20.0, "lon": 100.0}}],
                   trace=[{"restart": 0, "action": "move", "lat": 20.1, "lon": 100.1}],
@@ -529,14 +532,14 @@ def evidence_env(monkeypatch):
         calls.append(layer)
         return world(layer, bbox, px)
 
-    monkeypatch.setattr(page, "fetch_wms_image", fetch)
-    monkeypatch.setattr(page, "load_cached_wms_image", lambda layer, bbox, px: _evidence_images())  # thumbnails
+    patch_everywhere(monkeypatch, page, "fetch_wms_image", fetch)
+    patch_everywhere(monkeypatch, page, "load_cached_wms_image", lambda layer, bbox, px: _evidence_images())  # thumbnails
     return calls
 
 
 def _run_anchor_with_evidence(monkeypatch, tick=True):
     rendered = []
-    monkeypatch.setattr(page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
+    patch_everywhere(monkeypatch, page, "st_folium", lambda m, **kwargs: rendered.append(m) or {})
     at = _app_test(monkeypatch)
     assert at.checkbox(key="anchor_use_evidence").value is False            # opt-in
     if tick:
@@ -580,7 +583,7 @@ def test_streamlit_evidence_adds_a_third_anchor_and_rent_follows_the_opt_in(monk
 
 
 def test_streamlit_evidence_failure_leaves_the_road_anchors_untouched(monkeypatch, evidence_env):
-    monkeypatch.setattr(page, "fetch_wms_image", lambda layer, bbox, px: (None, {"error": "HTTP 503"}))
+    patch_everywhere(monkeypatch, page, "fetch_wms_image", lambda layer, bbox, px: (None, {"error": "HTTP 503"}))
     at, rendered = _run_anchor_with_evidence(monkeypatch)
     evidence = at.session_state["automated_anchor_evidence_data"]
     assert evidence["status"] == "unavailable" and evidence["evidence_anchor"] is None

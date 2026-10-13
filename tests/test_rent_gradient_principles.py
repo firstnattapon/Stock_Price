@@ -21,8 +21,10 @@ import numpy as np
 import pytest
 from pyproj.enums import TransformDirection
 
+from _rg_patch import patch_everywhere  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("rent_gradient_principles_test", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("rent_gradient_principles_test", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = page
 spec.loader.exec_module(page)
@@ -58,7 +60,7 @@ def road_grid(size=11, spacing=100):
 
 @pytest.fixture
 def real_graph(tmp_path, monkeypatch):
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     result = page.import_cache_from_zip(REAL_BUNDLE.read_bytes())
     assert result["imported"] == 2 and not result["errors"]
     graph = page.load_graph_from_cache(REAL_KEY)
@@ -96,7 +98,7 @@ def test_golden_land_low_traffic_term_is_not_constant_on_multigraph():
 
 def test_centrality_edges_get_distinct_betweenness_scores(monkeypatch):
     graph = _star_with_parallel_edge()
-    monkeypatch.setattr(page, "_fetch_osm_graph", lambda *a: (graph, True, None))
+    patch_everywhere(monkeypatch, page, "_fetch_osm_graph", lambda *a: (graph, True, None))
     result = page._compute_centrality_impl("POLYGON ((0 0, 1 0, 1 1, 0 0))", "drive")
     scores = [f["properties"]["betweenness"] for f in result["edges"]["features"]]
     assert max(scores) == pytest.approx(1.0) and min(scores) < 1.0
@@ -233,7 +235,7 @@ def test_restricted_unpickler_blocks_arbitrary_callables(tmp_path):
 def test_cache_roundtrip_keeps_geometry_and_numpy_values(tmp_path, monkeypatch):
     from shapely.geometry import LineString
 
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     graph = nx.MultiDiGraph(crs="EPSG:4326")
     graph.add_node(1, x=np.float64(100.0), y=np.float64(20.0))
     graph.add_node(2, x=100.001, y=20.001)
@@ -248,7 +250,7 @@ def test_unsafe_or_non_graph_cache_file_is_ignored(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     cache.mkdir()
     marker = tmp_path / "pwned"
-    monkeypatch.setattr(page, "CACHE_DIR", cache)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", cache)
     (cache / f"osm_graph_{'b' * 32}.pkl").write_bytes(pickle.dumps(_Evil(marker)))
     (cache / f"osm_graph_{'c' * 32}.pkl").write_bytes(pickle.dumps({"not": "a graph"}))
     assert page.load_graph_from_cache("b" * 32) is None
@@ -260,7 +262,7 @@ def test_bundle_import_rejects_code_traversal_and_oversize(tmp_path, monkeypatch
     cache = tmp_path / "cache"
     cache.mkdir()
     marker = tmp_path / "pwned"
-    monkeypatch.setattr(page, "CACHE_DIR", cache)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", cache)
     good = nx.MultiDiGraph(crs="EPSG:4326")
     good.add_node(1, x=100.0, y=20.0)
     buffer = io.BytesIO()
@@ -270,7 +272,7 @@ def test_bundle_import_rejects_code_traversal_and_oversize(tmp_path, monkeypatch
         archive.writestr("osm_graph_short.pkl", b"x")
         archive.writestr(f"osm_graph_{'e' * 32}.pkl", pickle.dumps(good))
         archive.writestr(f"osm_graph_{'f' * 32}.pkl", pickle.dumps(good) + b"0" * 64)
-    monkeypatch.setattr(page, "MAX_CACHE_ENTRY_BYTES", len(pickle.dumps(good)) + 8)
+    patch_everywhere(monkeypatch, page, "MAX_CACHE_ENTRY_BYTES", len(pickle.dumps(good)) + 8)
     result = page.import_cache_from_zip(buffer.getvalue())
 
     assert result["imported"] == 1
@@ -290,7 +292,7 @@ def test_repo_osmnx_bundle_still_imports_under_the_allow_list(real_graph):
 
 # -------------------------------------------------------------------------- F10
 def test_cache_hit_does_not_wait_for_a_download_but_a_miss_does(tmp_path, monkeypatch):
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     polygon = "POLYGON ((100 20, 100.01 20, 100.01 20.01, 100 20.01, 100 20))"
     graph = nx.MultiDiGraph(crs="EPSG:4326")
     graph.add_node(1, x=100.0, y=20.0)
@@ -503,7 +505,7 @@ def _run_rent_app(monkeypatch, samples):
         rent_gradient_principles_test.main()
 
     monkeypatch.setattr(page.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
-    monkeypatch.setattr(page, "_fetch_osm_graph", lambda *args: (road_grid(), True, None))
+    patch_everywhere(monkeypatch, page, "_fetch_osm_graph", lambda *args: (road_grid(), True, None))
     at = AppTest.from_function(app).run(timeout=30)
     next(b for b in at.button if b.label == "🎯 ค้นหา CBD Anchor อัตโนมัติ").click().run(timeout=30)
     assert not at.exception

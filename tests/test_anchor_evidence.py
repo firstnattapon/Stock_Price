@@ -5,6 +5,7 @@ features rely on (line thickness, cell size, aspect, label clutter, zoning colou
 that need captured real tiles live behind ``Geoapify_Map/fixtures/wms`` and are skipped when absent.
 """
 import importlib.util
+import os
 import json
 import sys
 import time
@@ -15,8 +16,10 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
+from _rg_patch import patch_everywhere  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("anchor_evidence_test", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("anchor_evidence_test", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = page
 spec.loader.exec_module(page)
@@ -541,7 +544,7 @@ def png_bytes(size=64, color=(10, 20, 30, 255)):
 
 @pytest.fixture
 def wms_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     calls = []
     behaviour = {"response": lambda params: FakeResponse(png_bytes(64))}
 
