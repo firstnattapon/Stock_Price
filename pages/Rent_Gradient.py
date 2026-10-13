@@ -3932,7 +3932,29 @@ def _compute_centrality_impl(
 # SECTION 4: CACHED WRAPPERS (@st.cache_data)
 # ============================================================================
 
+class _NotCached(Exception):
+    """Raised inside an ``@st.cache_data`` body to hand a failure back without storing it.
+
+    Streamlit keeps whatever a function returns for the whole ``ttl`` (an error tuple or an
+    ``{"error": …}`` dict included) but never an exception, so one transient Geoapify or
+    Overpass failure would otherwise be replayed on every retry for an hour.
+    """
+
+
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG["cache_ttl_seconds"])
+def _isochrone_features_cached(
+    api_key: str,
+    travel_mode: str,
+    ranges_str: str,
+    marker_lat: float,
+    marker_lon: float,
+) -> List[Dict[str, Any]]:
+    features, error = safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    if features is None:
+        raise _NotCached(error)
+    return features
+
+
 def fetch_api_data_cached(
     api_key: str,
     travel_mode: str,
@@ -3940,8 +3962,12 @@ def fetch_api_data_cached(
     marker_lat: float,
     marker_lon: float,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """Streamlit-cached wrapper around the isochrone API call."""
-    return safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    """Isochrone fetch as ``(features, None)`` or ``(None, error)``; only successes are cached."""
+    try:
+        features = _isochrone_features_cached(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    except _NotCached as failure:
+        return None, failure.args[0]
+    return features, None
 
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG["cache_ttl_seconds"])
@@ -3960,11 +3986,21 @@ def union_all_polygons_cached(features_json_str: str) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG["cache_ttl_seconds"])
+def _centrality_cached(polygon_wkt_str: str, network_type: str = "drive") -> Dict[str, Any]:
+    result = _compute_centrality_impl(polygon_wkt_str, network_type)
+    if "error" in result:
+        raise _NotCached(result)
+    return result
+
+
 def compute_centrality_cached(
     polygon_wkt_str: str, network_type: str = "drive"
 ) -> Dict[str, Any]:
-    """Streamlit-cached wrapper for the pure centrality computation."""
-    return _compute_centrality_impl(polygon_wkt_str, network_type)
+    """Centrality result, or ``{"error": …}``; only successful results are cached."""
+    try:
+        return _centrality_cached(polygon_wkt_str, network_type)
+    except _NotCached as failure:
+        return failure.args[0]
 
 
 # ------------------------------------------------------------ KML → GeoJSON
