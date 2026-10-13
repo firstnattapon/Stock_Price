@@ -2,7 +2,7 @@
 
 Every top-level definition of the single-file page must exist exactly once in the new layout with an identical AST
 (``ast.dump``: docstrings and string literals included, comments and formatting excluded), except the changes listed in
-INTENTIONAL_CHANGES / ADDED below, each with its reason. A new or edited definition therefore fails here until somebody
+INTENTIONAL_CHANGES / REMOVED / ADDED below, each with its reason. A new or edited definition therefore fails here until somebody
 writes down why, which is what keeps "v2 behaves like v1" a checked statement. Offline and fast (it only reads source).
 
 Delete the comparison tests together with pages/Rent_Gradient.py once the single-file page is retired.
@@ -25,6 +25,10 @@ needs_old_page = pytest.mark.skipif(not OLD_PAGE.exists(), reason="pages/Rent_Gr
 # name -> why the definition differs from pages/Rent_Gradient.py
 INTENTIONAL_CHANGES = {
     "_KML_FILE_PATH": "the KML file stays in pages/; the module that defines the path is one directory up (rg_lib/config.py)",
+}
+# name -> why a definition of the old page no longer exists
+REMOVED = {
+    "TIMEOUT_GITHUB_LIST": "S-1: never read (the only references are the definition and stale copies that nothing loads)",
 }
 # name -> why the new layout defines something the old page did not
 ADDED = {
@@ -64,9 +68,9 @@ def statements(path, kind):
 
 
 @needs_old_page
-def test_every_definition_of_the_old_page_is_in_the_new_layout():
+def test_every_definition_of_the_old_page_is_in_the_new_layout_or_listed_as_removed():
     missing = sorted(set(definitions(OLD_PAGE)) - set(new_definitions()))
-    assert not missing, f"not moved: {missing}"
+    assert missing == sorted(REMOVED), f"not moved: {missing}; listed as REMOVED: {sorted(REMOVED)}"
 
 
 @needs_old_page
