@@ -111,6 +111,13 @@ def _stability_popup(result: Dict[str, Any]) -> str:
             f"(max drift {stability['max_drift_m']:.0f} m, indicative)")
 
 
+def _geojson(parent, data, style, name=None, tooltip=None, **kwargs) -> None:
+    """Add one styled folium.GeoJson layer; ``tooltip`` is ``(fields, aliases)`` or a plain text."""
+    if isinstance(tooltip, tuple):
+        tooltip = folium.GeoJsonTooltip(fields=tooltip[0], aliases=tooltip[1], localize=True)
+    folium.GeoJson(data, name=name, style_function=style, tooltip=tooltip, **kwargs).add_to(parent)
+
+
 def render_map() -> Optional[Dict[str, Any]]:
     """Build and display the Folium map. Returns the ``st_folium`` output dict."""
     style_conf = MAP_STYLES[StateManager.get_map_style_name()]
@@ -235,48 +242,18 @@ def render_map() -> Optional[Dict[str, Any]]:
 
         if st.session_state.show_rent_rings and rent_data.get("rings_geojson"):
             ring_feats = rent_data["rings_geojson"].get("features") or []
-            has_nodes_label = bool(
-                ring_feats and "nodes_label" in ring_feats[0].get("properties", {})
-            )
-            tooltip_fields = ["band", "rent_label"]
-            tooltip_aliases = ["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"]
-            if has_nodes_label:
-                tooltip_fields.append("nodes_label")
-                tooltip_aliases.append("โหนด Network:")
-            folium.GeoJson(
-                rent_data["rings_geojson"],
-                name="Rent Gradient Rings",
-                style_function=lambda x: {
-                    "fillColor": x["properties"]["color"],
-                    "color": x["properties"]["color"],
-                    "weight": 1,
-                    "fillOpacity": RENT_CONFIG["ring_fill_opacity"],
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=tooltip_fields,
-                    aliases=tooltip_aliases,
-                    localize=True,
-                ),
-            ).add_to(m)
+            fields, aliases = ["band", "rent_label"], ["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"]
+            if ring_feats and "nodes_label" in ring_feats[0].get("properties", {}):
+                fields.append("nodes_label")
+                aliases.append("โหนด Network:")
+            _geojson(m, rent_data["rings_geojson"], lambda x: {
+                "fillColor": x["properties"]["color"], "color": x["properties"]["color"], "weight": 1,
+                "fillOpacity": RENT_CONFIG["ring_fill_opacity"]}, "Rent Gradient Rings", (fields, aliases))
 
         if st.session_state.show_rent_nodes and rent_data.get("rent_nodes_geojson"):
-            folium.GeoJson(
-                rent_data["rent_nodes_geojson"],
-                name="Rent Heat (Nodes)",
-                marker=folium.CircleMarker(),
-                style_function=lambda x: {
-                    "fillColor": x["properties"]["color"],
-                    "color": x["properties"]["color"],
-                    "weight": 1,
-                    "radius": 3,
-                    "fillOpacity": 0.85,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["rent"],
-                    aliases=["ค่าเช่าคาดการณ์:"],
-                    localize=True,
-                ),
-            ).add_to(m)
+            _geojson(m, rent_data["rent_nodes_geojson"], lambda x: {
+                "fillColor": x["properties"]["color"], "color": x["properties"]["color"], "weight": 1, "radius": 3,
+                "fillOpacity": 0.85}, "Rent Heat (Nodes)", (["rent"], ["ค่าเช่าคาดการณ์:"]), marker=folium.CircleMarker())
 
         # Automated marker is already present, even when Rent layers are hidden.
         if not automated:
@@ -294,62 +271,22 @@ def render_map() -> Optional[Dict[str, Any]]:
     # ---- Network Analysis Layers ----
     net_data = StateManager.get_network_data()
     if net_data and "error" not in net_data:
-        # Edges (Betweenness)
         if st.session_state.show_betweenness and net_data.get("edges"):
-            folium.GeoJson(
-                net_data["edges"],
-                name="Road Betweenness",
-                style_function=lambda x: {
-                    "color": x["properties"]["color"],
-                    "weight": x["properties"]["stroke_weight"],
-                    "opacity": 0.8,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["betweenness"],
-                    aliases=["Betweenness Score:"],
-                    localize=True,
-                ),
-            ).add_to(m)
+            _geojson(m, net_data["edges"], lambda x: {
+                "color": x["properties"]["color"], "weight": x["properties"]["stroke_weight"], "opacity": 0.8},
+                "Road Betweenness", (["betweenness"], ["Betweenness Score:"]))
 
-        # Nodes (Closeness)
         if st.session_state.show_closeness and net_data.get("nodes"):
-            folium.GeoJson(
-                net_data["nodes"],
-                name="Node Integration",
-                marker=folium.CircleMarker(),
-                style_function=lambda x: {
-                    "fillColor": x["properties"]["color"],
-                    "color": "#000000",
-                    "weight": 1,
-                    "radius": x["properties"]["radius"],
-                    "fillOpacity": 0.9,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["closeness"],
-                    aliases=["Integration Score:"],
-                    localize=True,
-                ),
-            ).add_to(m)
+            _geojson(m, net_data["nodes"], lambda x: {
+                "fillColor": x["properties"]["color"], "color": "#000000", "weight": 1,
+                "radius": x["properties"]["radius"], "fillOpacity": 0.9},
+                "Node Integration", (["closeness"], ["Integration Score:"]), marker=folium.CircleMarker())
 
-        # Golden Spots layer
         if st.session_state.show_golden_spots and net_data.get("golden_spots_geojson"):
-            folium.GeoJson(
-                net_data["golden_spots_geojson"],
-                name="Golden Land Spots",
-                marker=folium.CircleMarker(),
-                style_function=lambda x: {
-                    "fillColor": "#FFD60A",
-                    "color": "#8C6A00",
-                    "weight": 2,
-                    "radius": max(5, 12 - x["properties"]["rank"]),
-                    "fillOpacity": 0.85,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["rank", "score"],
-                    aliases=["Rank:", "Opportunity Score:"],
-                    localize=True,
-                ),
-            ).add_to(m)
+            _geojson(m, net_data["golden_spots_geojson"], lambda x: {
+                "fillColor": "#FFD60A", "color": "#8C6A00", "weight": 2,
+                "radius": max(5, 12 - x["properties"]["rank"]), "fillOpacity": 0.85},
+                "Golden Land Spots", (["rank", "score"], ["Rank:", "Opportunity Score:"]), marker=folium.CircleMarker())
 
         # Top Node marker
         if net_data.get("top_node"):
@@ -361,37 +298,18 @@ def render_map() -> Optional[Dict[str, Any]]:
                 tooltip="จุดที่อยู่ตรงกลางที่สุด",
             ).add_to(m)
 
-    # ---- Isochrone polygons ----
+    # ---- Isochrone polygons + CBD intersection ----
     iso_data = StateManager.get_isochrone_data()
     if iso_data:
         clrs = StateManager.get_colors()
-        folium.GeoJson(
-            iso_data,
-            name="Travel Areas",
-            style_function=lambda x: {
-                "fillColor": get_fill_color(
-                    x["properties"]["travel_time_minutes"], clrs
-                ),
-                "color": get_border_color(x["properties"]["original_index"]),
-                "weight": 1,
-                "fillOpacity": 0.2,
-            },
-        ).add_to(m)
+        _geojson(m, iso_data, lambda x: {
+            "fillColor": get_fill_color(x["properties"]["travel_time_minutes"], clrs),
+            "color": get_border_color(x["properties"]["original_index"]), "weight": 1, "fillOpacity": 0.2}, "Travel Areas")
 
-    # ---- CBD intersection ----
     inter_data = StateManager.get_intersection_data()
     if inter_data:
-        folium.GeoJson(
-            inter_data,
-            name="CBD Zone",
-            style_function=lambda _x: {
-                "fillColor": "#FFD700",
-                "color": "#FF8C00",
-                "weight": 3,
-                "fillOpacity": 0.6,
-                "dashArray": "5, 5",
-            },
-        ).add_to(m)
+        _geojson(m, inter_data, lambda _x: {"fillColor": "#FFD700", "color": "#FF8C00", "weight": 3,
+                                            "fillOpacity": 0.6, "dashArray": "5, 5"}, "CBD Zone")
 
     # ---- WMS Layers ----
     _add_wms_layer(
@@ -411,18 +329,9 @@ def render_map() -> Optional[Dict[str, Any]]:
     if st.session_state.show_railway:
         railway_geojson = _parse_kml_to_geojson()
         if railway_geojson and railway_geojson.get("features"):
-            folium.GeoJson(
-                railway_geojson,
-                name="แนวรถไฟเชียงของ",
-                style_function=lambda _x: {
-                    "color": "#E63946",
-                    "weight": 4,
-                    "opacity": 0.85,
-                    "dashArray": "8, 4",
-                    "fillOpacity": 0,
-                },
-                tooltip="แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ",
-            ).add_to(m)
+            _geojson(m, railway_geojson, lambda _x: {"color": "#E63946", "weight": 4, "opacity": 0.85,
+                                                     "dashArray": "8, 4", "fillOpacity": 0},
+                     "แนวรถไฟเชียงของ", "แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ")
 
     # ---- Markers ----
     for i, marker in enumerate(markers):

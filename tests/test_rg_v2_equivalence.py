@@ -35,6 +35,7 @@ INTENTIONAL_CHANGES = {
     "_render_sidebar_marker_input": S3,
     "_render_sidebar_marker_list": S3,
     "_render_sidebar_network_panel": S3,
+    "render_map": "S-4: the eight folium.GeoJson(...).add_to(m) layers go through one _geojson() helper (same arguments)",
 }
 # name -> why a definition of the old page no longer exists
 REMOVED = {
@@ -42,6 +43,7 @@ REMOVED = {
 }
 # name -> why the new layout defines something the old page did not
 ADDED = {
+    "_geojson": "S-4: adds one styled folium.GeoJson layer to the map; replaces eight spelled-out copies in render_map",
     "ROOT": "pages/Rent_Gradient_v2.py puts the repo root on sys.path so that ``import rg_lib`` works",
 }
 
