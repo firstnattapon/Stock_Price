@@ -23,6 +23,7 @@ street a few km out, ``outskirts`` = fields or new subdivisions. Commit the resu
 import argparse
 import hashlib
 import importlib.util
+import os
 import json
 from pathlib import Path
 import sys
@@ -33,7 +34,7 @@ import numpy as np
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("rent_gradient", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("rent_gradient", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(page)
 

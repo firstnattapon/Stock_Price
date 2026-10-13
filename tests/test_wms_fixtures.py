@@ -4,6 +4,7 @@ The real-fixture checks run only when ``Geoapify_Map/fixtures/wms/manifest.json`
 produced by ``scripts/capture_wms_fixtures.py`` on a machine that can reach Longdo).
 """
 import importlib.util
+import os
 import io
 import json
 from pathlib import Path
@@ -14,7 +15,7 @@ import pytest
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("rent_gradient_fixtures_test", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("rent_gradient_fixtures_test", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = page
 spec.loader.exec_module(page)

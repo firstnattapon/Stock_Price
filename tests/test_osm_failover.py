@@ -1,13 +1,16 @@
 """Overpass failover tests: no internet access is used."""
 import importlib.util
+import os
 from pathlib import Path
 import sys
 
 import networkx as nx
 import requests
 
+from _rg_patch import patch_everywhere  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("rent_gradient_failover_test", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("rent_gradient_failover_test", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = page
 spec.loader.exec_module(page)
@@ -24,7 +27,7 @@ def graph():
 
 
 def configure(monkeypatch, tmp_path, endpoints, attempts=2):
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     monkeypatch.setitem(page.OVERPASS_CONFIG, "endpoints", endpoints)
     monkeypatch.setitem(page.OVERPASS_CONFIG, "attempts_per_endpoint", attempts)
     monkeypatch.setitem(page.OVERPASS_CONFIG, "retry_backoff_seconds", 0)
