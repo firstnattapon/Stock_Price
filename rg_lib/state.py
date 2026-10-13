@@ -248,36 +248,25 @@ class StateManager:
         return st.session_state.get(cls.K_LAST_CLICK)
 
     # ------------------------------------------------------- cache clearing
+    # layer -> session keys it empties ("anchor" also drops its evidence and the rent computed from it)
+    _LAYERS: Dict[str, Tuple[str, ...]] = {
+        "isochrone": (K_ISOCHRONE,), "intersection": (K_INTERSECTION,), "network": (K_NETWORK,), "rent": (K_RENT_DATA,),
+        "anchor": (K_AUTO_ANCHOR, K_AUTO_ANCHOR_EVIDENCE, K_RENT_DATA),
+        "anchor_closeness": (K_AUTO_ANCHOR_CLOSENESS,), "anchor_evidence": (K_AUTO_ANCHOR_EVIDENCE,),
+    }
+
     @classmethod
     def clear_results(cls, layers: Optional[List[str]] = None) -> None:
         """
         Smart cache invalidation — clear only specified layers.
 
         Args:
-            layers: ``['isochrone', 'intersection', 'network', 'rent']``.
-                    ``None`` clears all.
+            layers: any of ``_LAYERS`` (unknown names are ignored). ``None`` clears all.
         """
-        if layers is None:
-            layers = ["isochrone", "intersection", "network", "rent", "anchor", "anchor_closeness",
-                      "anchor_evidence"]
-
-        if "anchor" in layers:
-            st.session_state[cls.K_AUTO_ANCHOR] = None
-            st.session_state[cls.K_AUTO_ANCHOR_EVIDENCE] = None  # it confirms this road result
-            st.session_state[cls.K_RENT_DATA] = None
-        if "anchor_evidence" in layers:
-            st.session_state[cls.K_AUTO_ANCHOR_EVIDENCE] = None
-        if "anchor_closeness" in layers:
-            st.session_state[cls.K_AUTO_ANCHOR_CLOSENESS] = None
-
-        if "isochrone" in layers:
-            st.session_state[cls.K_ISOCHRONE] = None
-        if "intersection" in layers:
-            st.session_state[cls.K_INTERSECTION] = None
-        if "network" in layers:
-            st.session_state[cls.K_NETWORK] = None
-        if "rent" in layers:
-            st.session_state[cls.K_RENT_DATA] = None
+        for layer, keys in cls._LAYERS.items():
+            if layers is None or layer in layers:
+                for key in keys:
+                    st.session_state[key] = None
 
     @classmethod
     def reset(cls) -> None:

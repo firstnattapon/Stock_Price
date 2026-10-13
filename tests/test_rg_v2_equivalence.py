@@ -25,7 +25,8 @@ needs_old_page = pytest.mark.skipif(not OLD_PAGE.exists(), reason="pages/Rent_Gr
 # name -> why the definition differs from pages/Rent_Gradient.py
 INTENTIONAL_CHANGES = {
     "_KML_FILE_PATH": "the KML file stays in pages/; the module that defines the path is one directory up (rg_lib/config.py)",
-    "StateManager": "S-2a: the 11 K_SHOW_* / K_CITYPLAN_OPACITY aliases that only fed _DEFAULTS are inlined as its string keys",
+    "StateManager": ("S-2a: the 11 K_SHOW_* / K_CITYPLAN_OPACITY aliases that only fed _DEFAULTS are inlined as its string keys; "
+                     "S-2b: clear_results() is driven by the _LAYERS table instead of six if-blocks"),
 }
 # name -> why a definition of the old page no longer exists
 REMOVED = {
