@@ -23,6 +23,20 @@ from .controllers import _anchor_context_matches, _anchor_search_context, _on_re
 from .ui_map import _legend_swatch_row
 
 
+def _apply_bundle(content: bytes, source: str, icon: str) -> None:
+    """Import a bundle, report the outcome, rerun on success."""
+    result = import_bundle_zip(content)
+    if not result["success"]:
+        for err in result["errors"]:
+            st.error(err)
+        return
+    mode = "config + cache" if result["cache_loaded"] else "config เท่านั้น"
+    st.toast(f"✅ โหลด Bundle{source} สำเร็จ ({mode})", icon=icon)
+    for warn in result["warnings"]:
+        st.warning(warn)
+    st.rerun()
+
+
 def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
@@ -39,22 +53,9 @@ def _render_sidebar_config_section(locked: bool) -> None:
                 disabled=locked,
             )
 
-        uploaded_bundle = st.file_uploader(
-            "Upload Bundle (.zip)",
-            type=["zip"],
-            key="bundle_uploader",
-        )
+        uploaded_bundle = st.file_uploader("Upload Bundle (.zip)", type=["zip"], key="bundle_uploader")
         if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", use_container_width=True, disabled=locked):
-            bundle_result = import_bundle_zip(uploaded_bundle.read())
-            if bundle_result["success"]:
-                mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
-                st.toast(f"✅ โหลด Bundle สำเร็จ ({mode})", icon="📦")
-                for warn in bundle_result["warnings"]:
-                    st.warning(warn)
-                st.rerun()
-            else:
-                for err in bundle_result["errors"]:
-                    st.error(err)
+            _apply_bundle(uploaded_bundle.read(), "", "📦")
 
         st.markdown("---")
         st.markdown("##### Import Bundle from GitHub")
@@ -66,16 +67,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
             elif not bundle_bytes:
                 st.error("ไม่พบข้อมูล Bundle จาก GitHub")
             else:
-                bundle_result = import_bundle_zip(bundle_bytes)
-                if bundle_result["success"]:
-                    mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
-                    st.toast(f"✅ โหลด Bundle จาก GitHub สำเร็จ ({mode})", icon="📥")
-                    for warn in bundle_result["warnings"]:
-                        st.warning(warn)
-                    st.rerun()
-                else:
-                    for err_msg in bundle_result["errors"]:
-                        st.error(err_msg)
+                _apply_bundle(bundle_bytes, " จาก GitHub", "📥")
 
 
 def _render_sidebar_marker_input(locked: bool) -> None:
