@@ -27,7 +27,10 @@ import networkx as nx
 import osmnx as ox
 import matplotlib
 import matplotlib.colors as colors
-from typing import Callable, List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Sequence, Tuple
+from collections import OrderedDict
+from dataclasses import dataclass
+from html import escape
 from concurrent.futures import ThreadPoolExecutor, wait
 import time
 import hashlib
@@ -266,6 +269,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_dol", "show_cityplan", "cityplan_opacity", "show_population",
     "show_traffic", "colors", "show_betweenness", "show_closeness",
     "show_railway", "show_golden_spots",
+    "show_anchor_boundary", "show_evidence_zone", "show_evidence_clusters",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
     "anchor_lat", "anchor_lon", "anchor_radius_km",
     "anchor_use_evidence", "rent_use_evidence_anchor",
@@ -429,6 +433,10 @@ class StateManager:
         K_AUTO_ANCHOR: None,
         K_AUTO_ANCHOR_CLOSENESS: None,
         K_AUTO_ANCHOR_EVIDENCE: None,
+        # layer checkboxes that had no checkbox before (they were hidden entries of the map's LayerControl)
+        "show_anchor_boundary": False,
+        "show_evidence_zone": False,
+        "show_evidence_clusters": False,
         "anchor_use_evidence": False,         # opt-in until real WMS fixtures calibrate the thresholds
         "rent_use_evidence_anchor": False,    # Rent keeps the composite anchor unless ticked
         "anchor_lat": DEFAULT_CONFIG["LAT"],
@@ -4145,25 +4153,247 @@ def _parse_kml_to_geojson() -> Optional[Dict[str, Any]]:
 # SECTION 5: UI COMPONENTS (st.* allowed)
 # ============================================================================
 
-def _add_wms_layer(
-    m: folium.Map,
-    layers: str,
-    name: str,
-    show: bool,
-    opacity: float = 1.0,
-) -> None:
-    """Helper — add a Longdo WMS overlay to a Folium map."""
-    folium.WmsTileLayer(
-        url=LONGDO_WMS_URL,
-        layers=layers,
-        name=name,
-        fmt="image/png",
-        transparent=True,
-        version="1.1.1",
-        attr=f"{name} / Longdo Map",
-        show=show,
-        opacity=opacity,
-    ).add_to(m)
+# ----------------------------------------------------------------------------
+# LAYERS — one row per map layer. Each layer draws a folium element from a read-only ``Ctx``
+# (the session state is read once, in ``build_ctx``; a layer never touches ``st.session_state``).
+#
+# Add a layer in three steps:
+#   1. write ``draw_x(ctx) -> folium element | None`` below (build it completely, return it; do not add to the map)
+#   2. add a ``Layer(...)`` row to ``LAYERS`` at the z-position you want (the list runs bottom → top)
+#   3. if it has a checkbox, add its ``show_key`` to ``StateManager._DEFAULTS`` and ``SESSION_KEYS_TO_SAVE``
+# ----------------------------------------------------------------------------
+
+REMEMBER_VIEW: bool = True        # keep the user's zoom/centre when the map is rebuilt (browser sessionStorage)
+MAP_HEIGHT_PX: int = 900
+COORD_DECIMALS: int = 5           # ~1 m: all a screen can show; the stored results keep full precision
+TOOLTIP_STYLE = ("<style>.rgtip th{text-align:left;padding-right:8px;font-weight:600}"
+                 ".rgtip td{text-align:right}</style>")
+PANEL_GROUPS: Tuple[str, ...] = ("โครงข่ายถนน", "Rent Gradient", "Automated Anchor", "บริบท & overlay")
+
+
+@dataclass(frozen=True)
+class Ctx:
+    """Everything the layers draw, as one read-only snapshot (built once per run)."""
+
+    markers: List[Dict[str, Any]]
+    colors: Dict[str, str]
+    iso: Optional[Dict[str, Any]]
+    inter: Optional[Dict[str, Any]]
+    net: Optional[Dict[str, Any]]                    # Network Analysis result (never an error dict)
+    rent: Optional[Dict[str, Any]]                   # Rent Gradient result (never an error dict)
+    anchor: Optional[Dict[str, Any]]                 # Automated anchor — composite
+    anchor_closeness: Optional[Dict[str, Any]]       # Automated anchor — closeness 100 %
+    evidence: Optional[Dict[str, Any]]               # Evidence stage result (schema-checked)
+    show: Dict[str, Any]                             # layer toggles and layer options
+    center: Tuple[float, float]
+    ss: Optional[Any] = None                         # Space Syntax view (see ``SpaceSyntaxView``)
+    cache: Any = None                                # per-session LRU for display payloads
+
+
+@dataclass(frozen=True)
+class Layer:
+    id: str
+    title: str                                       # name in the map's LayerControl
+    group: str                                       # heading in the layers panel (one of PANEL_GROUPS)
+    draw: Callable[[Ctx], Optional[Any]]             # → folium element (FeatureGroup / TileLayer / GeoJson) or None
+    available: Callable[[Ctx], bool]                 # is there anything to draw?
+    show_key: Optional[str] = None                   # session key of the checkbox; None = drawn whenever available
+    label: str = ""                                  # checkbox text in the panel (defaults to ``title``)
+    hint: str = ""                                   # one-line explanation under the checkbox
+    requires: str = ""                               # what to run first, shown while there is nothing to draw
+    legend: Optional[Callable[[Ctx], str]] = None    # HTML section for the map legend
+    legend_rank: int = 50                            # lower = higher in the legend box
+    options: Optional[Callable[[Ctx, bool], None]] = None   # extra widgets shown while the layer is on
+    start_hidden: bool = False                       # unticked = still on the map's LayerControl, just not shown
+
+
+def lru_get(store: Any, key: Any, source: Any, build: Callable[[], Any], limit: int = 8) -> Any:
+    """Per-session LRU for display payloads. An entry is reused only for the *same* ``source`` object.
+
+    The entry keeps a reference to ``source`` so its ``id()`` cannot be recycled while the entry lives.
+    """
+    entry = store.get(key)
+    if entry is not None and entry[0] is source:
+        store.move_to_end(key)
+        return entry[1]
+    value = build()
+    store[key] = (source, value)
+    store.move_to_end(key)
+    while len(store) > limit:
+        store.popitem(last=False)
+    return value
+
+
+# ------------------------------------------------------------------ compact browser-side shapes
+def _json_js(value: Any) -> str:
+    """JSON that is safe to paste into an inline script (no ``</script>`` break-out)."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return (text.replace("</", "<\\/").replace("<!--", "<\\!--")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
+def _short(value: Any) -> Any:
+    """Tooltip value: numbers rounded to 3 places, missing → dash."""
+    if value is None or (isinstance(value, float) and value != value):
+        return "—"
+    return round(value, 3) if isinstance(value, float) else value
+
+
+def line_rows(features: Sequence[Dict[str, Any]], color_key: str, weight_key: str,
+              value_keys: Sequence[str] = ()) -> List[list]:
+    """GeoJSON LineString features → ``[color, weight, tooltip values | 0, [lat, lon, lat, lon, …]]`` rows."""
+    rows: List[list] = []
+    for feature in features:
+        geometry, props = feature["geometry"], feature["properties"]
+        parts = geometry["coordinates"] if geometry["type"] == "MultiLineString" else [geometry["coordinates"]]
+        values: Any = [_short(props.get(k)) for k in value_keys] if value_keys else 0
+        for part in parts:
+            flat: List[float] = []
+            for lon, lat in part:
+                flat.append(round(lat, COORD_DECIMALS))
+                flat.append(round(lon, COORD_DECIMALS))
+            rows.append([props[color_key], round(float(props[weight_key]), 2), values, flat])
+    return rows
+
+
+def point_rows(features: Sequence[Dict[str, Any]], fill_key: str, radius: Any, value_keys: Sequence[str] = (),
+               stroke_key: Optional[str] = None, stroke: str = "#000000") -> List[list]:
+    """GeoJSON Point features → ``[fill, stroke, radius, tooltip values | 0, lat, lon]`` rows."""
+    rows: List[list] = []
+    for feature in features:
+        props = feature["properties"]
+        try:
+            lon, lat = feature["geometry"]["coordinates"]
+        except (KeyError, TypeError, ValueError):
+            continue
+        r = props[radius] if isinstance(radius, str) else radius
+        values: Any = [_short(props.get(k)) for k in value_keys] if value_keys else 0
+        rows.append([props[fill_key], props[stroke_key] if stroke_key else stroke, round(float(r), 2), values,
+                     round(lat, COORD_DECIMALS), round(lon, COORD_DECIMALS)])
+    return rows
+
+
+_TOOLTIP_JS = """
+            var heads = {{ this.heads_json }};
+            var tip = {sticky: true, opacity: 0.95};
+            var tipHtml = function (layer) {
+                var h = '<table class="rgtip">';
+                for (var k = 0; k < heads.length; k++) {
+                    h += '<tr><th>' + heads[k] + '</th><td>' + layer._vals[k] + '</td></tr>';
+                }
+                return h + '</table>';
+            };
+"""
+
+
+class CompactLines(MacroElement):
+    """Thousands of coloured polylines drawn in the browser from one compact JSON array.
+
+    ``folium.GeoJson`` builds a style dict, a tooltip and a feature dict *per feature in Python* (about 0.1 ms
+    each, every rerun) and ships them as GeoJSON; here the caller serialises the rows once (and caches them) and
+    Leaflet builds the lines. Add it to a ``FeatureGroup`` — the group owns the LayerControl entry.
+    """
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function (group, rows, opacity, hover) {""" + _TOOLTIP_JS + """
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i], flat = r[3], pts = new Array(flat.length >> 1);
+                for (var j = 0; j < pts.length; j++) { pts[j] = [flat[2 * j], flat[2 * j + 1]]; }
+                var line = L.polyline(pts, {color: r[0], weight: r[1], opacity: opacity, lineCap: "round", lineJoin: "round"});
+                if (r[2]) { line._vals = r[2]; line.bindTooltip(tipHtml, tip); }
+                group.addLayer(line);
+            }
+            if (hover) {
+                group.on("mouseover", function (e) { var l = e.layer; l._w0 = l.options.weight; l.setStyle({weight: l._w0 + 3, opacity: 1}); });
+                group.on("mouseout", function (e) { var l = e.layer; l.setStyle({weight: l._w0, opacity: opacity}); });
+            }
+        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.opacity }}, {{ this.hover_js }});
+        {% endmacro %}
+        """)
+
+    def __init__(self, rows_json: str, heads: Sequence[str] = (), opacity: float = 0.8, hover: bool = False):
+        super().__init__()
+        self._name = "CompactLines"
+        self.rows_json = rows_json
+        self.heads_json = _json_js(list(heads))
+        self.opacity = float(opacity)
+        self.hover_js = "true" if hover else "false"
+
+
+class CompactPoints(MacroElement):
+    """Circle markers from one compact JSON array (see :class:`CompactLines`)."""
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function (group, rows, weight, fillOpacity) {""" + _TOOLTIP_JS + """
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                var dot = L.circleMarker([r[4], r[5]], {radius: r[2], fillColor: r[0], color: r[1], weight: weight, fillOpacity: fillOpacity});
+                if (r[3]) { dot._vals = r[3]; dot.bindTooltip(tipHtml, tip); }
+                group.addLayer(dot);
+            }
+        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.weight }}, {{ this.fill_opacity }});
+        {% endmacro %}
+        """)
+
+    def __init__(self, rows_json: str, heads: Sequence[str] = (), weight: float = 1.0, fill_opacity: float = 0.9):
+        super().__init__()
+        self._name = "CompactPoints"
+        self.rows_json = rows_json
+        self.heads_json = _json_js(list(heads))
+        self.weight = float(weight)
+        self.fill_opacity = float(fill_opacity)
+
+
+class ViewMemory(MacroElement):
+    """Remember the user's zoom/centre in the browser so rebuilding the map does not reset the view.
+
+    ``token`` identifies the centre the app chose (last pin / anchor). When the app moves that centre the stored
+    view is ignored, so adding a pin or finding an anchor still re-centres exactly as before.
+    """
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function (map) {
+            try {
+                var key = "rgv2_view", token = {{ this.token_json }};
+                var saved = JSON.parse(window.sessionStorage.getItem(key) || "null");
+                if (saved && saved.token === token) { map.setView(saved.center, saved.zoom, {animate: false}); }
+                map.on("moveend", function () {
+                    try {
+                        var c = map.getCenter();
+                        window.sessionStorage.setItem(key, JSON.stringify({token: token, center: [c.lat, c.lng], zoom: map.getZoom()}));
+                    } catch (e) {}
+                });
+            } catch (e) {}
+        })({{ this._parent.get_name() }});
+        {% endmacro %}
+        """)
+
+    def __init__(self, token: str):
+        super().__init__()
+        self._name = "ViewMemory"
+        self.token_json = _json_js(token)
+
+
+class LegendBox(MacroElement):
+    """One fixed box (bottom-left) holding the legend sections of every layer that is on."""
+
+    _template = Template("{% macro html(this, kwargs) %}{{ this.box_html }}{% endmacro %}")
+
+    def __init__(self, sections: Sequence[str]):
+        super().__init__()
+        self._name = "LegendBox"
+        self.box_html = (
+            '<div style="position:fixed; bottom:18px; left:12px; z-index:9999; max-width:250px; '
+            'background:rgba(255,255,255,0.93); border:1px solid rgba(11,11,11,0.10); '
+            'border-radius:8px; padding:8px 10px; font-size:12px; color:#0b0b0b; '
+            'box-shadow:0 1px 4px rgba(0,0,0,0.18); line-height:1.45; '
+            'font-family:system-ui, -apple-system, sans-serif;">'
+            + '<div style="height:6px;"></div>'.join(sections)
+            + "</div>"
+        )
 
 
 def _legend_swatch_row(color_css: str, label: str, extra_style: str = "") -> str:
@@ -4176,58 +4406,500 @@ def _legend_swatch_row(color_css: str, label: str, extra_style: str = "") -> str
     )
 
 
-def _add_map_legend(m: folium.Map) -> None:
-    """เพิ่มกล่อง Legend มุมล่างซ้าย อธิบายทุกเลเยอร์ที่กำลังแสดงอยู่."""
-    clrs = StateManager.get_colors()
-    rows: List[str] = []
+# ------------------------------------------------------------------ layer drawing (one function per layer)
+def _always(_ctx: Ctx) -> bool:
+    return True
 
-    if StateManager.get_isochrone_data():
-        rows.append('<div style="font-weight:600; margin-bottom:2px;">เวลาเดินทาง</div>')
-        rows.append(_legend_swatch_row(clrs["step1"], "≤ 10 นาที"))
-        rows.append(_legend_swatch_row(clrs["step2"], "≤ 20 นาที"))
-        rows.append(_legend_swatch_row(clrs["step3"], "≤ 30 นาที"))
-        rows.append(_legend_swatch_row(clrs["step4"], "> 30 นาที"))
 
-    if StateManager.get_intersection_data():
-        rows.append(_legend_swatch_row(
-            "#FFD700", "CBD Zone", "border:2px dashed #FF8C00;"
-        ))
+def draw_traffic(_ctx: Ctx) -> Any:
+    return folium.TileLayer(
+        tiles="https://mt1.google.com/vt?lyrs=h,traffic&x={x}&y={y}&z={z}",
+        attr="Google Traffic", name="Google Traffic", overlay=True,
+    )
 
-    net_data = StateManager.get_network_data()
-    if net_data and st.session_state.show_golden_spots and net_data.get("golden_spots"):
-        rows.append(_legend_swatch_row(
-            "#FFD60A", "💎 Golden Spot", "border:2px solid #8C6A00; border-radius:50%;"
-        ))
 
-    rent_data = StateManager.get_rent_data()
-    if rent_data and "error" not in rent_data and st.session_state.show_rent_rings:
-        model = rent_data["model"]
-        unit = "ดัชนี" if model["is_index"] else model["unit"]
-        rows.append(
-            '<div style="font-weight:600; margin:4px 0 2px;">Rent Gradient</div>'
-            '<div style="display:flex; align-items:center; gap:6px;">'
-            f'<span style="display:inline-block; width:56px; height:10px; border-radius:3px; '
-            f'background:linear-gradient(90deg, {RENT_RAMP[-1]}, {RENT_RAMP[0]});"></span>'
-            f'<span>CBD → ขอบ ({unit})</span></div>'
+def _wms(layers: str, name: str, opacity_key: Optional[str] = None) -> Callable[[Ctx], Any]:
+    """Longdo WMS overlay (tiles are fetched by the browser only while the layer is on)."""
+    def draw(ctx: Ctx) -> Any:
+        return folium.WmsTileLayer(
+            url=LONGDO_WMS_URL, layers=layers, name=name, fmt="image/png", transparent=True,
+            version="1.1.1", attr=f"{name} / Longdo Map", show=True,
+            opacity=float(ctx.show.get(opacity_key, 1.0)) if opacity_key else 1.0,
         )
+    return draw
 
-    if not rows:
-        return
 
-    html = (
-        '<div style="position:fixed; bottom:18px; left:12px; z-index:9999; '
-        'background:rgba(255,255,255,0.93); border:1px solid rgba(11,11,11,0.10); '
-        'border-radius:8px; padding:8px 10px; font-size:12px; color:#0b0b0b; '
-        'box-shadow:0 1px 4px rgba(0,0,0,0.18); line-height:1.45; '
-        'font-family:system-ui, -apple-system, sans-serif;">'
-        + "".join(rows)
-        + "</div>"
+def draw_anchor_boundary(ctx: Ctx) -> Any:
+    anchor = ctx.anchor
+    group = folium.FeatureGroup(name="Automated Anchor study boundary", show=True)
+    folium.Circle(anchor["study_center"], radius=anchor["study_radius_m"],
+                  color="#184f95", fill=False, tooltip="Study boundary").add_to(group)
+    return group
+
+
+def draw_evidence_zone(ctx: Ctx) -> Any:
+    evidence = ctx.evidence
+    peak = evidence["plan"].get("peak")
+    group = folium.FeatureGroup(name="Peak colour zone (ผังสีสูงสุด)", show=True)
+    zone_color = "#d62828" if not peak else "#%02x%02x%02x" % tuple(peak["rgb"])
+    for zone in evidence["plan"].get("zones", []):
+        if zone.get("polygon"):
+            folium.GeoJson(
+                {"type": "Feature", "properties": {}, "geometry": zone["polygon"]},
+                style_function=lambda _f, c=zone_color: {"color": c, "weight": 2, "fillColor": c,
+                                                         "fillOpacity": 0.25, "dashArray": "6"},
+                tooltip=f"ผังสีสูงสุด{(' ' + escape(str(peak['name']))) if peak else ''} ≈ {zone['area_km2']:.2f} ตร.กม.",
+            ).add_to(group)
+    return group
+
+
+def draw_evidence_clusters(ctx: Ctx) -> Any:
+    group = folium.FeatureGroup(name="Parcel clusters (แปลงถี่)", show=True)
+    for cluster in ctx.evidence.get("clusters", []):
+        if cluster.get("polygon"):
+            folium.GeoJson(
+                {"type": "Feature", "properties": {}, "geometry": cluster["polygon"]},
+                style_function=lambda _f, top=(cluster["rank"] == 1): {
+                    "color": "#7b2cbf", "weight": 3 if top else 1, "fillColor": "#7b2cbf",
+                    "fillOpacity": 0.45 if top else 0.2},
+                tooltip=(f"#{cluster['rank']} cluster แปลงเล็กถี่ · คะแนน {cluster['score']:.2f} · "
+                         f"{cluster['area_ha']:,.0f} เฮกตาร์"),
+            ).add_to(group)
+    return group
+
+
+def draw_rent_rings(ctx: Ctx) -> Any:
+    rings = ctx.rent["rings_geojson"]
+    ring_feats = rings.get("features") or []
+    has_nodes_label = bool(ring_feats and "nodes_label" in ring_feats[0].get("properties", {}))
+    tooltip_fields = ["band", "rent_label"]
+    tooltip_aliases = ["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"]
+    if has_nodes_label:
+        tooltip_fields.append("nodes_label")
+        tooltip_aliases.append("โหนด Network:")
+    return folium.GeoJson(
+        rings,
+        name="Rent Gradient Rings",
+        style_function=lambda x: {
+            "fillColor": x["properties"]["color"],
+            "color": x["properties"]["color"],
+            "weight": 1,
+            "fillOpacity": RENT_CONFIG["ring_fill_opacity"],
+        },
+        tooltip=folium.GeoJsonTooltip(fields=tooltip_fields, aliases=tooltip_aliases, localize=True),
     )
-    legend = MacroElement()
-    legend._template = Template(
-        "{% macro html(this, kwargs) %}" + html + "{% endmacro %}"
+
+
+def draw_rent_heat(ctx: Ctx) -> Any:
+    nodes = ctx.rent["rent_nodes_geojson"]
+    rows = lru_get(ctx.cache, ("rows", "rent_heat", id(nodes)), nodes, lambda: _json_js(
+        point_rows(nodes["features"], "color", 3, ("rent",), stroke_key="color")))
+    group = folium.FeatureGroup(name="Rent Heat (Nodes)", show=True)
+    CompactPoints(rows, heads=("ค่าเช่าคาดการณ์:",), weight=1, fill_opacity=0.85).add_to(group)
+    return group
+
+
+def draw_betweenness(ctx: Ctx) -> Any:
+    edges = ctx.net["edges"]
+    rows = lru_get(ctx.cache, ("rows", "betweenness", id(edges)), edges, lambda: _json_js(
+        line_rows(edges["features"], "color", "stroke_weight", ("betweenness",))))
+    group = folium.FeatureGroup(name="Road Betweenness", show=True)
+    CompactLines(rows, heads=("Betweenness Score:",), opacity=0.8).add_to(group)
+    return group
+
+
+def draw_closeness(ctx: Ctx) -> Any:
+    nodes = ctx.net["nodes"]
+    rows = lru_get(ctx.cache, ("rows", "closeness", id(nodes)), nodes, lambda: _json_js(
+        point_rows(nodes["features"], "color", "radius", ("closeness",), stroke="#000000")))
+    group = folium.FeatureGroup(name="Node Integration", show=True)
+    CompactPoints(rows, heads=("Integration Score:",), weight=1, fill_opacity=0.9).add_to(group)
+    return group
+
+
+def draw_golden(ctx: Ctx) -> Any:
+    return folium.GeoJson(
+        ctx.net["golden_spots_geojson"],
+        name="Golden Land Spots",
+        marker=folium.CircleMarker(),
+        style_function=lambda x: {
+            "fillColor": "#FFD60A",
+            "color": "#8C6A00",
+            "weight": 2,
+            "radius": max(5, 12 - x["properties"]["rank"]),
+            "fillOpacity": 0.85,
+        },
+        tooltip=folium.GeoJsonTooltip(fields=["rank", "score"], aliases=["Rank:", "Opportunity Score:"], localize=True),
     )
-    m.get_root().add_child(legend)
+
+
+def draw_top_node(ctx: Ctx) -> Any:
+    top = ctx.net["top_node"]
+    group = folium.FeatureGroup(name="Integration Center (จุดตรงกลางที่สุด)", show=True)
+    folium.Marker(
+        [top["lat"], top["lon"]],
+        popup=f"🏆 Center (Score: {top['score']:.4f})",
+        icon=folium.Icon(color="orange", icon="star", prefix="fa"),
+        tooltip="จุดที่อยู่ตรงกลางที่สุด",
+    ).add_to(group)
+    return group
+
+
+def draw_travel_areas(ctx: Ctx) -> Any:
+    clrs = ctx.colors
+    return folium.GeoJson(
+        ctx.iso,
+        name="Travel Areas",
+        style_function=lambda x: {
+            "fillColor": get_fill_color(x["properties"]["travel_time_minutes"], clrs),
+            "color": get_border_color(x["properties"]["original_index"]),
+            "weight": 1,
+            "fillOpacity": 0.2,
+        },
+    )
+
+
+def draw_cbd_zone(ctx: Ctx) -> Any:
+    return folium.GeoJson(
+        ctx.inter,
+        name="CBD Zone",
+        style_function=lambda _x: {
+            "fillColor": "#FFD700",
+            "color": "#FF8C00",
+            "weight": 3,
+            "fillOpacity": 0.6,
+            "dashArray": "5, 5",
+        },
+    )
+
+
+def draw_railway(_ctx: Ctx) -> Any:
+    railway_geojson = _parse_kml_to_geojson()
+    if not (railway_geojson and railway_geojson.get("features")):
+        return None
+    return folium.GeoJson(
+        railway_geojson,
+        name="แนวรถไฟเชียงของ",
+        style_function=lambda _x: {
+            "color": "#E63946",
+            "weight": 4,
+            "opacity": 0.85,
+            "dashArray": "8, 4",
+            "fillOpacity": 0,
+        },
+        tooltip="แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ",
+    )
+
+
+def draw_cbd_anchor(ctx: Ctx) -> Any:
+    """Automated anchors (composite / closeness / evidence) — or the Rent Gradient's own anchor when none."""
+    group = folium.FeatureGroup(name="CBD Anchor", show=True)
+    if ctx.anchor:
+        anchor = ctx.anchor["anchor"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor",
+            popup=folium.Popup(f"<b>Automated CBD Anchor</b><br>Score: {anchor['score']:.4f}"
+                               f"<br>Junctions / 500 m: {anchor['junction_count']}"
+                               + _stability_popup(ctx.anchor), max_width=280),
+            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
+        ).add_to(group)
+    if ctx.anchor_closeness:
+        anchor = ctx.anchor_closeness["anchor"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]],
+            tooltip="Automated CBD Anchor — Closeness 100%",
+            popup=folium.Popup(
+                f"<b>Automated CBD Anchor — Closeness 100%</b>"
+                f"<br>Closeness norm: {anchor['closeness_norm']:.6f}"
+                f"<br>Closeness: {anchor['closeness']:.8f} 1/m"
+                f"<br>Degree: {anchor['degree']} (diagnostic)"
+                f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)"
+                + _stability_popup(ctx.anchor_closeness),
+                max_width=320,
+            ),
+            icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
+        ).add_to(group)
+    if ctx.evidence:
+        anchor, confidence = ctx.evidence["evidence_anchor"], ctx.evidence["confidence"]
+        folium.Marker(
+            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor — Evidence",
+            popup=folium.Popup(
+                f"<b>Automated CBD Anchor — Evidence</b><br>Confidence: {escape(str(confidence['level']))}"
+                f"<br>Cluster score: {anchor['score']:.3f}"
+                f"<br>Parcel coverage: {anchor['coverage']:.0%}"
+                + "".join(f"<br>• {escape(str(reason))}" for reason in confidence["reasons"]), max_width=360),
+            icon=folium.Icon(color="purple", icon="star", prefix="fa"),
+        ).add_to(group)
+    if ctx.rent and not ctx.anchor:
+        rent_anchor, rent_model = ctx.rent["anchor"], ctx.rent["model"]
+        folium.Marker(
+            [rent_anchor["lat"], rent_anchor["lon"]],
+            tooltip=f"จุดยึด CBD — {escape(str(rent_anchor['source']))}",
+            popup=folium.Popup(
+                f"<b>CBD Anchor</b><br>{escape(str(rent_anchor['source']))}<br>"
+                f"R₀ = {format_rent_value(rent_model['r0'], rent_model)}",
+                max_width=260,
+            ),
+            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
+        ).add_to(group)
+    return group
+
+
+def draw_markers(ctx: Ctx) -> Any:
+    group = folium.FeatureGroup(name="หมุดของฉัน", show=True)
+    rent_model = ctx.rent["model"] if ctx.rent else None
+    rent_anchor = ctx.rent["anchor"] if ctx.rent else None
+    for i, marker in enumerate(ctx.markers):
+        active = marker.get("active", True)
+        popup_html = f"<b>จุดที่ {i+1}</b>"
+        if rent_model and rent_anchor:
+            d_km = haversine_km(rent_anchor["lat"], rent_anchor["lon"], marker["lat"], marker["lng"])
+            est = predict_rent(d_km, rent_model["r0"], rent_model["lam"])
+            popup_html += (
+                f"<br>ระยะจาก CBD: {d_km:.2f} km"
+                f"<br>ประเมิน: {format_rent_value(est, rent_model)}"
+            )
+        folium.Marker(
+            [marker["lat"], marker["lng"]],
+            popup=folium.Popup(popup_html, max_width=260),
+            icon=folium.Icon(
+                color=MARKER_COLORS[i % len(MARKER_COLORS)] if active else "gray",
+                icon="map-marker" if active else "ban",
+                prefix="fa",
+            ),
+        ).add_to(group)
+    return group
+
+
+# ------------------------------------------------------------------ legend sections
+def legend_travel_areas(ctx: Ctx) -> str:
+    clrs = ctx.colors
+    return "".join([
+        '<div style="font-weight:600; margin-bottom:2px;">เวลาเดินทาง</div>',
+        _legend_swatch_row(clrs["step1"], "≤ 10 นาที"),
+        _legend_swatch_row(clrs["step2"], "≤ 20 นาที"),
+        _legend_swatch_row(clrs["step3"], "≤ 30 นาที"),
+        _legend_swatch_row(clrs["step4"], "> 30 นาที"),
+    ])
+
+
+def legend_cbd_zone(_ctx: Ctx) -> str:
+    return _legend_swatch_row("#FFD700", "CBD Zone", "border:2px dashed #FF8C00;")
+
+
+def legend_golden(ctx: Ctx) -> str:
+    if not (ctx.net and ctx.net.get("golden_spots")):
+        return ""
+    return _legend_swatch_row("#FFD60A", "💎 Golden Spot", "border:2px solid #8C6A00; border-radius:50%;")
+
+
+def legend_rent_rings(ctx: Ctx) -> str:
+    model = ctx.rent["model"]
+    unit = "ดัชนี" if model["is_index"] else model["unit"]
+    return (
+        '<div style="font-weight:600; margin:4px 0 2px;">Rent Gradient</div>'
+        '<div style="display:flex; align-items:center; gap:6px;">'
+        f'<span style="display:inline-block; width:56px; height:10px; border-radius:3px; '
+        f'background:linear-gradient(90deg, {RENT_RAMP[-1]}, {RENT_RAMP[0]});"></span>'
+        f'<span>CBD → ขอบ ({escape(str(unit))})</span></div>'
+    )
+
+
+# ------------------------------------------------------------------ layer options (widgets under a checkbox)
+def _options_cityplan(_ctx: Ctx, locked: bool) -> None:
+    st.slider("ความโปร่งใส (ผังเมือง)", 0.2, 1.0, key="cityplan_opacity", disabled=locked)
+
+
+# ------------------------------------------------------------------ the registry (bottom → top)
+LAYERS: Tuple[Layer, ...] = (
+    # tile overlays first: the browser always paints tiles below vector layers
+    Layer("traffic", "Google Traffic", "บริบท & overlay", draw_traffic, _always, show_key="show_traffic",
+          label="🚦 การจราจร (Google Traffic)"),
+    Layer("wms_population", "ความหนาแน่นประชากร", "บริบท & overlay",
+          _wms("thailand_population", "ความหนาแน่นประชากร"), _always, show_key="show_population",
+          label="👥 ความหนาแน่นประชากร"),
+    Layer("wms_cityplan", "ผังเมืองรวม", "บริบท & overlay", _wms("cityplan_dpt", "ผังเมืองรวม", "cityplan_opacity"),
+          _always, show_key="show_cityplan", label="🏙️ ผังเมืองรวม", options=_options_cityplan),
+    Layer("wms_dol", "รูปแปลงที่ดิน", "บริบท & overlay", _wms("dol", "รูปแปลงที่ดิน"), _always,
+          show_key="show_dol", label="📜 รูปแปลงที่ดิน"),
+    # automated-anchor details: small, unticked by default — they stay on the map's LayerControl (start_hidden)
+    # exactly as before, and the checkbox now also decides whether they start visible
+    Layer("anchor_boundary", "Automated Anchor study boundary", "Automated Anchor", draw_anchor_boundary,
+          lambda c: bool(c.anchor), show_key="show_anchor_boundary", label="⭕ ขอบเขตพื้นที่ศึกษา (Anchor)",
+          requires="ค้นหา CBD Anchor อัตโนมัติก่อน", start_hidden=True),
+    Layer("evidence_zone", "Peak colour zone (ผังสีสูงสุด)", "Automated Anchor", draw_evidence_zone,
+          lambda c: bool(c.evidence), show_key="show_evidence_zone", label="🟥 โซนผังสีสูงสุด (Evidence)",
+          requires="เปิด Evidence แล้วค้นหา Anchor", start_hidden=True),
+    Layer("evidence_clusters", "Parcel clusters (แปลงถี่)", "Automated Anchor", draw_evidence_clusters,
+          lambda c: bool(c.evidence), show_key="show_evidence_clusters", label="🟪 cluster แปลงถี่ (Evidence)",
+          requires="เปิด Evidence แล้วค้นหา Anchor", start_hidden=True),
+    Layer("rent_rings", "Rent Gradient Rings", "Rent Gradient", draw_rent_rings,
+          lambda c: bool(c.rent and c.rent.get("rings_geojson")), show_key="show_rent_rings",
+          label="🌈 Rent Rings (วงแหวนราคา)", requires="คำนวณ Rent Gradient ก่อน",
+          legend=legend_rent_rings, legend_rank=60),
+    Layer("rent_heat", "Rent Heat (Nodes)", "Rent Gradient", draw_rent_heat,
+          lambda c: bool(c.rent and c.rent.get("rent_nodes_geojson")), show_key="show_rent_nodes",
+          label="🔥 Rent Heat (โหนดถนน)", hint="Rent Heat ต้องรัน Network Analysis ก่อน",
+          requires="รัน Network Analysis แล้วคำนวณ Rent Gradient"),
+    Layer("betweenness", "Road Betweenness", "โครงข่ายถนน", draw_betweenness,
+          lambda c: bool(c.net and c.net.get("edges")), show_key="show_betweenness",
+          label="Show Roads (Betweenness)", hint="🔴: ทางผ่านหลัก (High Traffic Flow)",
+          requires="รัน Network Analysis ก่อน"),
+    Layer("closeness", "Node Integration", "โครงข่ายถนน", draw_closeness,
+          lambda c: bool(c.net and c.net.get("nodes")), show_key="show_closeness",
+          label="Show Nodes (Integration)", hint="⚫: จุดเข้าถึงง่าย (Central Hub)",
+          requires="รัน Network Analysis ก่อน"),
+    Layer("golden", "Golden Land Spots", "โครงข่ายถนน", draw_golden,
+          lambda c: bool(c.net and c.net.get("golden_spots_geojson")), show_key="show_golden_spots",
+          label="Show Golden Spots", hint="💎: จุดทำเลที่ดินทอง (คะแนนรวมสูง)",
+          requires="รัน Network Analysis ก่อน", legend=legend_golden, legend_rank=40),
+    Layer("travel_areas", "Travel Areas", "โครงข่ายถนน", draw_travel_areas, lambda c: bool(c.iso),
+          legend=legend_travel_areas, legend_rank=10),
+    Layer("cbd_zone", "CBD Zone", "โครงข่ายถนน", draw_cbd_zone, lambda c: bool(c.inter),
+          legend=legend_cbd_zone, legend_rank=20),
+    Layer("railway", "แนวรถไฟเชียงของ", "บริบท & overlay", draw_railway, _always, show_key="show_railway",
+          label="🚂 แนวรถไฟเชียงของ"),
+    Layer("top_node", "Integration Center (จุดตรงกลางที่สุด)", "โครงข่ายถนน", draw_top_node,
+          lambda c: bool(c.net and c.net.get("top_node"))),
+    Layer("cbd_anchor", "CBD Anchor", "Automated Anchor", draw_cbd_anchor,
+          lambda c: bool(c.anchor or c.anchor_closeness or c.evidence or c.rent)),
+    Layer("markers", "หมุดของฉัน", "บริบท & overlay", draw_markers, lambda c: bool(c.markers)),
+)
+
+SHOW_KEYS: Tuple[str, ...] = tuple(layer.show_key for layer in LAYERS if layer.show_key) + (
+    "cityplan_opacity", "map_style_name")
+
+
+def build_ctx() -> Ctx:
+    """Read the session once and freeze what the layers need."""
+    state = st.session_state
+    markers = StateManager.get_markers()
+    net = StateManager.get_network_data()
+    rent = StateManager.get_rent_data()
+    automated = state.get(StateManager.K_AUTO_ANCHOR)
+    closeness = state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
+    evidence = state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
+    if not (evidence and evidence.get("schema") == EVIDENCE_SCHEMA and evidence.get("evidence_anchor")):
+        evidence = None
+    if markers:
+        center = (markers[-1]["lat"], markers[-1]["lng"])
+    else:
+        center = (DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"])
+    if automated:
+        center = (automated["anchor"]["lat"], automated["anchor"]["lon"])
+    elif closeness:
+        center = (closeness["anchor"]["lat"], closeness["anchor"]["lon"])
+    show = {key: state.get(key, StateManager._DEFAULTS.get(key)) for key in SHOW_KEYS}
+    if show["map_style_name"] not in MAP_STYLES:
+        show["map_style_name"] = next(iter(MAP_STYLES))
+    cache = state.get("layer_cache")
+    if cache is None:
+        cache = state["layer_cache"] = OrderedDict()
+    return Ctx(
+        markers=markers, colors=StateManager.get_colors(), iso=StateManager.get_isochrone_data(),
+        inter=StateManager.get_intersection_data(),
+        net=net if net and "error" not in net else None,
+        rent=rent if rent and "error" not in rent else None,
+        anchor=automated, anchor_closeness=closeness, evidence=evidence,
+        show=show, center=center, cache=cache,
+    )
+
+
+def render_layers(ctx: Ctx, m: Any, layers: Optional[Sequence[Layer]] = None) -> Tuple[List[Layer], List[str]]:
+    """Draw every enabled layer that has data onto ``m`` (bottom → top). One failing layer never blanks the map.
+
+    Returns the layers that were drawn and one warning per layer that could not be.
+    """
+    drawn: List[Layer] = []
+    warnings: List[str] = []
+    for layer in (LAYERS if layers is None else layers):
+        visible = not layer.show_key or bool(ctx.show.get(layer.show_key))
+        if not visible and not layer.start_hidden:
+            continue
+        try:
+            if not layer.available(ctx):
+                continue
+            element = layer.draw(ctx)          # built completely first …
+            if element is None:
+                continue
+            if not visible:
+                element.show = False           # small layers the old map kept as unticked LayerControl entries
+            element.add_to(m)                  # … then attached, so a failure leaves nothing half-drawn
+        except Exception as exc:
+            warnings.append(f"{layer.title}: {type(exc).__name__}: {exc}")
+            continue
+        if visible:
+            drawn.append(layer)
+    return drawn, warnings
+
+
+def legend_stack(ctx: Ctx, drawn: Sequence[Layer]) -> Optional[Any]:
+    """One legend box for the layers that were drawn (``None`` when there is nothing to explain)."""
+    sections: List[str] = []
+    for layer in sorted((l for l in drawn if l.legend is not None), key=lambda l: l.legend_rank):
+        try:
+            html = layer.legend(ctx)
+        except Exception:
+            continue                           # a legend is never worth losing the map for
+        if html:
+            sections.append(html)
+    return LegendBox(sections) if sections else None
+
+
+def build_base_map(ctx: Ctx) -> Any:
+    """Tiles + survey tools. Layers, view memory, layer control and legend are added by ``render_map``."""
+    style = MAP_STYLES[ctx.show["map_style_name"]]
+    m = folium.Map(
+        location=list(ctx.center),
+        zoom_start=14,
+        tiles=style["tiles"],
+        attr=style["attr"],
+        prefer_canvas=True,               # thousands of road segments: canvas, not one SVG node each
+        control_scale=True,
+    )
+    header = m.get_root().header
+    header.add_child(folium.Element(TOOLTIP_STYLE))
+    if style["tiles"] is None:
+        header.add_child(folium.Element("<style>.leaflet-container{background:#000 !important;}</style>"))
+    # ---- เครื่องมือสำรวจทำเล ----
+    Fullscreen(position="topleft").add_to(m)
+    MeasureControl(
+        position="topleft",
+        primary_length_unit="kilometers",
+        secondary_length_unit="meters",
+        primary_area_unit="sqmeters",
+    ).add_to(m)
+    MousePosition(
+        position="bottomright",
+        separator=" , ",
+        num_digits=5,
+        prefix="พิกัด:",
+    ).add_to(m)
+    return m
+
+
+def render_map(ctx: Ctx) -> Optional[Dict[str, Any]]:
+    """Build and display the Folium map. Returns the ``st_folium`` output dict."""
+    m = build_base_map(ctx)
+    drawn, warnings = render_layers(ctx, m)
+    if REMEMBER_VIEW:
+        ViewMemory(f"{ctx.center[0]:.5f},{ctx.center[1]:.5f}").add_to(m)
+    folium.LayerControl().add_to(m)
+    legend = legend_stack(ctx, drawn)
+    if legend is not None:
+        m.get_root().add_child(legend)
+    # returned_objects จำกัดเฉพาะ last_clicked → เลื่อน/ซูมแผนที่ไม่ trigger
+    # Streamlit rerun ทั้งหน้า (เร็วขึ้นมากบน Streamlit Cloud)
+    output = st_folium(
+        m,
+        height=MAP_HEIGHT_PX,
+        use_container_width=True,
+        key="main_map",
+        returned_objects=["last_clicked"],
+    )
+    for warning in warnings:
+        st.warning(f"⚠️ แสดงชั้นนี้ไม่ได้ — {warning}")
+    return output
 
 
 def _render_sidebar_config_section(locked: bool) -> None:
@@ -4481,13 +5153,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
 
-        st.markdown("##### Layer Controls")
-        st.checkbox("Show Roads (Betweenness)", key="show_betweenness", disabled=locked)
-        st.caption("🔴: ทางผ่านหลัก (High Traffic Flow)")
-        st.checkbox("Show Nodes (Integration)", key="show_closeness", disabled=locked)
-        st.caption("⚫: จุดเข้าถึงง่าย (Central Hub)")
-        st.checkbox("Show Golden Spots", key="show_golden_spots", disabled=locked)
-        st.caption("💎: จุดทำเลที่ดินทอง (คะแนนรวมสูง)")
+        st.caption("เปิด/ปิดชั้น Betweenness · Nodes · Golden Spots ที่แผง ⑥ ชั้นแผนที่")
 
     return do_network
 
@@ -4846,10 +5512,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
         st.text_input("หน่วยราคา", key="rent_unit_label", disabled=locked)
 
-        # ---- Layer toggles ----
-        st.checkbox("🌈 Rent Rings (วงแหวนราคา)", key="show_rent_rings", disabled=locked)
-        st.checkbox("🔥 Rent Heat (โหนดถนน)", key="show_rent_nodes", disabled=locked)
-        st.caption("Rent Heat ต้องรัน Network Analysis ก่อน")
+        st.caption("เปิด/ปิด Rent Rings · Rent Heat ที่แผง ⑥ ชั้นแผนที่ (Rent Heat ต้องรัน Network Analysis ก่อน)")
 
         do_rent: bool = st.button(
             "🧮 คำนวณ Rent Gradient",
@@ -4899,41 +5562,52 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
     return do_rent
 
 
-def _render_sidebar_map_settings(locked: bool) -> None:
-    """Map & Layer settings expander."""
-    with st.expander("⚙️ ตั้งค่าแผนที่ & Layers", expanded=True):
+def _render_sidebar_isochrone_settings(locked: bool) -> None:
+    """Travel mode + minutes for step ① (moved here from the old map-settings panel)."""
+    st.markdown("##### 🚗 การเดินทาง (Isochrone)")
+    st.selectbox(
+        "โหมด",
+        list(TRAVEL_MODE_NAMES.keys()),
+        format_func=TRAVEL_MODE_NAMES.get,
+        key="travel_mode",
+        disabled=locked,
+    )
+    st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
+
+
+def _layer_available(layer: Layer, ctx: Ctx) -> bool:
+    try:
+        return bool(layer.available(ctx))
+    except Exception:
+        return False
+
+
+def _render_sidebar_layers_panel(ctx: Ctx, locked: bool) -> None:
+    """⑥ Every layer checkbox in one place, generated from ``LAYERS`` (same ``show_*`` keys as before)."""
+    with st.expander("🗺️ ⑥ ชั้นแผนที่ (Layers)", expanded=True):
         st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name", disabled=locked)
-        st.checkbox("🚦 การจราจร (Google Traffic)", key="show_traffic", disabled=locked)
-        st.checkbox("👥 ความหนาแน่นประชากร", key="show_population", disabled=locked)
-
-        c1, c2 = st.columns([0.65, 0.35])
-        c1.checkbox("🏙️ ผังเมืองรวม", key="show_cityplan", disabled=locked)
-        if st.session_state.show_cityplan:
-            c2.slider(
-                "Op.", 0.2, 1.0, key="cityplan_opacity", label_visibility="collapsed", disabled=locked
-            )
-
-        st.checkbox("📜 รูปแปลงที่ดิน", key="show_dol", disabled=locked)
-        st.checkbox("🚂 แนวรถไฟเชียงของ", key="show_railway", disabled=locked)
-
-        st.markdown("##### 🚗 การเดินทาง (Isochrone)")
-        st.selectbox(
-            "โหมด",
-            list(TRAVEL_MODE_NAMES.keys()),
-            format_func=TRAVEL_MODE_NAMES.get,
-            key="travel_mode",
-            disabled=locked,
-        )
-        st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
+        for group in PANEL_GROUPS:
+            rows = [layer for layer in LAYERS if layer.group == group and layer.show_key]
+            if not rows:
+                continue
+            st.markdown(f"**{group}**")
+            for layer in rows:
+                st.checkbox(layer.label or layer.title, key=layer.show_key, disabled=locked)
+                if layer.hint:
+                    st.caption(layer.hint)
+                if layer.requires and not _layer_available(layer, ctx):
+                    st.caption(f"⏳ ยังไม่มีข้อมูล — {layer.requires}")
+                if layer.options is not None and st.session_state.get(layer.show_key):
+                    layer.options(ctx, locked)
 
 
-def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
+def render_sidebar() -> Dict[str, Any]:
     """
-    Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
-    ① ปักหมุด → ② Isochrone CBD → ③ Network → ④ Rent Gradient → ตั้งค่าแผนที่
+    Orchestrate the sidebar in pipeline order:
+    ① จุดเริ่ม + Isochrone → ② Network → ③ Anchor (กำหนดพื้นที่ศึกษา) → ⑤ Rent Gradient
+    (⑥ ชั้นแผนที่ is drawn by ``main`` after the stages ran, so it can show what has data).
 
-    Returns:
-        ``(do_calculate, do_network, do_rent, do_anchor, active_markers_list)``
+    Returns the user's intents: ``calc / network / anchor / rent`` are True for the button that was pressed.
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -4946,6 +5620,7 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
 
         active_list = _render_sidebar_marker_list(ui_locked)
+        _render_sidebar_isochrone_settings(ui_locked)
 
         do_calc: bool = st.button(
             "🧩 ① คำนวณหา Isochrone CBD",
@@ -4958,13 +5633,14 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         do_network = _render_sidebar_network_panel(ui_locked)
         st.markdown("---")
 
+        do_anchor = _render_sidebar_anchor_panel(ui_locked)
+        st.markdown("---")
+
         do_rent = _render_sidebar_rent_panel(ui_locked)
         st.markdown("---")
 
-        _render_sidebar_map_settings(ui_locked)
-        do_anchor = _render_sidebar_anchor_panel(ui_locked)
-
-    return do_calc, do_network, do_rent, do_anchor, active_list
+    return {"calc": do_calc, "network": do_network, "anchor": do_anchor, "rent": do_rent,
+            "active": active_list, "locked": ui_locked}
 
 
 def _stability_popup(result: Dict[str, Any]) -> str:
@@ -4973,356 +5649,6 @@ def _stability_popup(result: Dict[str, Any]) -> str:
         return ""
     return (f"<br>Stability: {stability['level']} "
             f"(max drift {stability['max_drift_m']:.0f} m, indicative)")
-
-
-def render_map() -> Optional[Dict[str, Any]]:
-    """Build and display the Folium map. Returns the ``st_folium`` output dict."""
-    style_conf = MAP_STYLES[StateManager.get_map_style_name()]
-    markers = StateManager.get_markers()
-    center = (
-        [markers[-1]["lat"], markers[-1]["lng"]]
-        if markers
-        else [DEFAULT_CONFIG["LAT"], DEFAULT_CONFIG["LON"]]
-    )
-    automated = st.session_state.get(StateManager.K_AUTO_ANCHOR)
-    automated_closeness = st.session_state.get(StateManager.K_AUTO_ANCHOR_CLOSENESS)
-    if automated:
-        center = [automated["anchor"]["lat"], automated["anchor"]["lon"]]
-    elif automated_closeness:
-        center = [automated_closeness["anchor"]["lat"], automated_closeness["anchor"]["lon"]]
-
-    m = folium.Map(
-        location=center,
-        zoom_start=14,
-        tiles=style_conf["tiles"],
-        attr=style_conf["attr"],
-    )
-    if automated:
-        anchor = automated["anchor"]
-        folium.Marker(
-            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor",
-            popup=folium.Popup(f"<b>Automated CBD Anchor</b><br>Score: {anchor['score']:.4f}"
-                               f"<br>Junctions / 500 m: {anchor['junction_count']}"
-                               + _stability_popup(automated), max_width=280),
-            icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
-        ).add_to(m)
-        boundary_layer = folium.FeatureGroup(name="Automated Anchor study boundary", show=False)
-        folium.Circle(automated["study_center"], radius=automated["study_radius_m"],
-                      color="#184f95", fill=False, tooltip="Study boundary").add_to(boundary_layer)
-        boundary_layer.add_to(m)
-
-    if automated_closeness:
-        anchor = automated_closeness["anchor"]
-        folium.Marker(
-            [anchor["lat"], anchor["lon"]],
-            tooltip="Automated CBD Anchor — Closeness 100%",
-            popup=folium.Popup(
-                f"<b>Automated CBD Anchor — Closeness 100%</b>"
-                f"<br>Closeness norm: {anchor['closeness_norm']:.6f}"
-                f"<br>Closeness: {anchor['closeness']:.8f} 1/m"
-                f"<br>Degree: {anchor['degree']} (diagnostic)"
-                f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)"
-                + _stability_popup(automated_closeness),
-                max_width=320,
-            ),
-            icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
-        ).add_to(m)
-
-    evidence = st.session_state.get(StateManager.K_AUTO_ANCHOR_EVIDENCE)
-    if evidence and evidence.get("schema") == EVIDENCE_SCHEMA and evidence.get("evidence_anchor"):
-        anchor, confidence = evidence["evidence_anchor"], evidence["confidence"]
-        folium.Marker(
-            [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor — Evidence",
-            popup=folium.Popup(
-                f"<b>Automated CBD Anchor — Evidence</b><br>Confidence: {confidence['level']}"
-                f"<br>Cluster score: {anchor['score']:.3f}"
-                f"<br>Parcel coverage: {anchor['coverage']:.0%}"
-                + "".join(f"<br>• {reason}" for reason in confidence["reasons"]), max_width=360),
-            icon=folium.Icon(color="purple", icon="star", prefix="fa"),
-        ).add_to(m)
-        peak = evidence["plan"].get("peak")
-        zone_layer = folium.FeatureGroup(name="Peak colour zone (ผังสีสูงสุด)", show=False)
-        zone_color = "#d62828" if not peak else "#%02x%02x%02x" % tuple(peak["rgb"])
-        for zone in evidence["plan"].get("zones", []):
-            if zone.get("polygon"):
-                folium.GeoJson(
-                    {"type": "Feature", "properties": {}, "geometry": zone["polygon"]},
-                    style_function=lambda _f, c=zone_color: {"color": c, "weight": 2, "fillColor": c,
-                                                             "fillOpacity": 0.25, "dashArray": "6"},
-                    tooltip=f"ผังสีสูงสุด{(' ' + peak['name']) if peak else ''} ≈ {zone['area_km2']:.2f} ตร.กม.",
-                ).add_to(zone_layer)
-        zone_layer.add_to(m)
-        cluster_layer = folium.FeatureGroup(name="Parcel clusters (แปลงถี่)", show=False)
-        for cluster in evidence.get("clusters", []):
-            if cluster.get("polygon"):
-                folium.GeoJson(
-                    {"type": "Feature", "properties": {}, "geometry": cluster["polygon"]},
-                    style_function=lambda _f, top=(cluster["rank"] == 1): {
-                        "color": "#7b2cbf", "weight": 3 if top else 1, "fillColor": "#7b2cbf",
-                        "fillOpacity": 0.45 if top else 0.2},
-                    tooltip=(f"#{cluster['rank']} cluster แปลงเล็กถี่ · คะแนน {cluster['score']:.2f} · "
-                             f"{cluster['area_ha']:,.0f} เฮกตาร์"),
-                ).add_to(cluster_layer)
-        cluster_layer.add_to(m)
-
-    # ---- เครื่องมือสำรวจทำเล ----
-    Fullscreen(position="topleft").add_to(m)
-    MeasureControl(
-        position="topleft",
-        primary_length_unit="kilometers",
-        secondary_length_unit="meters",
-        primary_area_unit="sqmeters",
-    ).add_to(m)
-    MousePosition(
-        position="bottomright",
-        separator=" , ",
-        num_digits=5,
-        prefix="พิกัด:",
-    ).add_to(m)
-
-    # ---- Traffic overlay ----
-    if st.session_state.show_traffic:
-        folium.TileLayer(
-            tiles="https://mt1.google.com/vt?lyrs=h,traffic&x={x}&y={y}&z={z}",
-            attr="Google Traffic",
-            name="Google Traffic",
-            overlay=True,
-        ).add_to(m)
-
-    # ---- Rent Gradient Layers (วาดก่อนเพื่อให้อยู่ใต้เลเยอร์วิเคราะห์อื่น) ----
-    rent_data = StateManager.get_rent_data()
-    rent_model = None
-    rent_anchor = None
-    if rent_data and "error" not in rent_data:
-        rent_model = rent_data["model"]
-        rent_anchor = rent_data["anchor"]
-
-        if st.session_state.show_rent_rings and rent_data.get("rings_geojson"):
-            ring_feats = rent_data["rings_geojson"].get("features") or []
-            has_nodes_label = bool(
-                ring_feats and "nodes_label" in ring_feats[0].get("properties", {})
-            )
-            tooltip_fields = ["band", "rent_label"]
-            tooltip_aliases = ["ระยะจาก CBD:", "ค่าเช่าคาดการณ์:"]
-            if has_nodes_label:
-                tooltip_fields.append("nodes_label")
-                tooltip_aliases.append("โหนด Network:")
-            folium.GeoJson(
-                rent_data["rings_geojson"],
-                name="Rent Gradient Rings",
-                style_function=lambda x: {
-                    "fillColor": x["properties"]["color"],
-                    "color": x["properties"]["color"],
-                    "weight": 1,
-                    "fillOpacity": RENT_CONFIG["ring_fill_opacity"],
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=tooltip_fields,
-                    aliases=tooltip_aliases,
-                    localize=True,
-                ),
-            ).add_to(m)
-
-        if st.session_state.show_rent_nodes and rent_data.get("rent_nodes_geojson"):
-            folium.GeoJson(
-                rent_data["rent_nodes_geojson"],
-                name="Rent Heat (Nodes)",
-                marker=folium.CircleMarker(),
-                style_function=lambda x: {
-                    "fillColor": x["properties"]["color"],
-                    "color": x["properties"]["color"],
-                    "weight": 1,
-                    "radius": 3,
-                    "fillOpacity": 0.85,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["rent"],
-                    aliases=["ค่าเช่าคาดการณ์:"],
-                    localize=True,
-                ),
-            ).add_to(m)
-
-        # Automated marker is already present, even when Rent layers are hidden.
-        if not automated:
-            folium.Marker(
-                [rent_anchor["lat"], rent_anchor["lon"]],
-                tooltip=f"จุดยึด CBD — {rent_anchor['source']}",
-                popup=folium.Popup(
-                    f"<b>CBD Anchor</b><br>{rent_anchor['source']}<br>"
-                    f"R₀ = {format_rent_value(rent_model['r0'], rent_model)}",
-                    max_width=260,
-                ),
-                icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
-            ).add_to(m)
-
-    # ---- Network Analysis Layers ----
-    net_data = StateManager.get_network_data()
-    if net_data and "error" not in net_data:
-        # Edges (Betweenness)
-        if st.session_state.show_betweenness and net_data.get("edges"):
-            folium.GeoJson(
-                net_data["edges"],
-                name="Road Betweenness",
-                style_function=lambda x: {
-                    "color": x["properties"]["color"],
-                    "weight": x["properties"]["stroke_weight"],
-                    "opacity": 0.8,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["betweenness"],
-                    aliases=["Betweenness Score:"],
-                    localize=True,
-                ),
-            ).add_to(m)
-
-        # Nodes (Closeness)
-        if st.session_state.show_closeness and net_data.get("nodes"):
-            folium.GeoJson(
-                net_data["nodes"],
-                name="Node Integration",
-                marker=folium.CircleMarker(),
-                style_function=lambda x: {
-                    "fillColor": x["properties"]["color"],
-                    "color": "#000000",
-                    "weight": 1,
-                    "radius": x["properties"]["radius"],
-                    "fillOpacity": 0.9,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["closeness"],
-                    aliases=["Integration Score:"],
-                    localize=True,
-                ),
-            ).add_to(m)
-
-        # Golden Spots layer
-        if st.session_state.show_golden_spots and net_data.get("golden_spots_geojson"):
-            folium.GeoJson(
-                net_data["golden_spots_geojson"],
-                name="Golden Land Spots",
-                marker=folium.CircleMarker(),
-                style_function=lambda x: {
-                    "fillColor": "#FFD60A",
-                    "color": "#8C6A00",
-                    "weight": 2,
-                    "radius": max(5, 12 - x["properties"]["rank"]),
-                    "fillOpacity": 0.85,
-                },
-                tooltip=folium.GeoJsonTooltip(
-                    fields=["rank", "score"],
-                    aliases=["Rank:", "Opportunity Score:"],
-                    localize=True,
-                ),
-            ).add_to(m)
-
-        # Top Node marker
-        if net_data.get("top_node"):
-            top = net_data["top_node"]
-            folium.Marker(
-                [top["lat"], top["lon"]],
-                popup=f"🏆 Center (Score: {top['score']:.4f})",
-                icon=folium.Icon(color="orange", icon="star", prefix="fa"),
-                tooltip="จุดที่อยู่ตรงกลางที่สุด",
-            ).add_to(m)
-
-    # ---- Isochrone polygons ----
-    iso_data = StateManager.get_isochrone_data()
-    if iso_data:
-        clrs = StateManager.get_colors()
-        folium.GeoJson(
-            iso_data,
-            name="Travel Areas",
-            style_function=lambda x: {
-                "fillColor": get_fill_color(
-                    x["properties"]["travel_time_minutes"], clrs
-                ),
-                "color": get_border_color(x["properties"]["original_index"]),
-                "weight": 1,
-                "fillOpacity": 0.2,
-            },
-        ).add_to(m)
-
-    # ---- CBD intersection ----
-    inter_data = StateManager.get_intersection_data()
-    if inter_data:
-        folium.GeoJson(
-            inter_data,
-            name="CBD Zone",
-            style_function=lambda _x: {
-                "fillColor": "#FFD700",
-                "color": "#FF8C00",
-                "weight": 3,
-                "fillOpacity": 0.6,
-                "dashArray": "5, 5",
-            },
-        ).add_to(m)
-
-    # ---- WMS Layers ----
-    _add_wms_layer(
-        m, "thailand_population", "ความหนาแน่นประชากร",
-        st.session_state.show_population,
-    )
-    _add_wms_layer(
-        m, "cityplan_dpt", "ผังเมืองรวม",
-        st.session_state.show_cityplan,
-        opacity=st.session_state.cityplan_opacity,
-    )
-    _add_wms_layer(
-        m, "dol", "รูปแปลงที่ดิน", st.session_state.show_dol
-    )
-
-    # ---- Railway KML Layer ----
-    if st.session_state.show_railway:
-        railway_geojson = _parse_kml_to_geojson()
-        if railway_geojson and railway_geojson.get("features"):
-            folium.GeoJson(
-                railway_geojson,
-                name="แนวรถไฟเชียงของ",
-                style_function=lambda _x: {
-                    "color": "#E63946",
-                    "weight": 4,
-                    "opacity": 0.85,
-                    "dashArray": "8, 4",
-                    "fillOpacity": 0,
-                },
-                tooltip="แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ",
-            ).add_to(m)
-
-    # ---- Markers ----
-    for i, marker in enumerate(markers):
-        active = marker.get("active", True)
-        popup_html = f"<b>จุดที่ {i+1}</b>"
-        if rent_model and rent_anchor:
-            d_km = haversine_km(
-                rent_anchor["lat"], rent_anchor["lon"], marker["lat"], marker["lng"]
-            )
-            est = predict_rent(d_km, rent_model["r0"], rent_model["lam"])
-            popup_html += (
-                f"<br>ระยะจาก CBD: {d_km:.2f} km"
-                f"<br>ประเมิน: {format_rent_value(est, rent_model)}"
-            )
-        folium.Marker(
-            [marker["lat"], marker["lng"]],
-            popup=folium.Popup(popup_html, max_width=260),
-            icon=folium.Icon(
-                color=MARKER_COLORS[i % len(MARKER_COLORS)] if active else "gray",
-                icon="map-marker" if active else "ban",
-                prefix="fa",
-            ),
-        ).add_to(m)
-
-    folium.LayerControl().add_to(m)
-    _add_map_legend(m)
-
-    # returned_objects จำกัดเฉพาะ last_clicked → เลื่อน/ซูมแผนที่ไม่ trigger
-    # Streamlit rerun ทั้งหน้า (เร็วขึ้นมากบน Streamlit Cloud)
-    return st_folium(
-        m,
-        height=900,
-        use_container_width=True,
-        key="main_map",
-        returned_objects=["last_clicked"],
-    )
 
 
 def render_header() -> None:
@@ -6143,6 +6469,21 @@ def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None
 # SECTION 7: MAIN EXECUTION
 # ============================================================================
 
+# stage table: the sidebar button that was pressed → the orchestrator it runs (order = pipeline order)
+STAGES: Tuple[Tuple[str, Callable[[Dict[str, Any]], None]], ...] = (
+    ("calc", lambda intents: perform_calculation(intents["active"])),
+    ("network", lambda intents: perform_network_analysis()),
+    ("rent", lambda intents: perform_rent_gradient()),
+    ("anchor", lambda intents: perform_automated_anchor()),
+)
+
+
+def run_stages(intents: Dict[str, Any]) -> None:
+    for key, run in STAGES:
+        if intents.get(key):
+            run(intents)
+
+
 def main() -> None:
     st.set_page_config(**PAGE_CONFIG)
 
@@ -6157,33 +6498,21 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # 1. Initialize State
     StateManager.initialize()
+    skipped = st.session_state.pop("_import_skipped", None)
+    if skipped:
+        st.warning("ข้ามค่าที่ไม่ถูกต้องตอนนำเข้า config: " + ", ".join(skipped))
 
-    # 2. Render Sidebar → capture user intents
-    do_calc, do_net, do_rent, do_anchor, active_list = render_sidebar()
-
-    # 3. Execute Business Logic (based on user intents)
-    if do_calc:
-        perform_calculation(active_list)
-
-    if do_net:
-        perform_network_analysis()
-
-    if do_rent:
-        perform_rent_gradient()
-
-    if do_anchor:
-        perform_automated_anchor()
-
-    # 4. Render Header + Metrics + Map + Analytics
+    intents = render_sidebar()                  # 1. sidebar → what the user asked for
+    run_stages(intents)                         # 2. run it (cached, error-isolated orchestrators)
+    ctx = build_ctx()                           # 3. one read-only snapshot for the layers
+    with st.sidebar:
+        _render_sidebar_layers_panel(ctx, intents["locked"])
     render_header()
     render_metrics_row()
-    map_output = render_map()
+    map_output = render_map(ctx)
     render_analytics_panel()
-
-    # 5. Handle Map Click → mutate state & rerun
-    handle_map_click(map_output, st.session_state[StateManager.K_UI_LOCKED])
+    handle_map_click(map_output, intents["locked"])
 
 
 if __name__ == "__main__":
