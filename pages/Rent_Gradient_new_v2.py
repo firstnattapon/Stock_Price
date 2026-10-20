@@ -1,14 +1,25 @@
 """
 Rent Gradient v2 — ชั้นแผนที่ (Layers): Isochrone · CBD · Network · Space Syntax · Anchor · Rent Gradient
-==========================================================================================================
+=====================================================================================================
 หน้าเดียวที่รวมทุกฟังก์ชันของ ``Rent_Gradient.py`` กับ Space Syntax จาก ``Rent_Gradient_new.py``
-โดยจัดเป็น "ชั้นแผนที่" บนแผนที่เดียว (เรียบง่าย · เสถียร · เร็ว) — ดูรายละเอียดที่ docs/rent-gradient-new-v2.md
+โดยจัดเป็น "ชั้นแผนที่" บนแผนที่เดียว — เรียบง่าย · เสถียร · เร็ว (รายละเอียด: docs/rent-gradient-new-v2.md)
 
-อ่านไฟล์นี้อย่างไร: โค้ดแบ่งเป็น 3 โซน
-  ENGINE  ฟังก์ชันคำนวณล้วน (ไม่เรียก ``st.*``) คัดลอกตรงตัวจากสองหน้าเดิม ล็อกด้วย tests/test_rent_gradient_new_v2.py
-          → ผลคำนวณเท่าเดิมทุกตัวเลข ไม่ต้องอ่านหรือแก้ถ้าไม่ได้เปลี่ยนวิธีคำนวณ
-  SHELL   state · stages (ปุ่ม Run ↔ ผลลัพธ์) · LAYERS (ตาราง) · แผงควบคุม · views · main()
-  TESTS   ledger ครบทุกฟังก์ชัน + เทสต์ layer/stage/state
+อ่านไฟล์นี้อย่างไร — 3 โซน
+  ENGINE  SECTION 3, 3b   ฟังก์ชันคำนวณล้วน (ไม่เรียก ``st.*``) คัดลอกตรงตัวจากสองหน้าเดิม ล็อกด้วย
+          tests/test_rent_gradient_new_v2.py (ledger: ซอร์สเท่ากันทุกฟังก์ชัน + ผลตัวเลขเท่ากัน)
+          → ไม่ต้องอ่าน/แก้ ถ้าไม่ได้เปลี่ยนวิธีคำนวณ
+  SHELL   SECTION 1-2 ค่าคงที่ + state · 4 cached wrappers · 5 UI (LAYERS → แผงควบคุม → VIEWS) ·
+          6 stages (ปุ่ม Run ↔ ผลลัพธ์) · 7 main()          ← ส่วนเดียวที่ต้องอ่านเมื่อแก้หน้าจอ
+  TESTS   tests/test_rent_gradient_new_v2.py
+
+ทางเดินของข้อมูล
+  sidebar → stage (คำนวณ, cached) → session_state → build_ctx() (snapshot อ่านอย่างเดียว)
+          → LAYERS (วาดทีละชั้น, error แยกชั้น) → แผนที่เดียว   +   VIEWS (รันเฉพาะ view ที่เลือก)
+
+เพิ่มชั้นแผนที่ใหม่ = 3 ขั้น (ดู "LAYERS" ใน SECTION 5)
+  1. เขียน ``draw_x(ctx)``   2. เพิ่มแถว ``Layer(...)`` ใน ``LAYERS``
+  3. ถ้ามี checkbox: เพิ่ม key ใน ``StateManager._DEFAULTS`` และ ``SESSION_KEYS_TO_SAVE``
+เพิ่ม view ใหม่ใต้แผนที่ = 1 ฟังก์ชัน + 1 แถวใน ``VIEWS``
 """
 
 from __future__ import annotations
@@ -571,6 +582,7 @@ class StateManager:
         "ss_thick": True,
         "ss_topn": ANALYSIS_CONFIG["top_n"],
         "ss_view": "stats",
+        "analytics_view": "curve",
     }
 
     _DEFAULT_MARKER: Dict[str, Any] = {
@@ -5735,7 +5747,7 @@ def _options_space_syntax(ctx: Ctx, locked: bool) -> None:
     """How the Space Syntax layer is shown (changing these never recomputes the analysis)."""
     view = ctx.ss
     if view is None:
-        st.caption("รัน 🧮 วิเคราะห์ Space Syntax ที่แผง ④ ก่อน แล้วเลือกตัวชี้วัด/รัศมี/สีได้ที่นี่")
+        st.caption("รัน 🧮 วิเคราะห์ Space Syntax ที่แผง Space Syntax ก่อน แล้วเลือกตัวชี้วัด/รัศมี/สีได้ที่นี่")
         return
     result = view.result
     measures = ["integration"] + (["choice"] if result.with_choice else [])
@@ -5806,7 +5818,7 @@ LAYERS: Tuple[Layer, ...] = (
           legend=legend_cbd_zone, legend_rank=20),
     Layer("space_syntax", "🧭 Space Syntax (ไล่สีตามคะแนน)", "โครงข่ายถนน", draw_space_syntax,
           lambda c: c.ss is not None, show_key="show_space_syntax", label="🧭 Space Syntax (แดง→น้ำเงิน)",
-          hint="🔴 เข้าถึงง่ายที่สุด → 🔵 เข้าถึงยากที่สุด", requires="วิเคราะห์ Space Syntax ที่แผง ④ ก่อน",
+          hint="🔴 เข้าถึงง่ายที่สุด → 🔵 เข้าถึงยากที่สุด", requires="วิเคราะห์ Space Syntax ที่แผง Space Syntax ก่อน",
           legend=legend_space_syntax, legend_rank=30, options=_options_space_syntax, panel_rank=10),
     Layer("railway", "แนวรถไฟเชียงของ", "บริบท & overlay", draw_railway, _always, show_key="show_railway",
           label="🚂 แนวรถไฟเชียงของ"),
@@ -6208,7 +6220,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
 
-        st.caption("เปิด/ปิดชั้น Betweenness · Nodes · Golden Spots ที่แผง ⑥ ชั้นแผนที่")
+        st.caption("เปิด/ปิดชั้น Betweenness · Nodes · Golden Spots ที่แผง ชั้นแผนที่")
 
     return do_network
 
@@ -6567,7 +6579,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
         st.text_input("หน่วยราคา", key="rent_unit_label", disabled=locked)
 
-        st.caption("เปิด/ปิด Rent Rings · Rent Heat ที่แผง ⑥ ชั้นแผนที่ (Rent Heat ต้องรัน Network Analysis ก่อน)")
+        st.caption("เปิด/ปิด Rent Rings · Rent Heat ที่แผง ชั้นแผนที่ (Rent Heat ต้องรัน Network Analysis ก่อน)")
 
         do_rent: bool = st.button(
             "🧮 คำนวณ Rent Gradient",
@@ -6618,7 +6630,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
 
 def _render_sidebar_isochrone_settings(locked: bool) -> None:
-    """Travel mode + minutes for step ① (moved here from the old map-settings panel)."""
+    """Travel mode + minutes for the Isochrone step (moved here from the old map-settings panel)."""
     st.markdown("##### 🚗 การเดินทาง (Isochrone)")
     st.selectbox(
         "โหมด",
@@ -6638,8 +6650,8 @@ def _layer_available(layer: Layer, ctx: Ctx) -> bool:
 
 
 def _render_sidebar_layers_panel(ctx: Ctx, locked: bool) -> None:
-    """⑥ Every layer checkbox in one place, generated from ``LAYERS`` (same ``show_*`` keys as before)."""
-    with st.expander("🗺️ ⑥ ชั้นแผนที่ (Layers)", expanded=True):
+    """Every layer checkbox in one place, generated from ``LAYERS`` (same ``show_*`` keys as before)."""
+    with st.expander("🗺️ ชั้นแผนที่ (Layers)", expanded=True):
         st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name", disabled=locked)
         for group in PANEL_GROUPS:
             rows = sorted((layer for layer in LAYERS if layer.group == group and layer.show_key),
@@ -6674,13 +6686,13 @@ def _ss_status(params: Dict[str, Any]) -> None:
 
 
 def _render_sidebar_space_syntax_panel(locked: bool) -> Dict[str, Any]:
-    """④ Space Syntax — what to analyse. Returns the pressed buttons and the chosen parameters."""
+    """Space Syntax panel — what to analyse. Returns the pressed buttons and the chosen parameters."""
     state = st.session_state
-    with st.expander("🧭 ④ Space Syntax (เข้าถึงง่าย แดง→น้ำเงิน)", expanded=True):
+    with st.expander("🧭 Space Syntax (เข้าถึงง่าย แดง→น้ำเงิน)", expanded=True):
         st.caption("ไล่สีทุกช่วงถนนตามคะแนนการเข้าถึง — Integration (NAIN) / Choice (NACH) แบบ Segment Analysis · "
                    "ผลขึ้นเป็นชั้นบนแผนที่ และเป็นมุมมอง 🧭 ใต้แผนที่")
         st.caption(f"ศูนย์พื้นที่ศึกษา: **{float(state['anchor_lat']):.5f}, {float(state['anchor_lon']):.5f}** "
-                   "— แก้ได้ที่แผง ③ Automated CBD Anchor")
+                   "— แก้ได้ที่แผง Automated CBD Anchor")
         st.slider("รัศมีที่แสดงผล (m)", MIN_RADIUS_M, MAX_RADIUS_M, step=250, key="ss_radius_m", disabled=locked,
                   help="คำนวณบนโครงข่ายที่กว้างกว่านี้ 20% แล้วแสดง/จัดอันดับเฉพาะในรัศมีนี้ เพื่อลด edge effect")
         st.selectbox("ชนิดโครงข่าย", list(NETWORK_TYPES), key="ss_network", format_func=NETWORK_TYPES.get,
@@ -6700,19 +6712,19 @@ def _render_sidebar_space_syntax_panel(locked: bool) -> Dict[str, Any]:
         demo = st.button("🧪 ตัวอย่างเชียงของ (ออฟไลน์)", use_container_width=True, disabled=locked,
                          key="ss_demo_btn",
                          help="ใช้กราฟถนนที่เก็บไว้ใน Geoapify_Map/osmnx_cache.zip — ไม่ต้องดาวน์โหลดจาก Overpass")
-        params = ss_params()
-        _ss_status(params)
-    return {"run": run, "demo": demo, "params": params}
+        status = st.empty()                # filled by main() after the stages ran, so it never shows last run's state
+    return {"run": run, "demo": demo, "params": ss_params(), "status": status}
 
 
 def render_sidebar() -> Dict[str, Any]:
     """
     Orchestrate the sidebar in pipeline order:
-    ① จุดเริ่ม + Isochrone → ② Network → ③ Anchor (กำหนดพื้นที่ศึกษา) → ④ Space Syntax → ⑤ Rent Gradient
-    (⑥ ชั้นแผนที่ is drawn by ``main`` after the stages ran, so it can show what has data).
+    markers + Isochrone → Network → Automated Anchor (sets the study area) → Space Syntax → Rent Gradient.
+    (The layers panel is drawn by ``main`` after the stages ran, so it can show what has data.)
 
     Returns the user's intents: ``calc / network / anchor / rent / space_syntax`` are True for the button that
-    was pressed (``demo`` = the offline Space Syntax example), plus ``ss_params`` / ``active`` / ``locked``.
+    was pressed (``demo`` = the offline Space Syntax example), plus ``ss_params`` / ``ss_status`` (a placeholder
+    for the status line) / ``active`` / ``locked``.
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -6749,7 +6761,8 @@ def render_sidebar() -> Dict[str, Any]:
 
     return {"calc": do_calc, "network": do_network, "anchor": do_anchor, "rent": do_rent,
             "space_syntax": space_syntax["run"] or space_syntax["demo"], "demo": space_syntax["demo"],
-            "ss_params": space_syntax["params"], "active": active_list, "locked": ui_locked}
+            "ss_params": space_syntax["params"], "ss_status": space_syntax["status"],
+            "active": active_list, "locked": ui_locked}
 
 
 def _stability_popup(result: Dict[str, Any]) -> str:
@@ -6767,6 +6780,8 @@ def render_header() -> None:
         "① เริ่มใกล้ศูนย์กลางประชากร → ② Isochrone 20 นาทีหา C20 → "
         "③ Isochrone 5 นาทีหา C5 → ④ Golden Spots → ⑤ Rent Gradient"
     )
+    st.caption("🧭 ชั้น Space Syntax: ไล่สีทุกช่วงถนนตามการเข้าถึง 🔴 ง่ายที่สุด → 🔵 ยากที่สุด "
+               "— วิเคราะห์ที่แผง Space Syntax แล้วเปิด/ปิดที่แผง ชั้นแผนที่")
 
 
 def render_metrics_row() -> None:
@@ -6954,7 +6969,7 @@ def view_space_syntax(ctx: Ctx) -> None:
     """🧭 Space Syntax: summary, depthmap-style segment map (PNG), statistics + ranking + export, explanation."""
     view = ctx.ss
     if view is None:
-        st.info("กด 🧮 วิเคราะห์ Space Syntax ที่แผง ④ ใน sidebar (หรือ 🧪 ตัวอย่างเชียงของ) — "
+        st.info("กด 🧮 วิเคราะห์ Space Syntax ที่แผง Space Syntax ใน sidebar (หรือ 🧪 ตัวอย่างเชียงของ) — "
                 "ผลจะขึ้นเป็นชั้นบนแผนที่และที่นี่", icon="🧭")
         with st.expander("📖 หลักการ Space Syntax"):
             _render_help()
@@ -6962,7 +6977,7 @@ def view_space_syntax(ctx: Ctx) -> None:
     net, meta, result, mask, d = view.net, view.meta, view.result, view.mask, view.display
     _summary_row(net, meta, mask, result)
     if result.meta.get("params") != ss_params():
-        st.warning("ตั้งค่า Space Syntax เปลี่ยนไปจากที่คำนวณไว้ — กด 🧮 วิเคราะห์ ที่แผง ④ เพื่ออัปเดตผล")
+        st.warning("ตั้งค่า Space Syntax เปลี่ยนไปจากที่คำนวณไว้ — กด 🧮 วิเคราะห์ เพื่ออัปเดตผล")
     notes = [f"ระยะ: {DISTANCE_KINDS[result.kind]['label']}",
              "รัศมี: " + ", ".join(radius_label(r) for r in result.radii)]
     if result.meta["approximate_global"]:
@@ -6973,7 +6988,7 @@ def view_space_syntax(ctx: Ctx) -> None:
                    format_func=SS_VIEW_LABELS.get, label_visibility="collapsed")
     measure, rkey, palette = d["measure"], d["rkey"], d["palette"]
     st.caption(f"แสดง: {MEASURES[measure]['title']} · รัศมี {radius_label_for(rkey)} · {SCALE_MODES[d['scale']]} "
-               "— เปลี่ยนได้ที่แผง ⑥ ชั้นแผนที่")
+               "— เปลี่ยนได้ที่แผง ชั้นแผนที่")
     if sub == "help":
         _render_help()
         return
@@ -7041,157 +7056,162 @@ def view_space_syntax(ctx: Ctx) -> None:
                        mime="application/geo+json")
 
 
-def render_analytics_panel() -> None:
-    """แท็บวิเคราะห์ใต้แผนที่: Bid-Rent Curve / Golden Spots / หมุด / หลักการ."""
+def _analytics_inputs() -> Tuple[Any, Any, bool, Any, bool]:
+    """What the analytics views share: ``(rent_data, net_data, has_rent, golden_spots, locked)``."""
     rent_data = StateManager.get_rent_data()
     net_data = StateManager.get_network_data()
     has_rent = bool(rent_data and "error" not in rent_data)
     golden_spots = (net_data or {}).get("golden_spots") if net_data else None
     locked = st.session_state.get(StateManager.K_UI_LOCKED, False)
+    return rent_data, net_data, has_rent, golden_spots, locked
 
-    tab_curve, tab_rings, tab_gold, tab_marks, tab_theory = st.tabs(
-        [
-            "📈 Bid-Rent Curve",
-            "🧾 Ring Report",
-            "💎 Golden Spots",
-            "📍 หมุด & ราคาประเมิน",
-            "📐 หลักการ",
-        ]
-    )
 
-    with tab_curve:
-        if has_rent:
-            model = rent_data["model"]
-            st.plotly_chart(
-                _build_bid_rent_figure(rent_data),
-                use_container_width=True,
-                config={"displayModeBar": False},
+def view_curve(_ctx: Ctx) -> None:
+    """📈 Bid-Rent Curve."""
+    rent_data, net_data, has_rent, golden_spots, locked = _analytics_inputs()
+    if has_rent:
+        model = rent_data["model"]
+        st.plotly_chart(
+            _build_bid_rent_figure(rent_data),
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+        eq_r0 = f"{model['r0']:,.1f}" if not model["is_index"] else f"{model['r0']:.0f}"
+        fit_txt = f" — {fit_quality_label(model)}"
+        interval = fit_interval_text(model)
+        if interval:
+            fit_txt += f" · {interval}"
+        st.caption(
+            f"R(d) = {eq_r0} × e^(−{model['lam']:.4f}·d)"
+            + fit_txt
+        )
+        quality_warning = fit_quality_warning(model)
+        if quality_warning:
+            st.warning(quality_warning, icon="📉")
+    else:
+        st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างเส้นโค้ง Bid-Rent", icon="💡")
+
+
+def view_rings(_ctx: Ctx) -> None:
+    """🧾 Ring Report."""
+    rent_data, net_data, has_rent, golden_spots, locked = _analytics_inputs()
+    if has_rent:
+        ring_rows = build_ring_report(
+            rent_data, net_data, StateManager.get_rent_samples()
+        )
+        has_net_cols = bool(net_data and "error" not in net_data and net_data.get("nodes", {}).get("features"))
+        df_rings = pd.DataFrame(ring_rows)
+        st.dataframe(df_rings, use_container_width=True, hide_index=True)
+
+        csv_bytes = df_rings.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇ ดาวน์โหลด CSV",
+            csv_bytes,
+            "ring_report.csv",
+            "text/csv",
+        )
+
+        if not has_net_cols:
+            st.info(
+                "รัน **🚀 Network Analysis** เพื่อเติมจำนวนโหนด, Closeness "
+                "และ Value Gap รายวง",
+                icon="💡",
             )
-            eq_r0 = f"{model['r0']:,.1f}" if not model["is_index"] else f"{model['r0']:.0f}"
-            fit_txt = f" — {fit_quality_label(model)}"
-            interval = fit_interval_text(model)
-            if interval:
-                fit_txt += f" · {interval}"
+        if rent_data["model"].get("is_index"):
             st.caption(
-                f"R(d) = {eq_r0} × e^(−{model['lam']:.4f}·d)"
-                + fit_txt
+                "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนน หารด้วยพื้นที่ของวงที่มีข้อมูลถนนจริง · "
+                "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
+                "**Value Gap ถูกซ่อน** ในโหมดดัชนี เพราะ R(d)/R₀ เป็นค่าสมมติ "
+                "(ลดเหลือ ¼ ที่ขอบ) — ใส่ตัวอย่างราคาจริงเพื่อ calibrate ก่อน"
             )
-            quality_warning = fit_quality_warning(model)
-            if quality_warning:
-                st.warning(quality_warning, icon="📉")
         else:
-            st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างเส้นโค้ง Bid-Rent", icon="💡")
+            st.caption(
+                "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนน หารด้วยพื้นที่ของวงที่มีข้อมูลถนนจริง · "
+                "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
+                "**Value Gap** = Closeness เฉลี่ย − (ค่าเช่าคาดการณ์/R₀) — "
+                "วงที่ Value Gap สูงคือวงที่โครงข่ายเข้าถึงดีแต่ราคาคาดการณ์ยังต่ำ "
+                "(ตัวชี้นำเชิงเปรียบเทียบ ไม่ใช่ราคาผิดปกติที่พิสูจน์แล้ว)"
+            )
+    else:
+        st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างรายงานรายวง", icon="💡")
 
-    with tab_rings:
+
+def view_gold(_ctx: Ctx) -> None:
+    """💎 Golden Spots."""
+    rent_data, net_data, has_rent, golden_spots, locked = _analytics_inputs()
+    if golden_spots:
+        df_gold = _build_golden_spots_df(golden_spots, rent_data)
+        st.dataframe(df_gold, use_container_width=True, hide_index=True)
         if has_rent:
-            ring_rows = build_ring_report(
-                rent_data, net_data, StateManager.get_rent_samples()
-            )
-            has_net_cols = bool(net_data and "error" not in net_data and net_data.get("nodes", {}).get("features"))
-            df_rings = pd.DataFrame(ring_rows)
-            st.dataframe(df_rings, use_container_width=True, hide_index=True)
-
-            csv_bytes = df_rings.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "⬇ ดาวน์โหลด CSV",
-                csv_bytes,
-                "ring_report.csv",
-                "text/csv",
-            )
-
-            if not has_net_cols:
-                st.info(
-                    "รัน **🚀 Network Analysis** เพื่อเติมจำนวนโหนด, Closeness "
-                    "และ Value Gap รายวง",
-                    icon="💡",
-                )
             if rent_data["model"].get("is_index"):
                 st.caption(
-                    "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนน หารด้วยพื้นที่ของวงที่มีข้อมูลถนนจริง · "
-                    "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
-                    "**Value Gap ถูกซ่อน** ในโหมดดัชนี เพราะ R(d)/R₀ เป็นค่าสมมติ "
-                    "(ลดเหลือ ¼ ที่ขอบ) — ใส่ตัวอย่างราคาจริงเพื่อ calibrate ก่อน"
+                    "Value Gap ถูกซ่อนในโหมดดัชนี (R(d)/R₀ เป็นค่าสมมติ) — "
+                    "ใส่ตัวอย่างราคาจริงเพื่อ calibrate"
                 )
             else:
                 st.caption(
-                    "**โหนด/km²** = ความหนาแน่นของโครงข่ายถนน หารด้วยพื้นที่ของวงที่มีข้อมูลถนนจริง · "
-                    "**Closeness เฉลี่ย** = ความเข้าถึงง่ายเฉลี่ยของโหนดในวง · "
-                    "**Value Gap** = Closeness เฉลี่ย − (ค่าเช่าคาดการณ์/R₀) — "
-                    "วงที่ Value Gap สูงคือวงที่โครงข่ายเข้าถึงดีแต่ราคาคาดการณ์ยังต่ำ "
-                    "(ตัวชี้นำเชิงเปรียบเทียบ ไม่ใช่ราคาผิดปกติที่พิสูจน์แล้ว)"
+                    "**Value Gap** = Closeness − (ค่าเช่าคาดการณ์/R₀) — "
+                    "ค่าบวกมาก = เข้าถึงง่ายแต่ราคายังต่ำ (ตัวชี้นำเชิงเปรียบเทียบ)"
                 )
-        else:
-            st.info("กด **🧮 คำนวณ Rent Gradient** ใน sidebar เพื่อสร้างรายงานรายวง", icon="💡")
 
-    with tab_gold:
-        if golden_spots:
-            df_gold = _build_golden_spots_df(golden_spots, rent_data)
-            st.dataframe(df_gold, use_container_width=True, hide_index=True)
+        c1, c2, _sp = st.columns([0.3, 0.3, 0.4])
+        csv_bytes = df_gold.to_csv(index=False).encode("utf-8-sig")
+        c1.download_button(
+            "⬇ ดาวน์โหลด CSV",
+            csv_bytes,
+            "golden_spots.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+        rank = c2.selectbox(
+            "เพิ่มอันดับลงแผนที่",
+            list(range(1, len(golden_spots) + 1)),
+            label_visibility="collapsed",
+            format_func=lambda r: f"➕ เพิ่มอันดับ {r} ลงแผนที่",
+        )
+        if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
+            spot = golden_spots[rank - 1]
+            StateManager.add_marker(spot["lat"], spot["lon"])
+            StateManager.clear_results(["isochrone", "intersection", "rent"])
+            st.toast(f"เพิ่ม Golden Spot อันดับ {rank} แล้ว! กรุณากดคำนวณใหม่", icon="💎")
+            st.rerun()
+    else:
+        st.info("รัน **🚀 Network Analysis** เพื่อค้นหาทำเลที่ดินทอง", icon="💡")
+
+
+def view_marks(_ctx: Ctx) -> None:
+    """📍 หมุด & ราคาประเมิน."""
+    rent_data, net_data, has_rent, golden_spots, locked = _analytics_inputs()
+    markers = StateManager.get_markers()
+    if markers:
+        rows = []
+        for i, mk in enumerate(markers, start=1):
+            row: Dict[str, Any] = {
+                "จุดที่": i,
+                "สถานะ": "✅ Active" if mk.get("active", True) else "⏸ ปิด",
+                "Lat": round(mk["lat"], 5),
+                "Lon": round(mk["lng"], 5),
+            }
             if has_rent:
-                if rent_data["model"].get("is_index"):
-                    st.caption(
-                        "Value Gap ถูกซ่อนในโหมดดัชนี (R(d)/R₀ เป็นค่าสมมติ) — "
-                        "ใส่ตัวอย่างราคาจริงเพื่อ calibrate"
-                    )
-                else:
-                    st.caption(
-                        "**Value Gap** = Closeness − (ค่าเช่าคาดการณ์/R₀) — "
-                        "ค่าบวกมาก = เข้าถึงง่ายแต่ราคายังต่ำ (ตัวชี้นำเชิงเปรียบเทียบ)"
-                    )
+                model = rent_data["model"]
+                anchor = rent_data["anchor"]
+                d_km = haversine_km(anchor["lat"], anchor["lon"], mk["lat"], mk["lng"])
+                row["ระยะจาก CBD (km)"] = round(d_km, 2)
+                row["ค่าเช่าคาดการณ์"] = format_rent_value(
+                    predict_rent(d_km, model["r0"], model["lam"]), model
+                )
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        if not has_rent:
+            st.caption("คำนวณ Rent Gradient เพื่อดูราคาประเมินของแต่ละหมุด")
+    else:
+        st.info("ยังไม่มีหมุด — คลิกบนแผนที่หรือกรอกพิกัดใน sidebar", icon="📍")
 
-            c1, c2, _sp = st.columns([0.3, 0.3, 0.4])
-            csv_bytes = df_gold.to_csv(index=False).encode("utf-8-sig")
-            c1.download_button(
-                "⬇ ดาวน์โหลด CSV",
-                csv_bytes,
-                "golden_spots.csv",
-                "text/csv",
-                use_container_width=True,
-            )
-            rank = c2.selectbox(
-                "เพิ่มอันดับลงแผนที่",
-                list(range(1, len(golden_spots) + 1)),
-                label_visibility="collapsed",
-                format_func=lambda r: f"➕ เพิ่มอันดับ {r} ลงแผนที่",
-            )
-            if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
-                spot = golden_spots[rank - 1]
-                StateManager.add_marker(spot["lat"], spot["lon"])
-                StateManager.clear_results(["isochrone", "intersection", "rent"])
-                st.toast(f"เพิ่ม Golden Spot อันดับ {rank} แล้ว! กรุณากดคำนวณใหม่", icon="💎")
-                st.rerun()
-        else:
-            st.info("รัน **🚀 Network Analysis** เพื่อค้นหาทำเลที่ดินทอง", icon="💡")
 
-    with tab_marks:
-        markers = StateManager.get_markers()
-        if markers:
-            rows = []
-            for i, mk in enumerate(markers, start=1):
-                row: Dict[str, Any] = {
-                    "จุดที่": i,
-                    "สถานะ": "✅ Active" if mk.get("active", True) else "⏸ ปิด",
-                    "Lat": round(mk["lat"], 5),
-                    "Lon": round(mk["lng"], 5),
-                }
-                if has_rent:
-                    model = rent_data["model"]
-                    anchor = rent_data["anchor"]
-                    d_km = haversine_km(anchor["lat"], anchor["lon"], mk["lat"], mk["lng"])
-                    row["ระยะจาก CBD (km)"] = round(d_km, 2)
-                    row["ค่าเช่าคาดการณ์"] = format_rent_value(
-                        predict_rent(d_km, model["r0"], model["lam"]), model
-                    )
-                rows.append(row)
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            if not has_rent:
-                st.caption("คำนวณ Rent Gradient เพื่อดูราคาประเมินของแต่ละหมุด")
-        else:
-            st.info("ยังไม่มีหมุด — คลิกบนแผนที่หรือกรอกพิกัดใน sidebar", icon="📍")
-
-    with tab_theory:
-        st.html(
-            """
+def view_theory(_ctx: Ctx) -> None:
+    """📐 หลักการ."""
+    st.html(
+        """
 <style>
 .rg-guide {
     max-width: 920px;
@@ -7390,7 +7410,30 @@ def render_analytics_panel() -> None:
     </div>
 </div>
             """
-        )
+    )
+
+
+# the views under the map (key, label, function) — a new view is one function and one row
+VIEWS: Tuple[Tuple[str, str, Callable[[Ctx], None]], ...] = (
+    ("curve", "📈 Bid-Rent Curve", view_curve),
+    ("rings", "🧾 Ring Report", view_rings),
+    ("gold", "💎 Golden Spots", view_gold),
+    ("marks", "📍 หมุด & ราคาประเมิน", view_marks),
+    ("space_syntax", "🧭 Space Syntax", view_space_syntax),
+    ("theory", "📐 หลักการ", view_theory),
+)
+
+
+def render_views(ctx: Ctx) -> None:
+    """Analytics under the map. Only the chosen view runs — ``st.tabs`` would run every tab on every rerun."""
+    labels = {key: label for key, label, _ in VIEWS}
+    if st.session_state.get("analytics_view") not in labels:
+        st.session_state["analytics_view"] = next(iter(labels))
+    choice = st.radio("มุมมองวิเคราะห์", list(labels), horizontal=True, key="analytics_view",
+                      format_func=labels.get, label_visibility="collapsed")
+    for key, _label, view in VIEWS:
+        if key == choice:
+            view(ctx)
 
 
 # ============================================================================
@@ -7881,13 +7924,15 @@ def main() -> None:
 
     intents = render_sidebar()                  # 1. sidebar → what the user asked for
     run_stages(intents)                         # 2. run it (cached, error-isolated orchestrators)
+    with intents["ss_status"]:
+        _ss_status(intents["ss_params"])        # (the sidebar was drawn before the stage ran)
     ctx = build_ctx()                           # 3. one read-only snapshot for the layers
     with st.sidebar:
         _render_sidebar_layers_panel(ctx, intents["locked"])
     render_header()
     render_metrics_row()
     map_output = render_map(ctx)
-    render_analytics_panel()
+    render_views(ctx)
     handle_map_click(map_output, intents["locked"])
 
 

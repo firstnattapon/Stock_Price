@@ -65,7 +65,8 @@ MODIFIED = {
     "SESSION_KEYS_TO_SAVE": "the three anchor-detail layer checkboxes (and the Space Syntax settings)",
     "_render_sidebar_network_panel": "the three layer checkboxes moved to the layers panel",
     "_render_sidebar_rent_panel": "the two layer checkboxes moved to the layers panel",
-    "render_sidebar": "pipeline order ①→⑤, returns the intents as a dict (⑥ layers panel is drawn by main)",
+    "render_sidebar": "pipeline order (… Space Syntax before Rent), returns the intents as a dict",
+    "render_header": "one extra caption line about the Space Syntax layer",
     "render_map": "draws the registry layers from a Ctx instead of one 350-line function",
     "main": "stage table + Ctx + layers panel",
 }
@@ -74,6 +75,7 @@ REPLACED = {
     "_add_wms_layer": "→ _wms(): the three WMS overlays are registry rows that return the tile layer",
     "_add_map_legend": "→ legend_stack(): one box stacked from the legend section of every layer that is on",
     "_render_sidebar_map_settings": "→ _render_sidebar_layers_panel() + _render_sidebar_isochrone_settings()",
+    "render_analytics_panel": "→ VIEWS + render_views(): st.tabs runs every tab on every rerun, a radio runs one",
 }
 
 # Rent_Gradient_new.py: copied with edits / not copied (and why). Everything else must be identical.
@@ -869,3 +871,239 @@ def test_the_study_centre_falls_back_to_markers_then_anchor_as_before(monkeypatc
     state[v2.StateManager.K_AUTO_ANCHOR] = None
     state[v2.StateManager.K_AUTO_ANCHOR_CLOSENESS] = {"anchor": {"lat": 20.6, "lon": 100.6}}
     assert v2.build_ctx().center == (20.6, 100.6)
+
+
+
+# ----------------------------------------------------------------------------- views (the old tabs, one runs)
+def tab_bodies(path):
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "render_analytics_panel")
+    bodies = {}
+    for node in ast.walk(function):
+        if isinstance(node, ast.With) and isinstance(node.items[0].context_expr, ast.Name) \
+                and node.items[0].context_expr.id.startswith("tab_"):
+            bodies[node.items[0].context_expr.id] = [ast.dump(statement) for statement in node.body]
+    return bodies
+
+
+def view_statements(name):
+    tree = ast.parse(PAGE.read_text(encoding="utf-8"))
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    body = function.body[1:]                                                  # skip the docstring
+    if name != "view_theory":
+        body = body[1:]                                                       # skip the shared-inputs line
+    return [ast.dump(statement) for statement in body]
+
+
+@pytest.mark.parametrize("tab, view", [("tab_curve", "view_curve"), ("tab_rings", "view_rings"),
+                                       ("tab_gold", "view_gold"), ("tab_marks", "view_marks"),
+                                       ("tab_theory", "view_theory")])
+def test_every_view_runs_exactly_the_statements_of_the_tab_it_came_from(tab, view):
+    assert tab_bodies(BASE)[tab] == view_statements(view)
+
+
+def test_views_have_unique_keys_and_only_the_chosen_one_runs(monkeypatch):
+    keys = [key for key, _, _ in v2.VIEWS]
+    assert len(keys) == len(set(keys)) and keys[0] == "curve" and "space_syntax" in keys
+    ran = []
+    spies = tuple((key, label, (lambda ctx, key=key: ran.append(key))) for key, label, _ in v2.VIEWS)
+    monkeypatch.setattr(v2, "VIEWS", spies)
+    state = make_state(monkeypatch)
+    monkeypatch.setattr(v2.st, "radio", lambda label, options, **kw: state[kw["key"]])
+    for choice in ("curve", "space_syntax", "theory"):
+        state["analytics_view"] = choice
+        v2.render_views(make_ctx())
+    assert ran == ["curve", "space_syntax", "theory"]
+    state["analytics_view"] = "not a view"                              # a stale value falls back to the first view
+    v2.render_views(make_ctx())
+    assert ran[-1] == "curve" and state["analytics_view"] == "curve"
+
+
+# ----------------------------------------------------------------------------- the whole page (AppTest, offline)
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+
+def app():
+    import rent_gradient_new_v2_under_test
+    rent_gradient_new_v2_under_test.main()
+
+
+def make_app(monkeypatch, config=True, rendered=None, **state):
+    """The page with the saved Chiang Khong results loaded (isochrone + network) and nothing fetched from the web."""
+    monkeypatch.setattr(v2.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
+    if rendered is not None:
+        monkeypatch.setattr(v2, "st_folium", lambda m, **kw: rendered.append(m) or {})
+    at = AppTest.from_function(app, default_timeout=180)
+    if config:
+        at.session_state["markers"] = CONFIG["markers"]
+        for key, value in CONFIG["settings"].items():
+            if key != "api_key":
+                at.session_state[key] = value
+        for key, value in PRE.items():
+            at.session_state[key] = value
+        at.session_state["show_betweenness"] = at.session_state["show_closeness"] = False
+    for key, value in state.items():
+        at.session_state[key] = value
+    return at
+
+
+def button(at, text):
+    return next(b for b in at.button if text in b.label)
+
+
+def map_layers(rendered):
+    return layer_names(rendered[-1])
+
+
+def test_cold_start_shows_every_panel_and_every_layer_checkbox(monkeypatch):
+    rendered = []
+    at = make_app(monkeypatch, config=False, rendered=rendered).run()
+    assert not at.exception and not at.error
+    labels = {b.label for b in at.button}
+    assert {"🧩 ① คำนวณหา Isochrone CBD", "🚀 Run Network Analysis", "🎯 ค้นหา CBD Anchor อัตโนมัติ",
+            "🧮 วิเคราะห์ Space Syntax", "🧪 ตัวอย่างเชียงของ (ออฟไลน์)", "🧮 คำนวณ Rent Gradient"} <= labels
+    for layer in v2.LAYERS:
+        if layer.show_key:
+            at.checkbox(key=layer.show_key)                           # raises KeyError if the checkbox is missing
+    assert at.radio(key="analytics_view").value == "curve" and not at.exception
+    assert any("ชั้น Space Syntax" in c.value for c in at.caption)
+    assert map_layers(rendered) == []                                 # nothing computed yet → an empty map, no crash
+    assert any("ยังไม่มีข้อมูล" in c.value for c in at.caption)       # the layers panel says what to run first
+
+
+def test_saved_results_come_back_as_layers_and_checkboxes_switch_them(monkeypatch):
+    rendered = []
+    at = make_app(monkeypatch, rendered=rendered).run()
+    assert not at.exception and {"Travel Areas", "Integration Center (จุดตรงกลางที่สุด)", "หมุดของฉัน"} <= set(map_layers(rendered))
+    assert "Road Betweenness" not in map_layers(rendered)
+    at.checkbox(key="show_betweenness").check().run()
+    assert not at.exception and "Road Betweenness" in map_layers(rendered)
+    at.checkbox(key="show_betweenness").uncheck().run()
+    assert "Road Betweenness" not in map_layers(rendered)
+    at.checkbox(key="show_traffic").check().run()
+    assert "Google Traffic" in map_layers(rendered)
+
+
+def test_a_layer_that_fails_inside_the_page_only_shows_a_warning(monkeypatch):
+    rendered = []
+    monkeypatch.setattr(v2, "draw_traffic", lambda ctx: 1 / 0)
+    monkeypatch.setattr(v2, "LAYERS", tuple(
+        v2.Layer(**{**layer.__dict__, "draw": v2.draw_traffic}) if layer.id == "traffic" else layer for layer in v2.LAYERS))
+    at = make_app(monkeypatch, rendered=rendered, show_traffic=True).run()
+    assert not at.exception
+    assert any("Google Traffic" in w.value and "ZeroDivisionError" in w.value for w in at.warning)
+    assert "Travel Areas" in map_layers(rendered)                      # the other layers are still on the map
+
+
+def test_skipped_config_values_are_reported_once(monkeypatch):
+    at = make_app(monkeypatch, config=False, _import_skipped=["time_intervals", "colors"]).run()
+    assert not at.exception
+    assert any("ข้ามค่าที่ไม่ถูกต้อง" in w.value and "time_intervals" in w.value for w in at.warning)
+    at.run()
+    assert not any("ข้ามค่าที่ไม่ถูกต้อง" in w.value for w in at.warning)
+
+
+def test_demo_button_runs_space_syntax_and_the_gradient_appears_as_a_layer_with_its_legend(monkeypatch):
+    rendered = []
+    at = make_app(monkeypatch, rendered=rendered, ss_radii=["400 m"], ss_choice=True).run()
+    assert "🧭 Space Syntax (ไล่สีตามคะแนน)" not in map_layers(rendered)
+    button(at, "ตัวอย่างเชียงของ").click().run(timeout=300)
+    assert not at.exception and not at.error, [e.value for e in at.error]
+    assert at.session_state["ss_result"].radii == [400.0] and at.session_state["ss_run"] == 1
+    assert "🧭 Space Syntax (ไล่สีตามคะแนน)" in map_layers(rendered)
+    html = rendered[-1].get_root().render()
+    assert "Integration (NAIN) (คะแนน 0–100)" in html and "เวลาเดินทาง" in html     # one legend box, both sections
+    assert html.count("position:fixed") == 1
+    assert any("✅ ผลล่าสุด" in c.value for c in at.caption)
+    at.checkbox(key="show_space_syntax").uncheck().run()
+    assert "🧭 Space Syntax (ไล่สีตามคะแนน)" not in map_layers(rendered)
+    at.checkbox(key="show_space_syntax").check().run()
+    assert "🧭 Space Syntax (ไล่สีตามคะแนน)" in map_layers(rendered)
+
+
+def test_display_options_change_the_map_without_recomputing_the_analysis(monkeypatch):
+    rendered = []
+    at = make_app(monkeypatch, rendered=rendered, ss_radii=["400 m", "800 m"], ss_choice=True).run()
+    button(at, "ตัวอย่างเชียงของ").click().run(timeout=300)
+    analysed = count_calls(monkeypatch, v2, "analyse_network")
+    at.radio(key="ss_measure").set_value("choice").run()
+    assert not at.exception and "Choice (NACH) (คะแนน 0–100)" in rendered[-1].get_root().render()
+    at.selectbox(key="ss_view_radius").set_value("400").run()
+    assert "400 m" in rendered[-1].get_root().render()
+    palette = next(reversed(v2.PALETTES))
+    at.selectbox(key="ss_palette").set_value(palette).run()
+    at.radio(key="ss_scale").set_value("quantile").run()
+    assert not at.exception and analysed == []                         # display only: never recomputed
+    html = rendered[-1].get_root().render()
+    assert v2.PALETTES[palette][0] in html and "Quantile" in html
+
+
+def test_a_widget_that_was_hidden_remembers_its_value_when_it_comes_back(monkeypatch):
+    at = make_app(monkeypatch, rendered=[], ss_radii=["400 m"], ss_choice=False).run()
+    button(at, "ตัวอย่างเชียงของ").click().run(timeout=300)
+    palette = next(reversed(v2.PALETTES))
+    at.selectbox(key="ss_palette").set_value(palette).run()
+    at.checkbox(key="show_space_syntax").uncheck().run()              # the display options disappear …
+    assert not any(w.key == "ss_palette" for w in at.selectbox)
+    at.checkbox(key="show_space_syntax").check().run()                # … and return with the chosen palette
+    assert at.selectbox(key="ss_palette").value == palette
+
+
+def test_space_syntax_view_runs_only_when_chosen_and_the_png_only_when_asked_for(monkeypatch):
+    at = make_app(monkeypatch, rendered=[], ss_radii=["400 m"], ss_choice=False).run()
+    button(at, "ตัวอย่างเชียงของ").click().run(timeout=300)
+    png, histogram = count_calls(monkeypatch, v2, "render_depthmap_png"), count_calls(monkeypatch, v2, "histogram_figure")
+    at.run()
+    assert png == [] and histogram == []                               # the Bid-Rent view is showing
+    at.radio(key="analytics_view").set_value("space_syntax").run()
+    assert not at.exception and len(histogram) == 1 and png == []      # stats first, no PNG yet
+    assert any("Segment (แสดง / ทั้งหมด)" in m.label for m in at.metric)
+    at.radio(key="ss_view").set_value("png").run()
+    assert len(png) == 1 and not at.exception
+    at.run()
+    at.radio(key="ss_view").set_value("stats").run()
+    at.radio(key="ss_view").set_value("png").run()
+    assert len(png) == 1                                               # the PNG is kept in the session LRU
+    at.radio(key="ss_view").set_value("help").run()
+    assert not at.exception and any("อ่านสีอย่างไร" in m.value for m in at.markdown)
+
+
+def test_space_syntax_view_without_a_result_explains_what_to_press(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[]).run()
+    at.radio(key="analytics_view").set_value("space_syntax").run()
+    assert not at.exception and any("วิเคราะห์ Space Syntax" in i.value for i in at.info)
+
+
+def test_changing_the_settings_after_a_run_is_flagged_as_stale_not_silently_wrong(monkeypatch):
+    at = make_app(monkeypatch, rendered=[], ss_radii=["400 m"], ss_choice=False).run()
+    button(at, "ตัวอย่างเชียงของ").click().run(timeout=300)
+    assert not any("ตั้งค่าเปลี่ยนไป" in w.value for w in at.warning)
+    at.selectbox(key="ss_kind").set_value("metric").run()
+    assert any("ตั้งค่าเปลี่ยนไปจากที่คำนวณไว้" in w.value for w in at.warning)
+    at.radio(key="analytics_view").set_value("space_syntax").run()
+    assert any("ตั้งค่า Space Syntax เปลี่ยนไปจากที่คำนวณไว้" in w.value for w in at.warning)
+
+
+def test_locking_the_menus_also_locks_the_space_syntax_panel(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[]).run()
+    assert not button(at, "วิเคราะห์ Space Syntax").disabled
+    at.toggle(key="ui_locked").set_value(True).run()
+    assert button(at, "วิเคราะห์ Space Syntax").disabled and button(at, "ตัวอย่างเชียงของ").disabled
+    assert at.slider(key="ss_radius_m").disabled and at.checkbox(key="show_space_syntax").disabled
+
+
+def test_the_study_centre_is_shared_with_the_anchor_panel(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[]).run()
+    at.text_input(key="anchor_center_input").set_value("20.1, 100.2").run()
+    assert any("20.10000, 100.20000" in c.value for c in at.caption)
+    assert at.session_state["anchor_lat"] == 20.1 and at.session_state["anchor_lon"] == 100.2
+
+
+def test_tab_bodies_still_work_with_results(monkeypatch):
+    rent = v2.compute_rent_gradient_data(None, PRE["network_data"], PRE["isochrone_data"], CONFIG["markers"], [], "ดัชนี")
+    at = make_app(monkeypatch, rendered=[], rent_gradient_data=rent).run()
+    assert not at.exception
+    for key in ("rings", "gold", "marks", "theory", "curve"):
+        at.radio(key="analytics_view").set_value(key).run()
+        assert not at.exception, key
+    assert at.radio(key="analytics_view").value == "curve"
