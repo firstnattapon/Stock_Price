@@ -1,215 +1,191 @@
-"""Rent_Gradient_new_v2: layer stack on one map — registry, error isolation, LRU cache, Streamlit flow (offline)."""
+"""Rent_Gradient_new_v2 — ledger of every function copied from the two source pages, state/stability guards.
+
+The page is one file made of three zones (see its docstring): ENGINE (pure functions copied verbatim from
+``Rent_Gradient.py`` / ``Rent_Gradient_new.py``), SHELL (state, stages, layers, panels, views) and these tests.
+The ledger below is what stops the copy from drifting: every top-level name of the two source pages must exist
+in v2 with the *same source* unless it is listed — with a reason — in ``MODIFIED`` or ``REPLACED``.
+"""
+import ast
 import importlib.util
+import json
 import re
 import sys
-from collections import OrderedDict
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 pytest.importorskip("streamlit")
 pytest.importorskip("folium")
-from streamlit.testing.v1 import AppTest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tests"))
-import test_rent_gradient_new as helpers  # noqa: E402  (synthetic street graphs + the core page module)
-
+BASE = ROOT / "pages" / "Rent_Gradient.py"
+NEW = ROOT / "pages" / "Rent_Gradient_new.py"
 PAGE = ROOT / "pages" / "Rent_Gradient_new_v2.py"
-spec = importlib.util.spec_from_file_location("rent_gradient_new_v2_under_test", PAGE)
-v2 = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = v2
-spec.loader.exec_module(v2)
-core = helpers.rgn
-
-RINGS = {"type": "FeatureCollection", "features": [{
-    "type": "Feature",
-    "geometry": {"type": "Polygon", "coordinates": [[[100.40, 20.20], [100.41, 20.20], [100.41, 20.21],
-                                                     [100.40, 20.20]]]},
-    "properties": {"color": "#3987e5", "band": "0–1 km <b>", "rent_label": "100"}}]}
-RENT = {"rings_geojson": RINGS, "model": {"is_index": True}}
 
 
-def make_ctx(rent=None, cache=None, **overrides):
-    graph = helpers.grid_graph(8)
-    net = core.build_segment_network(graph)
-    result = core.analyse_network(net, radii=(300.0, None), with_choice=True)
-    mask = np.ones(net.n_segments, bool)
-    style = {"palette": core.DEFAULT_PALETTE, "scale": "linear", "thick": True,
-             "basemap": "พื้นดำ (เหมือน depthmap)", "top_n": 3}
-    fields = dict(core=core, net=net, result=result, mask=mask, mask_key=v2.mask_digest(mask), run_id=1,
-                  measure="integration", rkey="n", style=style, meta={}, rent_data=rent,
-                  cache=OrderedDict() if cache is None else cache)
-    fields.update(overrides)
-    return v2.LayerContext(**fields)
+def load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-# ----------------------------------------------------------------- loader
-def test_core_loads_and_exposes_everything_v2_needs():
-    module, error = v2.load_core()
-    assert error is None and module is not None
-    assert all(hasattr(module, name) for name in v2.REQUIRED_CORE)
+v2 = load(PAGE, "rent_gradient_new_v2_under_test")
 
 
-def test_missing_or_incomplete_core_gives_a_clear_error_not_a_crash(tmp_path):
-    module, error = v2.load_core(tmp_path / "Rent_Gradient_new.py")
-    assert module is None and "Rent_Gradient_new.py" in error
-    stub = tmp_path / "stub_core.py"
-    stub.write_text("K_NET = 'x'\n")
-    module, error = v2.load_core(stub)
-    assert module is None and "ไม่มีสิ่งที่หน้านี้ใช้" in error and "scale_scores" in error
-    broken = tmp_path / "broken_core.py"
-    broken.write_text("raise RuntimeError('boom')\n")
-    module, error = v2.load_core(broken)
-    assert module is None and "boom" in error
+# ----------------------------------------------------------------------------- ledger
+def top_level(path):
+    """``{name: normalised source}`` of every top-level def / class / assignment (decorators included)."""
+    text = Path(path).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    out = {}
+    for node in ast.parse(text).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = node.name
+        elif isinstance(node, ast.Assign):
+            name = ",".join(n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name = node.target.id
+        else:
+            continue
+        start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+        source = "\n".join(line.rstrip() for line in lines[start - 1:node.end_lineno])
+        out[name] = re.sub(r", max_entries=\d+", "", source)      # a bound on a cache is the only decorator change
+    return out
 
 
-# ----------------------------------------------------------------- cache
-def test_lru_cache_hits_do_not_rebuild_and_the_oldest_entry_goes_first():
-    store, calls = OrderedDict(), []
+# Copied with edits. Each entry says why it differs; the test fails if a listed name is in fact identical
+# (so the list cannot rot) and if an unlisted name differs (so nothing drifts silently).
+MODIFIED = {
+    "PAGE_CONFIG": "page title/icon of the merged page",
+    "MAP_STYLES": "adds the black (depthmap) and dark basemaps used by the Space Syntax layer",
+    "_OVERPASS_LOCK": "one lock per server process (cache_resource) — a module-level RLock is rebuilt on every rerun",
+    "StateManager": "cached remote defaults, config guard, layer/Space Syntax keys",
+}
+# Replaced by new SHELL code (the behaviour moved into the layer registry / panels / views).
+REPLACED = {}
 
-    def build(tag):
-        calls.append(tag)
-        return tag
-
-    for key in "abc":
-        v2.cache_get_or_build(store, key, lambda k=key: build(k), limit=3)
-    assert v2.cache_get_or_build(store, "a", lambda: build("again"), limit=3) == "a"  # hit
-    v2.cache_get_or_build(store, "d", lambda: build("d"), limit=3)  # evicts "b", not "a"
-    assert list(store) == ["c", "a", "d"] and calls == ["a", "b", "c", "d"]
-
-
-def test_mask_digest_changes_with_the_mask_only():
-    a = np.array([True, False, True, True])
-    assert v2.mask_digest(a) == v2.mask_digest(a.copy())
-    assert v2.mask_digest(a) != v2.mask_digest(~a)
+# Names that exist in more than one source page and are intentionally taken from the base page.
+NEW_REPLACED = {}
 
 
-# ----------------------------------------------------------------- layers
-def test_layers_are_unique_ordered_bottom_to_top_and_plain_functions():
-    ids = [i for i, _, _ in v2.LAYERS]
-    assert ids == ["rent_rings", "space_syntax"] and len(set(ids)) == len(ids)
-    assert all(callable(fn) for _, _, fn in v2.LAYERS)
+def test_ledger_every_function_of_rent_gradient_py_is_in_v2_with_the_same_source():
+    base, merged = top_level(BASE), top_level(PAGE)
+    missing = [n for n in base if n not in merged and n not in REPLACED]
+    assert not missing, f"dropped without a reason: {missing}"
+    drifted = [n for n in base if n in merged and n not in MODIFIED and base[n] != merged[n]]
+    assert not drifted, f"copied code changed (list it in MODIFIED with a reason or restore it): {drifted}"
+    stale = [n for n in MODIFIED if base[n] == merged[n]]
+    assert not stale, f"listed as modified but identical: {stale}"
+    still_there = [n for n in REPLACED if n in merged and base[n] == merged[n]]
+    assert not still_there, f"listed as replaced but still copied verbatim: {still_there}"
 
 
-def test_enabled_layers_are_drawn_and_closed_ones_are_not_even_built():
+def test_v2_does_not_import_the_other_pages():
+    text = PAGE.read_text(encoding="utf-8")
+    assert "spec_from_file_location" not in text and "import_module" not in text and "runpy" not in text
+
+
+# ----------------------------------------------------------------------------- state & stability guards
+class FakeResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def json(self):
+        return self.payload
+
+
+def test_remote_defaults_are_fetched_once_per_ttl_not_once_per_session(monkeypatch):
     calls = []
 
-    def spy(name, real):
-        def layer(ctx):
-            calls.append(name)
-            return real(ctx)
-        return layer
+    def fake_get(url, timeout):
+        calls.append(url)
+        return FakeResponse({"markers": [{"lat": 1.0, "lng": 2.0}], "travel_mode": "walk"})
 
-    layers = (("rent_rings", "rings", spy("rent_rings", v2.layer_rent_rings)),
-              ("space_syntax", "ss", spy("space_syntax", v2.layer_space_syntax)))
-    ctx = make_ctx(rent=RENT)
-    fmap, drawn, warnings = v2.render_layers(ctx, ["space_syntax"], layers)
-    assert calls == ["space_syntax"] and drawn == ["space_syntax"] and warnings == []
-    assert "Rent Gradient Rings" not in fmap.get_root().render()
-    fmap, drawn, _ = v2.render_layers(ctx, ["rent_rings", "space_syntax"], layers)
-    assert drawn == ["rent_rings", "space_syntax"]  # z-order: rings first
-    html = fmap.get_root().render()
-    assert html.index("Rent Gradient Rings") < html.index("Space Syntax")
-    assert "Rent Gradient (วงแหวนราคา)" in html and "(คะแนน 0–100)" in html  # both legends, stacked
+    v2._remote_payload.clear()
+    monkeypatch.setattr(v2.requests, "get", fake_get)
+    defaults = dict(v2.StateManager._DEFAULTS)
+    first = v2.StateManager._load_remote_defaults(defaults)
+    second = v2.StateManager._load_remote_defaults(dict(v2.StateManager._DEFAULTS))
+    assert first == second == [{"lat": 1.0, "lng": 2.0}] and defaults["travel_mode"] == "walk"
+    assert len(calls) == 1
+    v2._remote_payload.clear()
 
 
-def test_a_layer_without_data_is_hidden_and_a_broken_layer_only_adds_a_warning():
-    ctx = make_ctx(rent=None)
-    fmap, drawn, warnings = v2.render_layers(ctx, ["rent_rings", "space_syntax"])
-    assert drawn == ["space_syntax"] and warnings == []
-    for bad in ({"error": "x"}, {"rings_geojson": None}, {"rings_geojson": {"features": []}}, "text", 5):
-        assert v2.layer_rent_rings(make_ctx(rent=bad)) is None
+def test_a_failing_remote_fetch_is_not_retried_by_every_session(monkeypatch):
+    calls = []
 
-    def boom(_ctx):
-        raise RuntimeError("layer exploded")
+    def boom(url, timeout):
+        calls.append(url)
+        raise v2.requests.ConnectionError("offline")
 
-    layers = (("rent_rings", "rings", boom), ("space_syntax", "ss", v2.layer_space_syntax))
-    fmap, drawn, warnings = v2.render_layers(ctx, ["rent_rings", "space_syntax"], layers)
-    assert drawn == ["space_syntax"] and len(warnings) == 1 and "layer exploded" in warnings[0]
-    assert fmap.get_root().render()  # the map still builds
-
-
-def test_layer_text_from_osm_and_the_rent_page_is_escaped():
-    graph = helpers.chain(3)
-    for _, _, d in graph.edges(data=True):
-        d["name"] = "<img src=x onerror=alert(1)>"
-    net = core.build_segment_network(graph)
-    result = core.analyse_network(net, radii=(None,), with_choice=False)
-    mask = np.ones(net.n_segments, bool)
-    ctx = make_ctx(rent=RENT, net=net, result=result, mask=mask, mask_key=v2.mask_digest(mask))
-    html = v2.render_layers(ctx, ["rent_rings", "space_syntax"])[0].get_root().render()
-    assert "<img src=x" not in html and "&lt;img src=x" in html
-    assert "<b>" not in html
-    assert re.search(r"(&|\\u0026)lt;b(&|\\u0026)gt;", html)  # folium JSON-encodes "&" as \u0026
+    v2._remote_payload.clear()
+    monkeypatch.setattr(v2.requests, "get", boom)
+    assert v2.StateManager._load_remote_defaults(dict(v2.StateManager._DEFAULTS)) is None
+    assert v2.StateManager._load_remote_defaults(dict(v2.StateManager._DEFAULTS)) is None
+    assert len(calls) == 1
+    v2._remote_payload.clear()
 
 
-def test_toggling_layers_reuses_the_cached_layer_data(monkeypatch):
-    built = []
-    real = core.segments_geojson
-    monkeypatch.setattr(core, "segments_geojson", lambda *a, **k: built.append(1) or real(*a, **k))
-    ctx = make_ctx()
-    for enabled in (["space_syntax"], ["rent_rings"], ["space_syntax"], ["rent_rings", "space_syntax"]):
-        v2.render_layers(ctx, enabled)
-    assert len(built) == 1  # one GeoJSON for four renders
-    v2.render_layers(make_ctx(cache=ctx.cache, measure="choice"), ["space_syntax"])
-    v2.render_layers(make_ctx(cache=ctx.cache, run_id=2), ["space_syntax"])  # a new analysis invalidates
-    assert len(built) == 3
+def test_overpass_lock_is_one_object_for_the_whole_process_even_though_streamlit_re_executes_the_module():
+    first = v2._OVERPASS_LOCK
+    again = load(PAGE, "rent_gradient_new_v2_under_test")      # what a Streamlit rerun does: same name, fresh module
+    assert again is not v2 and again._OVERPASS_LOCK is first
+    assert hasattr(v2._OVERPASS_LOCK, "acquire") and hasattr(v2._OVERPASS_LOCK, "release")
+    with v2._OVERPASS_LOCK:                      # re-entrant, as the downloader nests it
+        with v2._OVERPASS_LOCK:
+            pass
 
 
-def test_choice_and_local_radius_are_selectable():
-    ctx = make_ctx(measure="choice", rkey="300")
-    html = v2.render_layers(ctx, ["space_syntax"])[0].get_root().render()
-    assert "Choice (NACH)" in html and "300 m" in html
+def test_every_cache_data_wrapper_is_bounded():
+    text = PAGE.read_text(encoding="utf-8")
+    decorators = re.findall(r"@st\.cache_data\((.*)\)\n", text)
+    assert decorators and all("max_entries=" in d for d in decorators), decorators
 
 
-# ----------------------------------------------------------------- Streamlit flow
-def _app(rent=None):
-    net = core.build_segment_network(helpers.grid_graph(8))
-    app = AppTest.from_file(str(PAGE), default_timeout=120)
-    app.session_state["rgn_net"] = net
-    app.session_state["rgn_meta"] = {"source": "test", "lat": helpers.LAT0, "lon": helpers.LON0,
-                                     "radius_m": None, "network": "drive", "nodes": net.n_nodes,
-                                     "edges": net.n_segments}
-    app.session_state["rgn_autorun"] = True
-    if rent is not None:
-        app.session_state["rent_gradient_data"] = rent
-    return app
+def make_state(monkeypatch):
+    state = dict(v2.StateManager._DEFAULTS)
+    state["markers"] = []
+    monkeypatch.setattr(v2.st, "session_state", state)
+    return state
 
 
-def _w(widgets, text):
-    return next(w for w in widgets if text in w.label)
+def test_import_config_ignores_values_of_the_wrong_type_and_keeps_the_good_ones(monkeypatch):
+    state = make_state(monkeypatch)
+    payload = {
+        "markers": [{"lat": 20.2, "lng": 100.4, "active": True}],
+        "settings": {
+            "travel_mode": "walk",                   # good
+            "show_traffic": "yes",                   # bool expected
+            "anchor_radius_km": 500,                 # out of range
+            "time_intervals": ["x"],                 # not minutes
+            "map_style_name": "no such style",
+            "rent_samples": [{"lat": 1, "lon": 2, "rent": "n/a"}],
+            "colors": {"step1": 1},
+            "anchor_use_evidence": True,             # good
+        },
+        "precomputed_results": {"network_data": ["not", "a", "dict"], "isochrone_data": None},
+    }
+    skipped = v2.StateManager.import_config(payload)
+    assert state["travel_mode"] == "walk" and state["anchor_use_evidence"] is True
+    assert state["markers"] == payload["markers"]
+    assert state["show_traffic"] is False and state["anchor_radius_km"] == 10.0
+    assert state["time_intervals"] == [5] and state["map_style_name"] == v2.StateManager._DEFAULTS["map_style_name"]
+    assert state["network_data"] is None
+    assert set(skipped) == {"show_traffic", "anchor_radius_km", "time_intervals", "map_style_name",
+                            "rent_samples", "colors", "network_data"}
+    assert state["_import_skipped"] == skipped
+    assert v2.StateManager.import_config({"markers": "oops"}) == ["markers"]
 
 
-def test_cold_start_and_page_flow_without_exceptions():
-    cold = AppTest.from_file(str(PAGE), default_timeout=120).run()
-    assert not cold.exception and cold.info and "โหลดโครงข่ายถนน" in cold.info[0].value
-    app = _app().run()
-    assert not app.exception and not app.error
-    assert _w(app.multiselect, "เลเยอร์บนแผนที่").value == ["rent_rings", "space_syntax"]
-    assert any("ยังไม่มีผล Rent Gradient" in c.value for c in app.caption)  # rings enabled, no data
-    assert any("เลเยอร์ที่แสดง" in c.value for c in app.caption)
-
-
-def test_page_toggles_layers_measure_and_radius_and_shows_rent_rings_when_available():
-    app = _app(rent=RENT).run()
-    assert not app.exception and not any("ยังไม่มีผล Rent Gradient" in c.value for c in app.caption)
-    assert any("Rent rings" in c.value for c in app.caption if "เลเยอร์ที่แสดง" in c.value)
-    _w(app.multiselect, "เลเยอร์บนแผนที่").set_value(["space_syntax"]).run()
-    assert not app.exception
-    _w(app.multiselect, "เลเยอร์บนแผนที่").set_value([]).run()
-    assert not app.exception and any("ยังไม่ได้เปิดเลเยอร์" in i.value for i in app.info)
-    _w(app.multiselect, "เลเยอร์บนแผนที่").set_value(["space_syntax"]).run()
-    _w(app.radio, "ตัวชี้วัด").set_value("choice").run()
-    _w(app.selectbox, "รัศมีที่แสดง").set_value("800").run()
-    assert not app.exception and not app.error
-
-
-def test_a_new_analysis_invalidates_the_cache_through_the_run_counter():
-    app = _app().run()
-    first = app.session_state["rgv2_run"]
-    app.run()  # plain rerun: same result, same counter
-    assert app.session_state["rgv2_run"] == first
-    _w(app.button, "วิเคราะห์ Space Syntax").click().run()
-    assert app.session_state["rgv2_run"] == first + 1 and not app.exception
+def test_a_saved_config_still_round_trips(monkeypatch):
+    state = make_state(monkeypatch)
+    state.update(travel_mode="bicycle", show_golden_spots=False, rent_samples=[{"lat": 1.0, "lon": 2.0, "rent": 3.0}])
+    exported = json.loads(v2.StateManager.export_config())
+    state.update(travel_mode="drive", show_golden_spots=True, rent_samples=[])
+    assert v2.StateManager.import_config(exported) == []
+    assert state["travel_mode"] == "bicycle" and state["show_golden_spots"] is False
+    assert state["rent_samples"] == [{"lat": 1.0, "lon": 2.0, "rent": 3.0}]
