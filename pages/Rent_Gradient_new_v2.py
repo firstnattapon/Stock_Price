@@ -433,6 +433,11 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) < float("inf")
 
 
+def _is_css_colour(value: Any) -> bool:
+    """``#rgb`` / ``#rrggbb`` / ``#rrggbbaa`` or a plain colour name — nothing that could close a style attribute."""
+    return isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{3,8}|[A-Za-z]{3,24}", value) is not None
+
+
 def _valid_samples(value: Any) -> bool:
     return isinstance(value, list) and all(
         isinstance(row, dict) and all(_is_number(row.get(k)) for k in ("lat", "lon", "rent")) for row in value)
@@ -452,7 +457,7 @@ _SETTING_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "anchor_radius_km": lambda v: _is_number(v) and 4.0 <= v <= 20.0,
     "anchor_lat": lambda v: _is_number(v) and -85.0 <= v <= 85.0,
     "anchor_lon": lambda v: _is_number(v) and -180.0 <= v <= 180.0,
-    "colors": lambda v: isinstance(v, dict) and all(isinstance(v.get(k), str) for k in
+    "colors": lambda v: isinstance(v, dict) and all(_is_css_colour(v.get(k)) for k in
                                                     ("step1", "step2", "step3", "step4")),
     "rent_samples": _valid_samples,
     "ss_kind": lambda v: v in DISTANCE_KINDS,
@@ -483,6 +488,17 @@ def _setting_ok(key: str, value: Any) -> bool:
         return _is_number(value)
     if isinstance(default, (str, list, dict)):
         return isinstance(value, type(default))
+    return True
+
+
+def _result_ok(key: str, value: Any) -> bool:
+    """An imported result is ``None`` or a dict; a Rent Gradient result also needs the keys the page indexes."""
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    if key == StateManager.K_RENT_DATA and "error" not in value:
+        return isinstance(value.get("model"), dict) and isinstance(value.get("anchor"), dict) and "curve" in value
     return True
 
 
@@ -614,8 +630,10 @@ class StateManager:
         for key, value in defaults.items():
             st.session_state.setdefault(key, value)
 
-        # A widget that is not drawn in a run loses its state; writing the value back keeps it for later.
-        for key in KEEP_ALIVE_KEYS:
+        # A widget that is not drawn in a run loses its state: the ones that are sometimes hidden, and — on Streamlit
+        # before 1.63 — every widget below an st.rerun() (the layers panel is drawn after the stages, one of which
+        # reruns). Writing the value back turns it into a plain session value, which cleanup leaves alone.
+        for key in dict.fromkeys((*KEEP_ALIVE_KEYS, *SHOW_KEYS, "analytics_view")):
             if key in st.session_state:
                 st.session_state[key] = st.session_state[key]
 
@@ -782,6 +800,11 @@ class StateManager:
         if "space_syntax" in layers:
             for key in SS_STATE_KEYS:
                 st.session_state.pop(key, None)
+        # display payloads are derived from a result and hold a reference to it: forget them together
+        forget_payloads(st.session_state.get("layer_cache"),
+                        rows=(["betweenness", "closeness"] if "network" in layers else [])
+                        + (["rent_heat"] if "rent" in layers or "anchor" in layers else []),
+                        ss="space_syntax" in layers)
 
     @classmethod
     def reset(cls) -> None:
@@ -794,27 +817,53 @@ class StateManager:
     def import_config(cls, data: Dict[str, Any]) -> List[str]:
         """Import settings + optional precomputed outputs from config.
 
-        Values with the wrong type/range are skipped instead of breaking the page; their names are returned
-        and kept in ``_import_skipped`` so the UI can say what was ignored.
+        Everything is checked first and applied afterwards, so a config that is not usable changes nothing.
+        Values with the wrong type/range (or a container of the wrong kind) are skipped instead of breaking the
+        page; their names are returned and kept in ``_import_skipped`` so the UI can say what was ignored.
         """
+        if not isinstance(data, dict):
+            raise ValueError("config ต้องเป็น JSON object")
         skipped: List[str] = []
+
+        markers = None
         if "markers" in data:
             if _valid_markers(data["markers"]):
-                st.session_state[cls.K_MARKERS] = data["markers"]
+                markers = data["markers"]
             else:
                 skipped.append("markers")
 
-        settings = data.get("settings", {})
-        for k, v in settings.items():
+        settings = data.get("settings")
+        if settings is not None and not isinstance(settings, dict):
+            skipped.append("settings")
+        good_settings: Dict[str, Any] = {}
+        for k, v in (settings if isinstance(settings, dict) else {}).items():
             if k in SESSION_KEYS_TO_SAVE:
                 if _setting_ok(k, v):
-                    st.session_state[k] = v
+                    good_settings[k] = v
                 else:
                     skipped.append(k)
 
+        precomputed = data.get("precomputed_results")
+        if precomputed is not None and not isinstance(precomputed, dict):
+            skipped.append("precomputed_results")
+        good_results: Dict[str, Any] = {}
+        # the nested layout first, then the old flat one (which wins when both are present)
+        for source in (precomputed if isinstance(precomputed, dict) else {}, data):
+            for result_key in RESULT_KEYS_TO_SAVE:
+                if result_key in source:
+                    if _result_ok(result_key, source[result_key]):
+                        good_results[result_key] = source[result_key]
+                    else:
+                        skipped.append(result_key)
+
+        if markers is not None:
+            st.session_state[cls.K_MARKERS] = markers
+        for k, v in good_settings.items():
+            st.session_state[k] = v
+
         # The combined coordinate widget is UI-only. Keep it synchronized with
         # the legacy anchor_lat / anchor_lon keys used by saved configurations.
-        if "anchor_lat" in settings or "anchor_lon" in settings:
+        if "anchor_lat" in good_settings or "anchor_lon" in good_settings:
             st.session_state["anchor_center_input"] = (
                 f"{float(st.session_state['anchor_lat'])!r}, "
                 f"{float(st.session_state['anchor_lon'])!r}"
@@ -823,22 +872,8 @@ class StateManager:
         # Start from a clean slate so keys absent from the payload
         # don't keep stale results anchored to the previous CBD.
         cls.clear_results()
-
-        precomputed_results = data.get("precomputed_results", {})
-        for result_key in RESULT_KEYS_TO_SAVE:
-            if result_key in precomputed_results:
-                if precomputed_results[result_key] is None or isinstance(precomputed_results[result_key], dict):
-                    st.session_state[result_key] = precomputed_results[result_key]
-                else:
-                    skipped.append(result_key)
-
-        # Backward compatibility: allow old flat structure.
-        for result_key in RESULT_KEYS_TO_SAVE:
-            if result_key in data:
-                if data[result_key] is None or isinstance(data[result_key], dict):
-                    st.session_state[result_key] = data[result_key]
-                else:
-                    skipped.append(result_key)
+        for k, v in good_results.items():
+            st.session_state[k] = v
 
         st.session_state["_import_skipped"] = skipped
         return skipped
@@ -5151,6 +5186,24 @@ def lru_get(store: Any, key: Any, source: Any, build: Callable[[], Any], limit: 
     return value
 
 
+def forget_payloads(cache: Any, rows: Sequence[str] = (), ss: bool = False) -> None:
+    """Drop display payloads of results that no longer exist: ``rows`` = compact map rows by layer id, ``ss`` = Space
+    Syntax (map rows, scores and the PNG)."""
+    if not cache:
+        return
+    for key in [k for k in cache if (k[0] == "rows" and k[1] in rows) or (ss and k[0] in ("ss", "ss-png"))]:
+        del cache[key]
+
+
+def js_literal_safe(html: str) -> str:
+    """Finished HTML → safe inside the JS template literal that folium wraps around Tooltip/Popup text.
+
+    ``html.escape`` stops tags but not the three characters that matter there: a backtick ends the literal (the
+    whole map script dies), ``${…}`` runs code and a backslash escapes. Their HTML entities look the same on screen.
+    """
+    return html.replace("\\", "&#92;").replace("`", "&#96;").replace("$", "&#36;")
+
+
 # ------------------------------------------------------------------ compact browser-side shapes
 def _json_js(value: Any) -> str:
     """JSON that is safe to paste into an inline script (no ``</script>`` break-out)."""
@@ -5160,9 +5213,11 @@ def _json_js(value: Any) -> str:
 
 
 def _short(value: Any) -> Any:
-    """Tooltip value: numbers rounded to 3 places, missing → dash."""
+    """Tooltip value: numbers rounded to 3 places, missing → dash, text escaped (it is placed in HTML)."""
     if value is None or (isinstance(value, float) and value != value):
         return "—"
+    if isinstance(value, str):
+        return escape(value)
     return round(value, 3) if isinstance(value, float) else value
 
 
@@ -5206,7 +5261,8 @@ _TOOLTIP_JS = """
             var tipHtml = function (layer) {
                 var h = '<table class="rgtip">';
                 for (var k = 0; k < heads.length; k++) {
-                    h += '<tr><th>' + heads[k] + '</th><td>' + layer._vals[k] + '</td></tr>';
+                    var v = layer._vals[k];
+                    h += '<tr><th>' + heads[k] + '</th><td>' + (typeof v === 'number' ? v.toLocaleString() : v) + '</td></tr>';
                 }
                 return h + '</table>';
             };
@@ -5232,8 +5288,8 @@ class CompactLines(MacroElement):
                 group.addLayer(line);
             }
             if (hover) {
-                group.on("mouseover", function (e) { var l = e.layer; l._w0 = l.options.weight; l.setStyle({weight: l._w0 + 3, opacity: 1}); });
-                group.on("mouseout", function (e) { var l = e.layer; l.setStyle({weight: l._w0, opacity: opacity}); });
+                group.on("mouseover", function (e) { var l = e.layer; if (!l._vals) { return; } l._w0 = l.options.weight; l.setStyle({weight: l._w0 + 3, opacity: 1}); });
+                group.on("mouseout", function (e) { var l = e.layer; if (!l._vals) { return; } l.setStyle({weight: l._w0, opacity: opacity}); });
             }
         })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.opacity }}, {{ this.hover_js }});
         {% endmacro %}
@@ -5286,13 +5342,15 @@ class ViewMemory(MacroElement):
             try {
                 var key = "rgv2_view", token = {{ this.token_json }};
                 var saved = JSON.parse(window.sessionStorage.getItem(key) || "null");
-                if (saved && saved.token === token) { map.setView(saved.center, saved.zoom, {animate: false}); }
-                map.on("moveend", function () {
+                var remember = function () {
                     try {
                         var c = map.getCenter();
                         window.sessionStorage.setItem(key, JSON.stringify({token: token, center: [c.lat, c.lng], zoom: map.getZoom()}));
                     } catch (e) {}
-                });
+                };
+                if (saved && saved.token === token) { map.setView(saved.center, saved.zoom, {animate: false}); }
+                else { remember(); }                                  // a new centre: the view kept for the old one is gone
+                map.on("moveend", remember);
             } catch (e) {}
         })({{ this._parent.get_name() }});
         {% endmacro %}
@@ -5313,7 +5371,7 @@ class LegendBox(MacroElement):
         super().__init__()
         self._name = "LegendBox"
         self.box_html = (
-            '<div style="position:fixed; bottom:18px; left:12px; z-index:9999; max-width:250px; '
+            '<div style="position:fixed; bottom:42px; left:12px; z-index:9999; max-width:250px; '
             'background:rgba(255,255,255,0.93); border:1px solid rgba(11,11,11,0.10); '
             'border-radius:8px; padding:8px 10px; font-size:12px; color:#0b0b0b; '
             'box-shadow:0 1px 4px rgba(0,0,0,0.18); line-height:1.45; '
@@ -5375,7 +5433,8 @@ def draw_evidence_zone(ctx: Ctx) -> Any:
                 {"type": "Feature", "properties": {}, "geometry": zone["polygon"]},
                 style_function=lambda _f, c=zone_color: {"color": c, "weight": 2, "fillColor": c,
                                                          "fillOpacity": 0.25, "dashArray": "6"},
-                tooltip=f"ผังสีสูงสุด{(' ' + escape(str(peak['name']))) if peak else ''} ≈ {zone['area_km2']:.2f} ตร.กม.",
+                tooltip=js_literal_safe(f"ผังสีสูงสุด{(' ' + escape(str(peak['name']))) if peak else ''} "
+                                        f"≈ {zone['area_km2']:.2f} ตร.กม."),
             ).add_to(group)
     return group
 
@@ -5395,6 +5454,18 @@ def draw_evidence_clusters(ctx: Ctx) -> Any:
     return group
 
 
+def _escaped_properties(geojson: Dict[str, Any], fields: Sequence[str]) -> Dict[str, Any]:
+    """Copy of ``geojson`` whose text properties named in ``fields`` are HTML-escaped (the stored result is untouched)."""
+    features = []
+    for feature in geojson.get("features") or []:
+        props = dict(feature.get("properties") or {})
+        for name in fields:
+            if isinstance(props.get(name), str):
+                props[name] = escape(props[name])
+        features.append({**feature, "properties": props})
+    return {**geojson, "features": features}
+
+
 def draw_rent_rings(ctx: Ctx) -> Any:
     rings = ctx.rent["rings_geojson"]
     ring_feats = rings.get("features") or []
@@ -5404,6 +5475,7 @@ def draw_rent_rings(ctx: Ctx) -> Any:
     if has_nodes_label:
         tooltip_fields.append("nodes_label")
         tooltip_aliases.append("โหนด Network:")
+    rings = _escaped_properties(rings, tooltip_fields)        # the tooltip puts these strings into HTML
     return folium.GeoJson(
         rings,
         name="Rent Gradient Rings",
@@ -5518,6 +5590,15 @@ def draw_railway(_ctx: Ctx) -> Any:
     )
 
 
+def _stability_html(result: Dict[str, Any]) -> str:
+    """``_stability_popup`` for a map popup: the level comes from a saved result, so it is escaped."""
+    stability = result.get("stability")
+    if not stability:
+        return ""
+    return (f"<br>Stability: {escape(str(stability['level']))} "
+            f"(max drift {float(stability['max_drift_m']):.0f} m, indicative)")
+
+
 def draw_cbd_anchor(ctx: Ctx) -> Any:
     """Automated anchors (composite / closeness / evidence) — or the Rent Gradient's own anchor when none."""
     group = folium.FeatureGroup(name="CBD Anchor", show=True)
@@ -5525,9 +5606,9 @@ def draw_cbd_anchor(ctx: Ctx) -> Any:
         anchor = ctx.anchor["anchor"]
         folium.Marker(
             [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor",
-            popup=folium.Popup(f"<b>Automated CBD Anchor</b><br>Score: {anchor['score']:.4f}"
-                               f"<br>Junctions / 500 m: {anchor['junction_count']}"
-                               + _stability_popup(ctx.anchor), max_width=280),
+            popup=folium.Popup(js_literal_safe(f"<b>Automated CBD Anchor</b><br>Score: {anchor['score']:.4f}"
+                                               f"<br>Junctions / 500 m: {anchor['junction_count']}"
+                                               + _stability_html(ctx.anchor)), max_width=280),
             icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
         ).add_to(group)
     if ctx.anchor_closeness:
@@ -5536,12 +5617,13 @@ def draw_cbd_anchor(ctx: Ctx) -> Any:
             [anchor["lat"], anchor["lon"]],
             tooltip="Automated CBD Anchor — Closeness 100%",
             popup=folium.Popup(
-                f"<b>Automated CBD Anchor — Closeness 100%</b>"
-                f"<br>Closeness norm: {anchor['closeness_norm']:.6f}"
-                f"<br>Closeness: {anchor['closeness']:.8f} 1/m"
-                f"<br>Degree: {anchor['degree']} (diagnostic)"
-                f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)"
-                + _stability_popup(ctx.anchor_closeness),
+                js_literal_safe(
+                    f"<b>Automated CBD Anchor — Closeness 100%</b>"
+                    f"<br>Closeness norm: {anchor['closeness_norm']:.6f}"
+                    f"<br>Closeness: {anchor['closeness']:.8f} 1/m"
+                    f"<br>Degree: {anchor['degree']} (diagnostic)"
+                    f"<br>Junctions / 500 m: {anchor['junction_count']} (diagnostic)"
+                    + _stability_html(ctx.anchor_closeness)),
                 max_width=320,
             ),
             icon=folium.Icon(color="green", icon="bullseye", prefix="fa"),
@@ -5551,20 +5633,21 @@ def draw_cbd_anchor(ctx: Ctx) -> Any:
         folium.Marker(
             [anchor["lat"], anchor["lon"]], tooltip="Automated CBD Anchor — Evidence",
             popup=folium.Popup(
-                f"<b>Automated CBD Anchor — Evidence</b><br>Confidence: {escape(str(confidence['level']))}"
-                f"<br>Cluster score: {anchor['score']:.3f}"
-                f"<br>Parcel coverage: {anchor['coverage']:.0%}"
-                + "".join(f"<br>• {escape(str(reason))}" for reason in confidence["reasons"]), max_width=360),
+                js_literal_safe(
+                    f"<b>Automated CBD Anchor — Evidence</b><br>Confidence: {escape(str(confidence['level']))}"
+                    f"<br>Cluster score: {anchor['score']:.3f}"
+                    f"<br>Parcel coverage: {anchor['coverage']:.0%}"
+                    + "".join(f"<br>• {escape(str(reason))}" for reason in confidence["reasons"])), max_width=360),
             icon=folium.Icon(color="purple", icon="star", prefix="fa"),
         ).add_to(group)
     if ctx.rent and not ctx.anchor:
         rent_anchor, rent_model = ctx.rent["anchor"], ctx.rent["model"]
         folium.Marker(
             [rent_anchor["lat"], rent_anchor["lon"]],
-            tooltip=f"จุดยึด CBD — {escape(str(rent_anchor['source']))}",
+            tooltip=js_literal_safe(f"จุดยึด CBD — {escape(str(rent_anchor['source']))}"),
             popup=folium.Popup(
-                f"<b>CBD Anchor</b><br>{escape(str(rent_anchor['source']))}<br>"
-                f"R₀ = {format_rent_value(rent_model['r0'], rent_model)}",
+                js_literal_safe(f"<b>CBD Anchor</b><br>{escape(str(rent_anchor['source']))}<br>"
+                                f"R₀ = {escape(format_rent_value(rent_model['r0'], rent_model))}"),
                 max_width=260,
             ),
             icon=folium.Icon(color="darkblue", icon="building", prefix="fa"),
@@ -5584,11 +5667,11 @@ def draw_markers(ctx: Ctx) -> Any:
             est = predict_rent(d_km, rent_model["r0"], rent_model["lam"])
             popup_html += (
                 f"<br>ระยะจาก CBD: {d_km:.2f} km"
-                f"<br>ประเมิน: {format_rent_value(est, rent_model)}"
+                f"<br>ประเมิน: {escape(format_rent_value(est, rent_model))}"
             )
         folium.Marker(
             [marker["lat"], marker["lng"]],
-            popup=folium.Popup(popup_html, max_width=260),
+            popup=folium.Popup(js_literal_safe(popup_html), max_width=260),
             icon=folium.Icon(
                 color=MARKER_COLORS[i % len(MARKER_COLORS)] if active else "gray",
                 icon="map-marker" if active else "ban",
@@ -5600,7 +5683,7 @@ def draw_markers(ctx: Ctx) -> Any:
 
 # ------------------------------------------------------------------ legend sections
 def legend_travel_areas(ctx: Ctx) -> str:
-    clrs = ctx.colors
+    clrs = {step: escape(str(color), quote=True) for step, color in ctx.colors.items()}   # may come from a config
     return "".join([
         '<div style="font-weight:600; margin-bottom:2px;">เวลาเดินทาง</div>',
         _legend_swatch_row(clrs["step1"], "≤ 10 นาที"),
@@ -5716,7 +5799,7 @@ def draw_space_syntax(ctx: Ctx) -> Any:
     for row in payload["top"]:
         folium.Marker(
             [row["lat"], row["lon"]],
-            tooltip=f"#{row['rank']} · คะแนน {row['score']:.1f} · {escape(str(row['label']))}",
+            tooltip=js_literal_safe(f"#{row['rank']} · คะแนน {row['score']:.1f} · {escape(str(row['label']))}"),
             icon=folium.DivIcon(html=(
                 '<div style="width:22px;height:22px;line-height:20px;border-radius:50%;text-align:center;'
                 'background:#fff;color:#b00020;border:2px solid #b00020;font:700 11px system-ui;">'
@@ -5774,13 +5857,14 @@ LAYERS: Tuple[Layer, ...] = (
     # tile overlays first: the browser always paints tiles below vector layers
     Layer("traffic", "Google Traffic", "บริบท & overlay", draw_traffic, _always, show_key="show_traffic",
           label="🚦 การจราจร (Google Traffic)"),
+    # the three WMS overlays were always on the map's LayerControl (unticked = hidden, one click to show): keep that
     Layer("wms_population", "ความหนาแน่นประชากร", "บริบท & overlay",
           _wms("thailand_population", "ความหนาแน่นประชากร"), _always, show_key="show_population",
-          label="👥 ความหนาแน่นประชากร"),
+          label="👥 ความหนาแน่นประชากร", start_hidden=True),
     Layer("wms_cityplan", "ผังเมืองรวม", "บริบท & overlay", _wms("cityplan_dpt", "ผังเมืองรวม", "cityplan_opacity"),
-          _always, show_key="show_cityplan", label="🏙️ ผังเมืองรวม", options=_options_cityplan),
+          _always, show_key="show_cityplan", label="🏙️ ผังเมืองรวม", options=_options_cityplan, start_hidden=True),
     Layer("wms_dol", "รูปแปลงที่ดิน", "บริบท & overlay", _wms("dol", "รูปแปลงที่ดิน"), _always,
-          show_key="show_dol", label="📜 รูปแปลงที่ดิน"),
+          show_key="show_dol", label="📜 รูปแปลงที่ดิน", start_hidden=True),
     # automated-anchor details: small, unticked by default — they stay on the map's LayerControl (start_hidden)
     # exactly as before, and the checkbox now also decides whether they start visible
     Layer("anchor_boundary", "Automated Anchor study boundary", "Automated Anchor", draw_anchor_boundary,
@@ -5945,12 +6029,27 @@ def build_base_map(ctx: Ctx) -> Any:
     return m
 
 
+def ss_bounds(view: SpaceSyntaxView) -> Optional[List[List[float]]]:
+    """``[[south, west], [north, east]]`` of the segments that are shown (``None`` when there are none)."""
+    mid = view.net.seg_mid_lonlat[view.mask]
+    if len(mid) == 0:
+        return None
+    (west, south), (east, north) = mid.min(axis=0), mid.max(axis=0)
+    return [[float(south), float(west)], [float(north), float(east)]]
+
+
 def render_map(ctx: Ctx) -> Optional[Dict[str, Any]]:
     """Build and display the Folium map. Returns the ``st_folium`` output dict."""
     m = build_base_map(ctx)
     drawn, warnings = render_layers(ctx, m)
     if REMEMBER_VIEW:
         ViewMemory(f"{ctx.center[0]:.5f},{ctx.center[1]:.5f}").add_to(m)
+    # the run that has just finished the analysis shows the study area once (after the remembered view is restored);
+    # later reruns keep whatever the user did with the map
+    if st.session_state.pop("ss_focus", False) and ctx.ss is not None and ctx.show.get("show_space_syntax"):
+        bounds = ss_bounds(ctx.ss)
+        if bounds:
+            folium.FitBounds(bounds, max_zoom=16).add_to(m)
     folium.LayerControl().add_to(m)
     legend = legend_stack(ctx, drawn)
     if legend is not None:
@@ -6669,13 +6768,18 @@ def _render_sidebar_layers_panel(ctx: Ctx, locked: bool) -> None:
                     layer.options(ctx, locked)
 
 
+def _ss_area_changed() -> bool:
+    """The study area / network type in the sidebar is not the one the loaded road network came from."""
+    return st.session_state.get(SS_KEY) not in (("demo",), ss_study_key())
+
+
 def _ss_status(params: Dict[str, Any]) -> None:
     """One line saying whether what is on the map still matches the sidebar settings."""
     state = st.session_state
     result = state.get(SS_RESULT)
     if state.get(SS_NET) is None:
         return
-    if state.get(SS_KEY) not in (("demo",), ss_study_key()):
+    if _ss_area_changed():
         st.warning("พื้นที่ศึกษา / ชนิดโครงข่ายที่ตั้งไว้ต่างจากที่โหลดอยู่ — กดวิเคราะห์เพื่ออัปเดต", icon="⚠️")
     elif result is not None and result.meta.get("params") != params:
         st.warning("ตั้งค่าเปลี่ยนไปจากที่คำนวณไว้ — กดวิเคราะห์เพื่ออัปเดตผล", icon="⚠️")
@@ -6976,7 +7080,9 @@ def view_space_syntax(ctx: Ctx) -> None:
         return
     net, meta, result, mask, d = view.net, view.meta, view.result, view.mask, view.display
     _summary_row(net, meta, mask, result)
-    if result.meta.get("params") != ss_params():
+    if _ss_area_changed():
+        st.warning("พื้นที่ศึกษา / ชนิดโครงข่ายที่ตั้งไว้ต่างจากที่โหลดอยู่ — กด 🧮 วิเคราะห์ เพื่ออัปเดตผล")
+    elif result.meta.get("params") != ss_params():
         st.warning("ตั้งค่า Space Syntax เปลี่ยนไปจากที่คำนวณไว้ — กด 🧮 วิเคราะห์ เพื่ออัปเดตผล")
     notes = [f"ระยะ: {DISTANCE_KINDS[result.kind]['label']}",
              "รัศมี: " + ", ".join(radius_label(r) for r in result.radii)]
@@ -7862,6 +7968,7 @@ def perform_space_syntax(intents: Dict[str, Any]) -> None:
     result.meta["params"] = dict(params)
     state[SS_RESULT] = result
     state[SS_RUN] = int(state.get(SS_RUN, 0)) + 1
+    state["ss_focus"] = True                         # the map shows the study area once (see render_map)
     st.toast(f"✅ Space Syntax เสร็จใน {result.meta['seconds']:.1f} วินาที", icon="🧭")
 
 

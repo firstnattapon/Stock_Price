@@ -967,7 +967,8 @@ def test_cold_start_shows_every_panel_and_every_layer_checkbox(monkeypatch):
             at.checkbox(key=layer.show_key)                           # raises KeyError if the checkbox is missing
     assert at.radio(key="analytics_view").value == "curve" and not at.exception
     assert any("ชั้น Space Syntax" in c.value for c in at.caption)
-    assert map_layers(rendered) == []                                 # nothing computed yet → an empty map, no crash
+    # nothing computed yet → only the three WMS overlays (unticked, one click to show — as on the old page), no crash
+    assert map_layers(rendered) == ["ความหนาแน่นประชากร", "ผังเมืองรวม", "รูปแปลงที่ดิน"]
     assert any("ยังไม่มีข้อมูล" in c.value for c in at.caption)       # the layers panel says what to run first
 
 
@@ -1107,3 +1108,237 @@ def test_tab_bodies_still_work_with_results(monkeypatch):
         at.radio(key="analytics_view").set_value(key).run()
         assert not at.exception, key
     assert at.radio(key="analytics_view").value == "curve"
+
+
+# ----------------------------------------------------------------------------- fixes from the independent review
+DANGEROUS = ["Soi `5", "Soi ${window.__pwned=1}", "Soi \\", "x</script><img src=x onerror=alert(1)>"]
+
+
+def folium_texts(element):
+    """Every tooltip / popup text inside a drawn element (what folium pastes into a JS template literal)."""
+    out = []
+    for child in walk(element):
+        if isinstance(child, folium.Tooltip):
+            out.append(child.text)
+        elif isinstance(child, folium.Popup):
+            out.extend(html.data for html in child.html._children.values())
+    return out
+
+
+def assert_literal_safe(texts, payload):
+    assert texts, "nothing was drawn"
+    for text in texts:
+        assert not any(ch in text for ch in "`$\\"), text                       # cannot end, run or escape the literal
+        assert "<img" not in text and "<script" not in text, text               # and is not HTML either
+
+
+@pytest.mark.parametrize("payload", DANGEROUS)
+def test_text_from_results_cannot_end_or_run_the_javascript_template_literal(payload):
+    # street name → top-N pin tooltip
+    graph = helpers.chain(3)
+    for _, _, data in graph.edges(data=True):
+        data["name"] = payload
+    pins = [t for t in folium_texts(v2.draw_space_syntax(ss_ctx(graph, ss_topn=2))) if t.startswith("#")]
+    assert_literal_safe(pins, payload)
+    # saved anchor / evidence / rent results → popups and tooltips
+    evidence = dict(EVIDENCE, confidence={"level": payload, "reasons": [payload]},
+                    plan={"peak": {"rgb": [1, 2, 3], "name": payload}, "zones": [{"polygon": POLY, "area_km2": 1.0}]})
+    ctx = rich_ctx()
+    rent = dict(ctx.rent, anchor=dict(ctx.rent["anchor"], source=payload), model=dict(
+        ctx.rent["model"], is_index=False, unit=payload))
+    stable = {"stability": {"level": payload, "max_drift_m": 12.0}}
+    ctx = v2.Ctx(**{**ctx.__dict__, "evidence": evidence, "rent": rent, "anchor": None,
+                    "anchor_closeness": dict(ctx.anchor_closeness, **stable)})
+    for draw in (v2.draw_cbd_anchor, v2.draw_markers, v2.draw_evidence_zone):
+        assert_literal_safe(folium_texts(draw(ctx)), payload)
+    with_anchor = v2.Ctx(**{**ctx.__dict__, "anchor": dict(rich_ctx().anchor, **stable)})
+    assert_literal_safe(folium_texts(v2.draw_cbd_anchor(with_anchor)), payload)
+
+
+def test_a_street_name_with_a_backtick_still_gives_a_map_script_that_draws_the_pins():
+    graph = helpers.chain(3)
+    for _, _, data in graph.edges(data=True):
+        data["name"] = "Soi `5 ${x}"
+    ctx = ss_ctx(graph, ss_topn=2)
+    page = folium.Map()
+    v2.draw_space_syntax(ctx).add_to(page)
+    html = page.get_root().render()
+    # (the compact rows are JSON data inside a normal string literal, where both characters are harmless)
+    script = html.replace(v2.ss_payload(ctx)["rows_json"], "")
+    assert "Soi &#96;5 &#36;{x}" in script and "Soi `5" not in script and "${x}" not in script
+
+
+def test_rent_ring_tooltips_get_their_text_escaped_without_touching_the_saved_result():
+    ctx = rich_ctx()
+    rings = json.loads(json.dumps(ctx.rent["rings_geojson"]))
+    rings["features"][0]["properties"]["rent_label"] = "<b>25,000</b> ${x}"
+    saved = json.dumps(rings, sort_keys=True)
+    group = v2.draw_rent_rings(v2.Ctx(**{**ctx.__dict__, "rent": dict(ctx.rent, rings_geojson=rings)}))
+    label = group.data["features"][0]["properties"]["rent_label"]
+    assert "<b>" not in label and "&lt;b&gt;25,000&lt;/b&gt;" in label
+    assert json.dumps(rings, sort_keys=True) == saved                         # the stored result keeps its text
+    assert v2._short("<i>x</i>") == "&lt;i&gt;x&lt;/i&gt;" and v2._short(1234.56789) == 1234.568
+
+
+def test_tooltips_keep_their_thousands_separators_and_only_lines_with_values_get_hover_styles():
+    rows = v2._json_js([["#ff0000", 3.0, [25000.5], [20.1, 100.1, 20.2, 100.2]]])
+    group = folium.FeatureGroup(name="x")
+    v2.CompactLines(rows, heads=("v:",), hover=True).add_to(group)
+    m = folium.Map()
+    group.add_to(m)
+    html = m.get_root().render()
+    assert "v.toLocaleString()" in html                                        # 25,000.5 as GeoJsonTooltip(localize=True)
+    assert html.count("if (!l._vals) { return; }") == 2                        # a pin or the circle in the group is skipped
+
+
+def test_colours_that_could_leave_a_style_attribute_are_not_imported_and_are_escaped_anyway(monkeypatch):
+    good = {"step1": "#2A9D8F", "step2": "#E9C46A", "step3": "orange", "step4": "#e76f51cc"}
+    assert v2._setting_ok("colors", good)
+    for bad in ('red;"></span><img src=x onerror=1>', "url(javascript:1)", "#12", "", 5, "a b"):
+        assert not v2._setting_ok("colors", dict(good, step1=bad)), bad
+    state = make_state(monkeypatch)
+    assert v2.StateManager.import_config({"settings": {"colors": dict(good, step2='"><img src=x>')}}) == ["colors"]
+    assert state["colors"] == v2.StateManager._DEFAULTS["colors"]
+    evil = dict(good, step1='red;"></span><img src=x onerror=1>')
+    html = v2.legend_travel_areas(make_ctx(colors=evil))
+    assert "<img" not in html and "&lt;img" in html
+
+
+def test_import_config_changes_nothing_when_the_config_is_not_an_object(monkeypatch):
+    state = make_state(monkeypatch)
+    state["markers"] = [{"lat": 1.0, "lng": 2.0, "active": True}]
+    state["network_data"] = {"edges": {}}
+    for config in (["not", "an", "object"], "text", None, 5):
+        with pytest.raises(ValueError):
+            v2.StateManager.import_config(config)
+    assert state["markers"] == [{"lat": 1.0, "lng": 2.0, "active": True}] and state["network_data"] == {"edges": {}}
+
+
+def test_import_config_survives_containers_of_the_wrong_kind_and_still_imports_the_rest(monkeypatch):
+    new_markers = [{"lat": 20.2, "lng": 100.4, "active": True}]
+    for payload, skipped in (({"settings": None}, []), ({"settings": []}, ["settings"]),
+                             ({"precomputed_results": None}, []), ({"precomputed_results": "isochrone_data"},
+                                                                    ["precomputed_results"]),
+                             ({"settings": "x", "precomputed_results": [1]}, ["settings", "precomputed_results"])):
+        state = make_state(monkeypatch)
+        state["isochrone_data"] = {"old": "result of the old markers"}
+        assert v2.StateManager.import_config({"markers": new_markers, **payload}) == skipped, payload
+        assert state["markers"] == new_markers and state["isochrone_data"] is None     # same clean slate as always
+
+
+def test_a_rent_result_without_the_keys_the_page_reads_is_skipped_instead_of_crashing_it(monkeypatch):
+    state = make_state(monkeypatch)
+    good = v2.compute_rent_gradient_data(None, PRE["network_data"], PRE["isochrone_data"], CONFIG["markers"], [], "ดัชนี")
+    assert v2.StateManager.import_config({"precomputed_results": {"rent_gradient_data": {"foo": 1}}}) == ["rent_gradient_data"]
+    assert state["rent_gradient_data"] is None
+    assert v2.StateManager.import_config({"precomputed_results": {"rent_gradient_data": {"error": "no data"}}}) == []
+    assert state["rent_gradient_data"] == {"error": "no data"}
+    assert v2.StateManager.import_config({"precomputed_results": {"rent_gradient_data": good}}) == []
+    assert state["rent_gradient_data"] is good
+
+
+def test_results_that_are_cleared_take_their_display_payloads_with_them(monkeypatch):
+    state = make_state(monkeypatch)
+    ctx = rich_ctx()
+    for draw in (v2.draw_betweenness, v2.draw_closeness, v2.draw_rent_heat):
+        draw(ctx)
+    ss = ss_ctx()
+    v2.draw_space_syntax(ss)
+    cache = ctx.cache
+    for key, value in ss.cache.items():
+        cache[key] = value
+    state["layer_cache"] = cache
+    names = lambda: sorted({k[1] if k[0] == "rows" else k[0] for k in cache})        # noqa: E731
+    assert names() == ["betweenness", "closeness", "rent_heat", "ss"]
+    v2.StateManager.clear_results(["isochrone", "intersection"])                      # unrelated: nothing is dropped
+    assert names() == ["betweenness", "closeness", "rent_heat", "ss"]
+    v2.StateManager.clear_results(["rent"])
+    assert names() == ["betweenness", "closeness", "ss"]
+    v2.StateManager.clear_results(["network"])
+    assert names() == ["ss"]
+    v2.StateManager.clear_results(["space_syntax"])
+    assert len(cache) == 0
+
+
+def test_resetting_or_importing_forgets_every_payload(monkeypatch):
+    state = make_state(monkeypatch)
+    ctx = rich_ctx()
+    v2.draw_betweenness(ctx)
+    state["layer_cache"] = ctx.cache
+    assert len(ctx.cache) == 1
+    v2.StateManager.reset()
+    assert len(ctx.cache) == 0
+    v2.draw_betweenness(ctx)
+    v2.StateManager.import_config({"markers": CONFIG["markers"]})
+    assert len(ctx.cache) == 0
+
+
+def test_the_space_syntax_view_warns_about_a_changed_study_area_like_the_sidebar(monkeypatch):
+    graph = helpers.grid_graph(6)
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda wkt, network_type: (graph, True, None))
+    at = make_app(monkeypatch, config=False, rendered=[], ss_radii=["400 m"], ss_choice=False)
+    at.session_state["analytics_view"] = "space_syntax"
+    at.run()
+    button(at, "วิเคราะห์ Space Syntax").click().run(timeout=300)
+    assert not at.exception and at.session_state["ss_result"] is not None
+    assert not any("ต่างจากที่โหลดอยู่" in w.value for w in at.warning)
+    at.slider(key="ss_radius_m").set_value(2000).run()                        # a different study area, same result
+    warned = [w.value for w in at.warning if "ต่างจากที่โหลดอยู่" in w.value]
+    assert len(warned) == 2, warned                                           # the sidebar line and the view under the map
+
+
+def test_the_run_that_finishes_an_analysis_shows_the_study_area_once(monkeypatch):
+    rendered = []
+    at = make_app(monkeypatch, rendered=rendered, ss_radii=["400 m"], ss_choice=False).run()
+    assert "fitBounds" not in rendered[-1].get_root().render()
+    button(at, "ตัวอย่างเชียงของ").click().run(timeout=300)
+    html = rendered[-1].get_root().render()
+    assert "fitBounds" in html and html.index("rgv2_view") < html.index("fitBounds")      # after the stored view is restored
+    at.run()
+    assert "fitBounds" not in rendered[-1].get_root().render()                          # later reruns keep the user's view
+    ss = ss_ctx()
+    south_west, north_east = v2.ss_bounds(ss.ss)
+    assert south_west[0] < north_east[0] and south_west[1] < north_east[1]
+    assert v2.ss_bounds(v2.SpaceSyntaxView(**{**ss.ss.__dict__, "mask": ss.ss.mask & False})) is None
+
+
+def test_view_memory_forgets_the_view_of_the_old_centre_as_soon_as_the_centre_changes():
+    memory = v2.ViewMemory("20.21944,100.40363")
+    page = folium.Map()
+    memory.add_to(page)
+    html = page.get_root().render()
+    assert "else { remember(); }" in html and 'map.on("moveend", remember)' in html
+    assert html.index("remember = function") < html.index("saved.token === token")
+
+
+def test_the_three_wms_overlays_stay_on_the_layer_control_unticked_like_the_old_page():
+    ids = {"wms_population", "wms_cityplan", "wms_dol"}
+    assert {layer.id for layer in v2.LAYERS if layer.start_hidden and layer.id.startswith("wms")} == ids
+    m = folium.Map()
+    drawn, warnings = v2.render_layers(make_ctx(), m)
+    assert drawn == [] and warnings == [] and layer_names(m) == ["ความหนาแน่นประชากร", "ผังเมืองรวม", "รูปแปลงที่ดิน"]
+    ticked = make_ctx(show={**make_ctx().show, "show_cityplan": True})
+    drawn, _ = v2.render_layers(ticked, folium.Map())
+    assert [layer.id for layer in drawn] == ["wms_cityplan"]
+
+
+def test_every_widget_below_a_rerun_is_written_back_so_old_streamlit_cannot_drop_it(monkeypatch):
+    """Streamlit before 1.63 forgets the state of widgets that were not drawn yet when ``st.rerun()`` stopped a run;
+    the layers panel is drawn after the stages (the anchor stage ends with a rerun), so its keys are written back."""
+    state = make_state(monkeypatch)
+    monkeypatch.setattr(v2.StateManager, "_load_remote_defaults", staticmethod(lambda defaults: []))
+    marked = {}
+
+    class Spy(dict):
+        def __setitem__(self, key, value):
+            marked[key] = marked.get(key, 0) + 1
+            super().__setitem__(key, value)
+
+    layer_keys = {layer.show_key for layer in v2.LAYERS if layer.show_key}
+    expected = layer_keys | {"map_style_name", "cityplan_opacity", "analytics_view"} | set(v2.SS_DISPLAY_KEYS)
+    state.update({key: state.get(key, "kept") for key in expected})        # the widgets have been drawn once
+    spy = Spy(state)
+    monkeypatch.setattr(v2.st, "session_state", spy)
+    marked.clear()
+    v2.StateManager.initialize()
+    assert expected <= set(marked), expected - set(marked)
