@@ -76,8 +76,35 @@ REPLACED = {
     "_render_sidebar_map_settings": "→ _render_sidebar_layers_panel() + _render_sidebar_isochrone_settings()",
 }
 
-# Names that exist in more than one source page and are intentionally taken from the base page.
-NEW_REPLACED = {}
+# Rent_Gradient_new.py: copied with edits / not copied (and why). Everything else must be identical.
+NEW_MODIFIED = {
+    "fetch_graph": "calls this page's own _fetch_osm_graph (no cross-page import, no plain-osmnx fallback)",
+    "load_bundled_graph": "reads the zip through this page's _load_graph_bytes / MAX_CACHE_ENTRY_BYTES",
+}
+NEW_REPLACED = {
+    "PAGE_CONFIG": "the merged page has its own (Rent_Gradient.py's, retitled)",
+    "MAP_STYLES": "the black/dark basemaps were added to Rent_Gradient.py's MAP_STYLES",
+    "_node_sort_key": "identical code, only the docstring differs — Rent_Gradient.py's copy is used",
+    "DEFAULT_LAT": "the study centre is anchor_lat / anchor_lon (shared with the CBD-anchor search)",
+    "DEFAULT_LON": "the study centre is anchor_lat / anchor_lon (shared with the CBD-anchor search)",
+    "STUDY_BUFFER_RATIO": "ANCHOR_CONFIG['buffer_ratio'] (the same 20 %) is used by anchor_study_polygon",
+    "BASE_PAGE_MODULE": "no cross-page import any more",
+    "VIEW_LABELS": "→ SS_VIEW_LABELS (the map view is now the layer on the shared map)",
+    "K_NET,K_META,K_RESULT": "→ SS_NET / SS_META / SS_RESULT (prefix ss_, no clash with the standalone page)",
+    "K_AUTORUN": "one button loads and analyses, no autorun flag",
+    "_base_page": "no cross-page import any more",
+    "base_anchor": "→ rent_anchor_point() (reads StateManager)",
+    "legend_html": "→ legend_space_syntax() + LegendBox (one legend box for all layers)",
+    "build_map": "→ draw_space_syntax() (a layer on the shared map)",
+    "_header": "→ render_header()",
+    "_store_network": "→ _ss_load_network()",
+    "_sidebar_study_area": "→ the study centre is the CBD-anchor panel's; radius/network type are in panel ④",
+    "_sidebar_analysis": "→ _render_sidebar_space_syntax_panel() (panel ④)",
+    "_sidebar_style": "→ _options_space_syntax() (display options under the layer checkbox, panel ⑥)",
+    "_run_analysis": "→ perform_space_syntax()",
+    "_render_results": "→ view_space_syntax()",
+    "main": "→ main() of the merged page",
+}
 
 
 def test_ledger_every_function_of_rent_gradient_py_is_in_v2_with_the_same_source():
@@ -90,6 +117,19 @@ def test_ledger_every_function_of_rent_gradient_py_is_in_v2_with_the_same_source
     assert not stale, f"listed as modified but identical: {stale}"
     still_there = [n for n in REPLACED if n in merged and base[n] == merged[n]]
     assert not still_there, f"listed as replaced but still copied verbatim: {still_there}"
+
+
+def test_ledger_every_function_of_rent_gradient_new_py_is_in_v2_with_the_same_source():
+    source, merged = top_level(NEW), top_level(PAGE)
+    missing = [n for n in source if n not in merged and n not in NEW_REPLACED]
+    assert not missing, f"dropped without a reason: {missing}"
+    drifted = [n for n in source if n in merged and n not in NEW_REPLACED and n not in NEW_MODIFIED
+               and source[n] != merged[n]]
+    assert not drifted, f"copied code changed: {drifted}"
+    stale = [n for n in NEW_MODIFIED if source[n] == merged[n]]
+    assert not stale, f"listed as modified but identical: {stale}"
+    assert all(n in source for n in list(NEW_MODIFIED) + list(NEW_REPLACED)), "ledger names a function that is not in the source page"
+    assert [n for n in NEW_REPLACED if n in merged and source[n] == merged[n] and n != "_node_sort_key"] == []
 
 
 def test_v2_does_not_import_the_other_pages():
@@ -523,3 +563,309 @@ def test_the_network_layers_carry_every_feature_of_the_saved_result():
     group = v2.draw_closeness(ctx)
     nodes = json.loads(v2.lru_get(ctx.cache, ("rows", "closeness", id(ctx.net["nodes"])), ctx.net["nodes"], lambda: None))
     assert len(nodes) == len(ctx.net["nodes"]["features"]) and isinstance(group, folium.FeatureGroup)
+
+
+# ----------------------------------------------------------------------------- Space Syntax as a layer
+import contextlib  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tests"))
+import test_rent_gradient_new as helpers  # noqa: E402  (street-network builders + the standalone Space Syntax page)
+
+rgn = helpers.rgn
+
+
+class Recorder:
+    """Stands in for the Streamlit status widgets so the stage can run without a script runner."""
+
+    def __init__(self):
+        self.errors, self.toasts = [], []
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(v2.st, "spinner", lambda *a, **k: contextlib.nullcontext())
+        monkeypatch.setattr(v2.st, "error", lambda text, *a, **k: self.errors.append(text))
+        monkeypatch.setattr(v2.st, "toast", lambda text, *a, **k: self.toasts.append(text))
+        monkeypatch.setattr(v2.st, "progress", lambda *a, **k: type("Bar", (), {
+            "progress": staticmethod(lambda *x, **y: None), "empty": staticmethod(lambda: None)})())
+        return self
+
+
+def ss_session(monkeypatch, **extra):
+    state = make_state(monkeypatch)
+    state.update(extra)
+    return state, Recorder().install(monkeypatch)
+
+
+def stage(**override):
+    intents = {"ss_params": v2.ss_params(), "demo": False}
+    intents.update(override)
+    v2.perform_space_syntax(intents)
+
+
+def count_calls(monkeypatch, module, name):
+    calls = []
+    real = getattr(module, name)
+    monkeypatch.setattr(module, name, lambda *a, **k: calls.append(1) or real(*a, **k))
+    return calls
+
+
+def test_the_engine_gives_exactly_the_numbers_of_the_standalone_space_syntax_page():
+    graph = helpers.random_street_graph(5)
+    for kind in ("angular", "topological", "metric"):
+        old_net = rgn.build_segment_network(graph)
+        new_net = v2.build_segment_network(graph)
+        old = rgn.analyse_network(old_net, kind=kind, radii=(400.0, None), with_choice=True)
+        new = v2.analyse_network(new_net, kind=kind, radii=(400.0, None), with_choice=True)
+        for key in old.integration:
+            assert np.array_equal(old.integration[key], new.integration[key], equal_nan=True), (kind, key)
+            assert np.array_equal(old.choice_norm[key], new.choice_norm[key], equal_nan=True), (kind, key)
+            assert np.array_equal(old.nc[key], new.nc[key]) and np.array_equal(old.td[key], new.td[key])
+    assert np.array_equal(rgn.gradient_rgb([0, 0.3, 1.0]), v2.gradient_rgb([0, 0.3, 1.0]))
+
+
+def test_one_button_loads_the_network_once_and_parameter_changes_only_re_analyse(monkeypatch):
+    state, ui = ss_session(monkeypatch)
+    graph = helpers.grid_graph(6)
+    fetched = []
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda wkt, network_type: fetched.append((wkt, network_type))
+                        or (graph, True, None))
+    built, analysed = count_calls(monkeypatch, v2, "build_segment_network"), count_calls(monkeypatch, v2, "analyse_network")
+    stage()
+    assert ui.errors == [] and len(fetched) == len(built) == len(analysed) == 1
+    assert fetched[0][1] == "drive" and state[v2.SS_RUN] == 1 and state[v2.SS_RESULT].kind == "angular"
+    assert state[v2.SS_META]["radius_m"] == 3000.0 and state[v2.SS_MASK].shape == (state[v2.SS_NET].n_segments,)
+    state["ss_kind"] = "metric"                                     # settings only: no download, no rebuild
+    stage()
+    assert len(fetched) == len(built) == 1 and len(analysed) == 2
+    assert state[v2.SS_RESULT].kind == "metric" and state[v2.SS_RUN] == 2
+    state["anchor_lat"] = state["anchor_lat"] + 0.01                # a different study area: a new network
+    stage()
+    assert len(fetched) == len(built) == 2
+    state["ss_network"] = "walk"
+    stage()
+    assert len(fetched) == 3 and fetched[-1][1] == "walk"
+
+
+def test_the_study_area_is_the_same_polygon_as_the_cbd_anchor_search(monkeypatch):
+    state, _ = ss_session(monkeypatch)
+    seen = []
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda wkt, nt: seen.append(wkt) or (helpers.chain(3), True, None))
+    stage()
+    expected = v2.anchor_study_polygon(state["anchor_lat"], state["anchor_lon"], 3000.0).wkt
+    assert seen == [expected]
+
+
+def test_failures_become_a_message_and_leave_the_previous_result_alone(monkeypatch):
+    state, ui = ss_session(monkeypatch)
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda wkt, nt: (helpers.grid_graph(5), True, None))
+    stage()
+    kept = state[v2.SS_RESULT]
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda wkt, nt: (None, False, "OSM unavailable"))
+    state["ss_radius_m"] = 5000                                     # new area → needs a download that now fails
+    stage()
+    assert any("OSM unavailable" in e for e in ui.errors) and state[v2.SS_RESULT] is kept
+    ui.errors.clear()
+    stage(ss_params={**v2.ss_params(), "radii": []})
+    assert ui.errors == ["เลือกรัศมีอย่างน้อย 1 ค่า"]
+
+
+def test_fetch_graph_reports_exceptions_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda *a: (_ for _ in ()).throw(RuntimeError("no route to host")))
+    graph, source, error = v2.fetch_graph(*CENTER, 3000.0, "drive")
+    assert graph is None and source == "" and "no route to host" in error
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda *a: (None, False, "no data"))
+    assert v2.fetch_graph(*CENTER, 3000.0, "drive") == (None, "", "no data")
+    graph = helpers.chain(2)
+    graph.graph["osm_source"] = "cache"
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda *a: (graph, True, None))
+    assert "cache" in v2.fetch_graph(*CENTER, 3000.0, "all")[1]
+
+
+@pytest.fixture(scope="module")
+def bundled():
+    if not v2.BUNDLED_CACHE_ZIP.exists():
+        pytest.skip("Geoapify_Map/osmnx_cache.zip is not available")
+    graph, source, error = v2.load_bundled_graph()
+    assert error is None, error
+    return graph, source
+
+
+def test_bundled_graph_loads_through_the_allow_list_unpickler(bundled):
+    graph, source = bundled
+    assert len(graph) == 1648 and "เชียงของ" in source
+
+
+def test_bundled_graph_loader_skips_oversized_entries_and_rejects_a_hostile_pickle(tmp_path, monkeypatch):
+    import pickle
+    import zipfile
+
+    archive = tmp_path / "osmnx_cache.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("osm_graph_big.pkl", pickle.dumps(list(range(100))))
+    monkeypatch.setattr(v2, "BUNDLED_CACHE_ZIP", archive)
+    loaded = []
+    monkeypatch.setattr(v2, "MAX_CACHE_ENTRY_BYTES", 10)
+    monkeypatch.setattr(v2, "_load_graph_bytes", lambda data: loaded.append(len(data)))
+    graph, _, error = v2.load_bundled_graph()
+    assert graph is None and error and loaded == []                  # never even read into memory
+
+    class Evil:
+        def __reduce__(self):
+            return (exec, ("import sys; sys._rgv2_pwned = True",))
+
+    monkeypatch.undo()
+    evil = tmp_path / "evil.zip"
+    with zipfile.ZipFile(evil, "w") as zf:
+        zf.writestr("osm_graph_evil.pkl", pickle.dumps(Evil()))
+    monkeypatch.setattr(v2, "BUNDLED_CACHE_ZIP", evil)
+    graph, _, error = v2.load_bundled_graph()
+    assert graph is None and error and not hasattr(sys, "_rgv2_pwned")
+    monkeypatch.setattr(v2, "BUNDLED_CACHE_ZIP", tmp_path / "missing.zip")
+    assert v2.load_bundled_graph()[2].startswith("ไม่พบไฟล์")
+
+
+def test_demo_button_path_uses_the_bundled_graph_and_marks_the_network_as_the_demo(monkeypatch, bundled):
+    state, ui = ss_session(monkeypatch)
+    monkeypatch.setattr(v2, "load_bundled_graph", lambda: bundled[0:1] + (bundled[1], None))
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda *a: pytest.fail("the demo must not download anything"))
+    stage(demo=True, ss_params={**v2.ss_params(), "radii": [800.0], "with_choice": False})
+    assert ui.errors == [] and state[v2.SS_KEY] == ("demo",) and state[v2.SS_META]["radius_m"] is None
+    assert state[v2.SS_RESULT].radii == [800.0] and state[v2.SS_NET].n_segments > 500
+
+
+def test_clear_results_and_reset_forget_the_space_syntax_result(monkeypatch):
+    state, _ = ss_session(monkeypatch)
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda *a: (helpers.grid_graph(5), True, None))
+    stage()
+    assert all(key in state for key in v2.SS_STATE_KEYS)
+    v2.StateManager.clear_results(["rent"])                          # other stages leave it alone
+    assert state[v2.SS_RESULT] is not None
+    v2.StateManager.clear_results(["isochrone", "intersection", "rent"])
+    assert state[v2.SS_RESULT] is not None
+    v2.StateManager.reset()
+    assert not any(key in state for key in v2.SS_STATE_KEYS)
+    v2.StateManager.clear_results()                                  # nothing there: still fine
+
+
+def test_space_syntax_settings_survive_a_config_round_trip_but_the_result_stays_out_of_it(monkeypatch):
+    state, _ = ss_session(monkeypatch)
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda *a: (helpers.grid_graph(5), True, None))
+    stage()
+    state.update(ss_kind="metric", ss_radii=["400 m"], ss_palette=next(reversed(v2.PALETTES)), show_space_syntax=False)
+    exported = json.loads(v2.StateManager.export_config())
+    assert exported["settings"]["ss_kind"] == "metric" and exported["settings"]["show_space_syntax"] is False
+    assert "ss_result" not in json.dumps(exported) and not any(key in exported["precomputed_results"] for key in v2.SS_STATE_KEYS)
+    state.update(ss_kind="angular", ss_radii=["800 m"], show_space_syntax=True)
+    assert v2.StateManager.import_config(exported) == []
+    assert state["ss_kind"] == "metric" and state["ss_radii"] == ["400 m"] and state["show_space_syntax"] is False
+    bad = {"settings": {"ss_kind": "euclid", "ss_radii": ["7 m"], "ss_radius_m": 99999, "ss_palette": "nope"}}
+    assert set(v2.StateManager.import_config(bad)) == {"ss_kind", "ss_radii", "ss_radius_m", "ss_palette"}
+
+
+def test_widgets_that_are_sometimes_hidden_keep_their_value(monkeypatch):
+    state = make_state(monkeypatch)
+    state["ss_palette"] = next(reversed(v2.PALETTES))
+    v2.StateManager.initialize()
+    assert state["ss_palette"] == next(reversed(v2.PALETTES))
+    assert {"ss_palette", "ss_scale", "ss_thick", "ss_topn", "cityplan_opacity"} <= set(v2.KEEP_ALIVE_KEYS)
+
+
+def ss_ctx(graph=None, **show):
+    graph = graph or helpers.grid_graph(8)
+    net = v2.build_segment_network(graph)
+    result = v2.analyse_network(net, radii=(300.0, None), with_choice=True)
+    meta = {"source": "test", "lat": helpers.LAT0, "lon": helpers.LON0, "radius_m": 600.0, "network": "drive"}
+    merged = {"ss_palette": v2.DEFAULT_PALETTE, "ss_scale": "linear", "ss_thick": True, "ss_topn": 3}
+    merged.update(show)
+    base = make_ctx(show={**{key: v2.StateManager._DEFAULTS.get(key) for key in v2.SHOW_KEYS}, **merged})
+    mask = v2._display_mask(net, meta)
+    view = v2.SpaceSyntaxView(net=net, meta=meta, result=result, mask=mask,
+                              display=v2.ss_display(base.show, result))
+    return v2.Ctx(**{**base.__dict__, "ss": view})
+
+
+def test_display_options_fall_back_when_they_no_longer_fit_the_result():
+    ctx = ss_ctx(ss_measure="choice", ss_view_radius="300", ss_palette="nope", ss_scale="log", ss_topn=None)
+    d = ctx.ss.display
+    assert d["measure"] == "choice" and d["rkey"] == "300" and d["palette"] == v2.DEFAULT_PALETTE
+    assert d["scale"] == "linear" and d["top_n"] == v2.ANALYSIS_CONFIG["top_n"]
+    gone = ss_ctx(ss_measure="choice", ss_view_radius="1600").ss.display
+    assert gone["rkey"] == "n"
+    result = v2.analyse_network(v2.build_segment_network(helpers.chain(4)), radii=(None,), with_choice=False)
+    assert v2.ss_display({"ss_measure": "choice"}, result)["measure"] == "integration"
+
+
+def test_the_space_syntax_layer_draws_every_shown_segment_the_circle_and_the_top_pins():
+    ctx = ss_ctx()
+    group = v2.draw_space_syntax(ctx)
+    kinds = [type(child).__name__ for child in walk(group)]
+    assert kinds.count("CompactLines") == 1 and kinds.count("Circle") == 1 and kinds.count("Marker") == 3
+    rows = json.loads(v2.ss_payload(ctx)["rows_json"])
+    assert len(rows) == int(ctx.ss.mask.sum()) and all(len(r[3]) >= 4 for r in rows)
+    assert rows[0][2][1] == pytest.approx(v2.ss_payload(ctx)["columns"]["score"][np.flatnonzero(ctx.ss.mask)[0]])
+    m = folium.Map(prefer_canvas=True)
+    drawn, warnings = v2.render_layers(make_ctx(**{**ctx.__dict__, "show": {**ctx.show, "show_space_syntax": True}}), m)
+    assert warnings == [] and "space_syntax" in {layer.id for layer in drawn}
+    html = m.get_root().render()
+    assert "L.polyline" in html and "คะแนน (0–100):" in html
+
+
+def test_street_names_from_osm_are_escaped_in_the_map_rows_and_pins():
+    graph = helpers.chain(3)
+    for _, _, data in graph.edges(data=True):
+        data["name"] = "<img src=x onerror=alert(1)>"
+    ctx = ss_ctx(graph, ss_topn=2)
+    page = folium.Map()
+    v2.draw_space_syntax(ctx).add_to(page)
+    html = page.get_root().render()
+    assert "<img src=x" not in html                                       # never raw …
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html                   # … only as text in the tooltip rows
+    assert "&lt;img src=x" in v2.ss_payload(ctx)["rows_json"] and "<img" not in v2.ss_payload(ctx)["rows_json"]
+
+
+def test_changing_only_the_display_rebuilds_one_payload_and_everything_else_is_cached(monkeypatch):
+    ctx = ss_ctx()
+    calls = count_calls(monkeypatch, v2, "scale_scores")
+    for _ in range(3):
+        v2.draw_space_syntax(ctx)
+        v2.legend_space_syntax(ctx)
+    assert len(calls) == 1
+    other = v2.Ctx(**{**ctx.__dict__, "ss": v2.SpaceSyntaxView(**{**ctx.ss.__dict__, "display": {**ctx.ss.display, "palette": next(reversed(v2.PALETTES))}})})
+    v2.draw_space_syntax(other)
+    assert len(calls) == 2
+    fresh = v2.analyse_network(ctx.ss.net, radii=(300.0, None), with_choice=True)    # a new analysis → new payload
+    again = v2.Ctx(**{**ctx.__dict__, "ss": v2.SpaceSyntaxView(**{**ctx.ss.__dict__, "result": fresh})})
+    v2.draw_space_syntax(again)
+    assert len(calls) == 3
+
+
+def test_the_space_syntax_legend_shows_the_scale_and_sits_between_travel_areas_and_golden_spots():
+    ctx = ss_ctx()
+    html = v2.legend_space_syntax(ctx)
+    assert "Integration (NAIN)" in html and "linear-gradient" in html and "ต่ำ" in html and "สูง" in html
+    both = v2.Ctx(**{**rich_ctx().__dict__, "ss": ctx.ss, "show": {**rich_ctx().show, **ctx.show, "show_space_syntax": True}})
+    drawn, _ = v2.render_layers(both, folium.Map())
+    box = v2.legend_stack(both, drawn).box_html
+    assert box.index("เวลาเดินทาง") < box.index("CBD Zone") < box.index("Integration (NAIN)") < box.index("Golden Spot")
+
+
+def test_space_syntax_row_is_in_the_registry_and_first_in_its_panel_group():
+    layer = next(layer for layer in v2.LAYERS if layer.id == "space_syntax")
+    assert layer.show_key == "show_space_syntax" and layer.group == "โครงข่ายถนน" and layer.options is not None
+    rows = sorted((l for l in v2.LAYERS if l.group == layer.group and l.show_key), key=lambda l: l.panel_rank)
+    assert rows[0].id == "space_syntax"
+    order = [l.id for l in v2.LAYERS]
+    assert order.index("cbd_zone") < order.index("space_syntax") < order.index("railway")
+    assert not layer.available(make_ctx()) and layer.available(ss_ctx())
+
+
+def test_the_study_centre_falls_back_to_markers_then_anchor_as_before(monkeypatch):
+    state = make_state(monkeypatch)
+    state["markers"] = [{"lat": 21.0, "lng": 101.0, "active": True}]
+    assert v2.build_ctx().center == (21.0, 101.0)
+    state[v2.StateManager.K_AUTO_ANCHOR] = {"anchor": {"lat": 20.5, "lon": 100.5}}
+    assert v2.build_ctx().center == (20.5, 100.5)
+    state[v2.StateManager.K_AUTO_ANCHOR] = None
+    state[v2.StateManager.K_AUTO_ANCHOR_CLOSENESS] = {"anchor": {"lat": 20.6, "lon": 100.6}}
+    assert v2.build_ctx().center == (20.6, 100.6)
