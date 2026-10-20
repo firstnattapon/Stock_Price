@@ -6707,9 +6707,9 @@ def _render_sidebar_space_syntax_panel(locked: bool) -> Dict[str, Any]:
                        help="Local (400–1,600 m) = ย่านเดินถึง · Global (n) = ทั้งโครงข่าย")
         st.checkbox("คำนวณ Choice (ทางผ่าน) ด้วย", key="ss_choice", disabled=locked,
                     help="ใช้เวลาเพิ่มราว 1–2 เท่า — ปิดไว้ถ้าต้องการเฉพาะ Integration")
-        run = st.button("🧮 วิเคราะห์ Space Syntax", type="primary", use_container_width=True,
+        run = st.button("🧮 วิเคราะห์ Space Syntax", type="primary", width="stretch",
                         disabled=locked, key="ss_run_btn")
-        demo = st.button("🧪 ตัวอย่างเชียงของ (ออฟไลน์)", use_container_width=True, disabled=locked,
+        demo = st.button("🧪 ตัวอย่างเชียงของ (ออฟไลน์)", width="stretch", disabled=locked,
                          key="ss_demo_btn",
                          help="ใช้กราฟถนนที่เก็บไว้ใน Geoapify_Map/osmnx_cache.zip — ไม่ต้องดาวน์โหลดจาก Overpass")
         status = st.empty()                # filled by main() after the stages ran, so it never shows last run's state
