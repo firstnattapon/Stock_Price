@@ -159,8 +159,6 @@ NETWORK_CONFIG: Dict[str, Any] = {
     "edge_weight_base": 2,
     "edge_weight_multiplier": 4,
     "cache_ttl_seconds": 3600,
-    "click_debounce_seconds": 0.5,
-    "click_distance_threshold_meters": 10,
     "large_graph_threshold": 2000,
     "betweenness_k_samples": 400,
     "closeness_exact_threshold": 3000,
@@ -500,7 +498,6 @@ class StateManager:
     K_ISOCHRONE: str = "isochrone_data"
     K_INTERSECTION: str = "intersection_data"
     K_NETWORK: str = "network_data"
-    K_LAST_CLICK: str = "last_processed_click"
     K_COLORS: str = "colors"
     K_API_KEY: str = "api_key"
     K_MAP_STYLE: str = "map_style_name"
@@ -531,7 +528,6 @@ class StateManager:
         K_ISOCHRONE: None,
         K_INTERSECTION: None,
         K_NETWORK: None,
-        K_LAST_CLICK: None,
         K_COLORS: {
             "step1": "#2A9D8F",
             "step2": "#E9C46A",
@@ -725,28 +721,25 @@ class StateManager:
         markers = st.session_state[cls.K_MARKERS]
         if 0 <= index < len(markers):
             markers.pop(index)
+            cls._forget_pin_checkboxes()
 
     @classmethod
     def pop_last_marker(cls) -> None:
         markers = st.session_state[cls.K_MARKERS]
         if markers:
-            markers.pop()
+            markers.pop()                     # the last checkbox is simply not drawn next run, its state goes with it
+
+    @staticmethod
+    def _forget_pin_checkboxes() -> None:
+        """The pin checkboxes are keyed by position, so after a pin in the middle goes (or the list is replaced)
+        the next ones would inherit the previous pin's tick (deleting #1 flipped #2 and #3). Dropping that
+        widget state makes every checkbox start again from its own pin's ``active`` flag."""
+        for key in [k for k in st.session_state if str(k).startswith("active_chk_")]:
+            del st.session_state[key]
 
     @classmethod
     def set_marker_active(cls, index: int, active: bool) -> None:
         st.session_state[cls.K_MARKERS][index]["active"] = active
-
-    @classmethod
-    def record_click(cls, lat: float, lon: float) -> None:
-        st.session_state[cls.K_LAST_CLICK] = {
-            "timestamp": time.time(),
-            "lat": lat,
-            "lon": lon,
-        }
-
-    @classmethod
-    def get_last_click(cls) -> Optional[Dict[str, Any]]:
-        return st.session_state.get(cls.K_LAST_CLICK)
 
     # ------------------------------------------------------- cache clearing
     @classmethod
@@ -787,7 +780,7 @@ class StateManager:
     def reset(cls) -> None:
         """Reset to factory defaults."""
         st.session_state[cls.K_MARKERS] = [dict(cls._DEFAULT_MARKER)]
-        st.session_state[cls.K_LAST_CLICK] = None
+        cls._forget_pin_checkboxes()
         cls.clear_results()
 
     @classmethod
@@ -801,6 +794,7 @@ class StateManager:
         if "markers" in data:
             if _valid_markers(data["markers"]):
                 st.session_state[cls.K_MARKERS] = data["markers"]
+                cls._forget_pin_checkboxes()
             else:
                 skipped.append("markers")
 
@@ -2522,33 +2516,6 @@ def calculate_distance_meters(
     a = sin(dlat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2) ** 2
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     return R * c
-
-
-def should_add_marker(
-    new_lat: float,
-    new_lon: float,
-    last_click: Optional[Dict[str, Any]],
-) -> bool:
-    """
-    Debounce logic — returns ``True`` when a new marker should be added.
-
-    Pure function: caller supplies ``last_click`` instead of reading
-    ``st.session_state`` directly.
-    """
-    if last_click is None:
-        return True
-
-    time_diff = time.time() - last_click["timestamp"]
-    if time_diff < NETWORK_CONFIG["click_debounce_seconds"]:
-        return False
-
-    distance = calculate_distance_meters(
-        last_click["lat"], last_click["lon"], new_lat, new_lon
-    )
-    if distance < NETWORK_CONFIG["click_distance_threshold_meters"]:
-        return False
-
-    return True
 
 
 def calculate_intersection(
@@ -5094,6 +5061,49 @@ MAP_HEIGHT_PX: int = 900
 COORD_DECIMALS: int = 5           # ~1 m: all a screen can show; the stored results keep full precision
 TOOLTIP_STYLE = ("<style>.rgtip th{text-align:left;padding-right:8px;font-weight:600}"
                  ".rgtip td{text-align:right}</style>")
+
+# Colours of the map's own panels (legend, layer control, buttons, scale, popups, tooltips) in white and in black.
+# Neutral surfaces, softened text (no pure black/white), one calm link colour; the data colours drawn on the map
+# are not touched. The map lives in an iframe that cannot see Streamlit's theme, so both palettes are carried here
+# and ``prefers-color-scheme`` picks one (the setting Streamlit's "use system setting" follows).
+# Selectors start with ``html .leaflet-container`` so they outrank Leaflet's and the plugins' own stylesheets,
+# which folium puts after this block.
+MAP_CHROME_CSS = """<style>
+:root{--rg-panel:rgba(255,255,255,.95);--rg-text:#1f2328;--rg-muted:#59636e;--rg-line:rgba(31,35,40,.16);
+--rg-hover:rgba(128,128,128,.18);--rg-link:#2a6db0;--rg-shadow:0 1px 6px rgba(0,0,0,.16);--rg-icon:none}
+@media (prefers-color-scheme:dark){:root{--rg-panel:rgba(33,37,43,.95);--rg-text:#e6e8eb;--rg-muted:#a0a9b3;
+--rg-line:rgba(255,255,255,.18);--rg-link:#7db3ea;--rg-shadow:0 1px 8px rgba(0,0,0,.6);--rg-icon:invert(.88)}}
+html .leaflet-container a{color:var(--rg-link)}
+html .leaflet-container .leaflet-bar,html .leaflet-container .leaflet-control-layers,
+html .leaflet-container .leaflet-control-measure{background:var(--rg-panel);color:var(--rg-text);
+border:1px solid var(--rg-line);box-shadow:var(--rg-shadow);background-clip:padding-box}
+html .leaflet-container .leaflet-bar a{background-color:transparent;color:var(--rg-text);
+border-bottom-color:var(--rg-line)}
+html .leaflet-container .leaflet-bar a:hover,html .leaflet-container .leaflet-bar a:focus{
+background-color:var(--rg-hover)}
+html .leaflet-container .leaflet-bar a.leaflet-disabled{color:var(--rg-muted)}
+html .leaflet-container .leaflet-control-layers-separator{border-top-color:var(--rg-line)}
+html .leaflet-container .leaflet-control-layers-toggle,html .leaflet-container .fullscreen-icon,
+html .leaflet-container .leaflet-control-measure .leaflet-control-measure-toggle{filter:var(--rg-icon)}
+html .leaflet-container .leaflet-control-measure h3,html .leaflet-container .leaflet-control-measure .tasks,
+html .leaflet-container .leaflet-control-measure .results .group{border-color:var(--rg-line)}
+html .leaflet-container .leaflet-control-scale-line,html .leaflet-container .leaflet-control-attribution,
+html .leaflet-container .leaflet-control-mouseposition{background:var(--rg-panel);color:var(--rg-text);
+text-shadow:none;box-shadow:none}
+html .leaflet-container .leaflet-control-scale-line{border-color:var(--rg-muted)}
+html .leaflet-container .leaflet-popup-content-wrapper,html .leaflet-container .leaflet-popup-tip{
+background:var(--rg-panel);color:var(--rg-text);box-shadow:var(--rg-shadow)}
+html .leaflet-container a.leaflet-popup-close-button{color:var(--rg-muted)}
+html .leaflet-container .leaflet-tooltip{background:var(--rg-panel);border-color:var(--rg-line);
+color:var(--rg-text);box-shadow:var(--rg-shadow)}
+html .leaflet-container .leaflet-tooltip-top:before{border-top-color:var(--rg-panel)}
+html .leaflet-container .leaflet-tooltip-bottom:before{border-bottom-color:var(--rg-panel)}
+html .leaflet-container .leaflet-tooltip-left:before{border-left-color:var(--rg-panel)}
+html .leaflet-container .leaflet-tooltip-right:before{border-right-color:var(--rg-panel)}
+.rg-legend{background:var(--rg-panel);color:var(--rg-text);border:1px solid var(--rg-line);
+box-shadow:var(--rg-shadow)}
+.rg-muted{color:var(--rg-muted)}
+</style>"""
 PANEL_GROUPS: Tuple[str, ...] = ("โครงข่ายถนน", "Rent Gradient", "Automated Anchor", "บริบท & overlay")
 
 
@@ -5312,11 +5322,10 @@ class LegendBox(MacroElement):
     def __init__(self, sections: Sequence[str]):
         super().__init__()
         self._name = "LegendBox"
+        # layout here, colours in MAP_CHROME_CSS (.rg-legend) so the box follows white / black
         self.box_html = (
-            '<div style="position:fixed; bottom:18px; left:12px; z-index:9999; max-width:250px; '
-            'background:rgba(255,255,255,0.93); border:1px solid rgba(11,11,11,0.10); '
-            'border-radius:8px; padding:8px 10px; font-size:12px; color:#0b0b0b; '
-            'box-shadow:0 1px 4px rgba(0,0,0,0.18); line-height:1.45; '
+            '<div class="rg-legend" style="position:fixed; bottom:18px; left:12px; z-index:9999; max-width:250px; '
+            'border-radius:8px; padding:8px 10px; font-size:12px; line-height:1.45; '
             'font-family:system-ui, -apple-system, sans-serif;">'
             + '<div style="height:6px;"></div>'.join(sections)
             + "</div>"
@@ -5735,7 +5744,7 @@ def legend_space_syntax(ctx: Ctx) -> str:
         f'<div style="height:12px; border-radius:3px; background:{gradient_css(d["palette"])};"></div>'
         '<div style="display:flex; justify-content:space-between; margin-top:2px;">'
         f'<span>🔵 ต่ำ {ticks[0][1]:.2f}</span><span>{ticks[-1][1]:.2f} สูง 🔴</span></div>'
-        f'<div style="margin-top:3px; color:#555;">{SCALE_MODES[d["scale"]]} · {radius_label_for(d["rkey"])}</div>'
+        f'<div class="rg-muted" style="margin-top:3px;">{SCALE_MODES[d["scale"]]} · {radius_label_for(d["rkey"])}</div>'
     )
 
 
@@ -5942,11 +5951,16 @@ def build_base_map(ctx: Ctx) -> Any:
         num_digits=5,
         prefix="พิกัด:",
     ).add_to(m)
+    header.add_child(folium.Element(MAP_CHROME_CSS))
     return m
 
 
-def render_map(ctx: Ctx) -> Optional[Dict[str, Any]]:
-    """Build and display the Folium map. Returns the ``st_folium`` output dict."""
+def render_map(ctx: Ctx) -> None:
+    """Build and display the Folium map.
+
+    The map only shows. It sends nothing back, so clicking, panning or zooming it never reruns the page and
+    never adds a pin — Active Markers are entered in the sidebar (⚙️ การตั้งค่า) only.
+    """
     m = build_base_map(ctx)
     drawn, warnings = render_layers(ctx, m)
     if REMEMBER_VIEW:
@@ -5955,18 +5969,16 @@ def render_map(ctx: Ctx) -> Optional[Dict[str, Any]]:
     legend = legend_stack(ctx, drawn)
     if legend is not None:
         m.get_root().add_child(legend)
-    # returned_objects จำกัดเฉพาะ last_clicked → เลื่อน/ซูมแผนที่ไม่ trigger
-    # Streamlit rerun ทั้งหน้า (เร็วขึ้นมากบน Streamlit Cloud)
-    output = st_folium(
+    # returned_objects=[] → แผนที่ไม่ส่งอะไรกลับ: คลิก/เลื่อน/ซูมไม่ trigger Streamlit rerun ทั้งหน้า
+    st_folium(
         m,
         height=MAP_HEIGHT_PX,
         use_container_width=True,
         key="main_map",
-        returned_objects=["last_clicked"],
+        returned_objects=[],
     )
     for warning in warnings:
         st.warning(f"⚠️ แสดงชั้นนี้ไม่ได้ — {warning}")
-    return output
 
 
 def _render_sidebar_config_section(locked: bool) -> None:
@@ -6025,7 +6037,8 @@ def _render_sidebar_config_section(locked: bool) -> None:
 
 
 def _render_sidebar_marker_input(locked: bool) -> None:
-    """Manual coordinate input row."""
+    """Where an Active Marker is typed in ("Lat, Lng"). The map itself never adds one."""
+    st.caption("📍 เพิ่ม Active Marker: กรอก Lat, Lng (ดูพิกัดเมาส์ที่มุมขวาล่างของแผนที่)")
     c1, c2 = st.columns([0.7, 0.3])
     coords_input = c1.text_input(
         "Coords",
@@ -6036,12 +6049,30 @@ def _render_sidebar_marker_input(locked: bool) -> None:
     )
     if c2.button("เพิ่ม", use_container_width=True, disabled=locked):
         try:
-            lat_str, lng_str = coords_input.strip().split(",")
-            StateManager.add_marker(float(lat_str), float(lng_str))
+            lat, lng = _parse_anchor_center_input(coords_input)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            StateManager.add_marker(lat, lng)
             StateManager.clear_results(["isochrone", "intersection", "rent"])
+            st.toast(f"เพิ่มหมุดที่ {len(StateManager.get_markers())} แล้ว — กรุณากดคำนวณใหม่", icon="📍")
             st.rerun()
-        except Exception:
-            st.error("Format: Lat, Lng")
+
+
+def _marker_label_html(index: int, marker: Dict[str, Any], active: bool) -> str:
+    """One row of the pin list, readable on white and on black.
+
+    The text takes the theme's own colour; only the dot carries the pin's colour, ringed in a neutral tone so
+    no hue (black, pink …) disappears on either background. A switched-off pin is faded, struck through and hollow.
+    """
+    ring = "box-shadow:0 0 0 1px rgba(128,128,128,.55);"
+    dot_css = f"display:inline-block;width:.7em;height:.7em;border-radius:50%;margin-right:.4em;{ring}"
+    coords = f"({marker['lat']:.4f}, {marker['lng']:.4f})"
+    if active:
+        dot = f"<span style='{dot_css}background:{HEX_COLORS[index % len(HEX_COLORS)]};'></span>"
+        return f"{dot}<b>จุดที่ {index + 1}</b> <span style='font-size:.8em;opacity:.7'>{coords}</span>"
+    return (f"<span style='opacity:.45;text-decoration:line-through'>"
+            f"<span style='{dot_css}'></span>จุดที่ {index + 1} <span style='font-size:.8em'>{coords}</span></span>")
 
 
 def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]]:
@@ -6058,8 +6089,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
         StateManager.reset()
         st.rerun()
 
-    active_list = StateManager.get_active_markers()
-    st.write(f"📍 Active Markers: **{len(active_list)}**")
+    count_line = st.empty()                     # filled below, after the toggles of this run were applied
 
     if markers:
         st.markdown("---")
@@ -6079,25 +6109,16 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
                 StateManager.set_marker_active(i, is_active)
                 StateManager.clear_results(["isochrone", "intersection", "rent"])
 
-            if is_active:
-                style = (
-                    f"color:{MARKER_COLORS[i % len(MARKER_COLORS)]}; font-weight:bold;"
-                )
-            else:
-                style = "color:gray; text-decoration:line-through;"
-            col2.markdown(
-                f"<span style='{style}'>● จุดที่ {i+1}</span> "
-                f"<span style='font-size:0.8em'>({m['lat']:.4f}, {m['lng']:.4f})</span>",
-                unsafe_allow_html=True,
-            )
+            col2.markdown(_marker_label_html(i, m, is_active), unsafe_allow_html=True)
 
             if col3.button("✕", key=f"del_btn_{i}", disabled=locked):
                 StateManager.remove_marker(i)
                 StateManager.clear_results(["isochrone", "intersection", "rent"])
                 st.rerun()
 
-    # Refresh active list after possible mutations
-    return StateManager.get_active_markers()
+    active_list = StateManager.get_active_markers()
+    count_line.write(f"📍 Active Markers: **{len(active_list)}**")
+    return active_list
 
 
 def _render_sidebar_network_panel(locked: bool) -> bool:
@@ -7205,7 +7226,7 @@ def view_marks(_ctx: Ctx) -> None:
         if not has_rent:
             st.caption("คำนวณ Rent Gradient เพื่อดูราคาประเมินของแต่ละหมุด")
     else:
-        st.info("ยังไม่มีหมุด — คลิกบนแผนที่หรือกรอกพิกัดใน sidebar", icon="📍")
+        st.info("ยังไม่มีหมุด — กรอกพิกัด Lat, Lng ที่ ⚙️ การตั้งค่า แล้วกด เพิ่ม", icon="📍")
 
 
 def view_theory(_ctx: Ctx) -> None:
@@ -7213,43 +7234,50 @@ def view_theory(_ctx: Ctx) -> None:
     st.html(
         """
 <style>
+/* Neutral cards that take the page's own text colour — readable on white and on black.
+   Tints are mixes of currentColor, so no hex needs to know which theme is active; one calm teal accent. */
 .rg-guide {
+    --rg-accent: #1f7a70;
+    --rg-line: color-mix(in srgb, currentColor 22%, transparent);
+    --rg-soft: color-mix(in srgb, currentColor 6%, transparent);
+    --rg-muted: color-mix(in srgb, currentColor 75%, transparent);
     max-width: 920px;
     margin: 0 auto;
-    color: #edf7f4;
+    color: inherit;
     font-family: inherit;
 }
 .rg-guide * { box-sizing: border-box; }
 .rg-guide .principle {
     padding: 20px 22px;
-    border: 1px solid rgba(83, 214, 162, .38);
-    border-radius: 16px;
-    background: linear-gradient(135deg, rgba(83, 214, 162, .13), #101c27);
+    border: 1px solid var(--rg-line);
+    border-left: 4px solid var(--rg-accent);
+    border-radius: 14px;
+    background: var(--rg-soft);
 }
 .rg-guide .label {
     margin-bottom: 5px;
-    color: #53d6a2;
+    color: var(--rg-muted);
     font-size: .76rem;
-    font-weight: 900;
+    font-weight: 800;
     letter-spacing: .08em;
 }
 .rg-guide h3 {
     margin: 0 0 7px;
-    color: #ffffff;
+    color: inherit;
     font-size: clamp(1.15rem, 2.6vw, 1.55rem);
 }
-.rg-guide p { margin: 0; color: #b6c9cd; line-height: 1.65; }
+.rg-guide p { margin: 0; color: var(--rg-muted); line-height: 1.65; }
 .rg-guide code {
     padding: 2px 6px;
     border-radius: 6px;
-    color: #dffff3;
-    background: rgba(83, 214, 162, .12);
+    color: inherit;
+    background: color-mix(in srgb, currentColor 10%, transparent);
 }
 .rg-guide .flow-title {
     margin: 22px 0 11px;
-    color: #ffffff;
+    color: inherit;
     font-size: 1.05rem;
-    font-weight: 850;
+    font-weight: 700;
 }
 .rg-guide .flow {
     display: grid;
@@ -7261,9 +7289,9 @@ def view_theory(_ctx: Ctx) -> None:
     gap: 12px;
     align-items: start;
     padding: 13px 15px;
-    border: 1px solid #29404e;
+    border: 1px solid var(--rg-line);
     border-radius: 13px;
-    background: #101c27;
+    background: var(--rg-soft);
 }
 .rg-guide .number {
     display: grid;
@@ -7271,17 +7299,17 @@ def view_theory(_ctx: Ctx) -> None:
     height: 34px;
     place-items: center;
     border-radius: 10px;
-    color: #05251b;
-    background: #53d6a2;
-    font-weight: 950;
+    color: #fff;
+    background: var(--rg-accent);
+    font-weight: 800;
 }
 .rg-guide .step b {
     display: block;
     margin-bottom: 2px;
-    color: #ffffff;
+    color: inherit;
 }
 .rg-guide .step span {
-    color: #9fb4ba;
+    color: var(--rg-muted);
     font-size: .88rem;
     line-height: 1.55;
 }
@@ -7293,27 +7321,27 @@ def view_theory(_ctx: Ctx) -> None:
 }
 .rg-guide .note {
     padding: 13px 14px;
-    border: 1px solid #29404e;
+    border: 1px solid var(--rg-line);
     border-radius: 12px;
-    color: #adbec2;
-    background: rgba(16, 28, 39, .72);
+    color: var(--rg-muted);
+    background: var(--rg-soft);
     font-size: .84rem;
 }
 .rg-guide .note b {
     display: block;
     margin-bottom: 3px;
-    color: #ffcb6b;
+    color: inherit;
 }
 .rg-guide .formula {
     margin-top: 12px;
     padding: 14px 16px;
-    border-left: 4px solid #67b8ff;
+    border-left: 4px solid var(--rg-accent);
     border-radius: 0 12px 12px 0;
-    color: #c7d9dc;
-    background: rgba(103, 184, 255, .08);
+    color: var(--rg-muted);
+    background: var(--rg-soft);
     font-size: .88rem;
 }
-.rg-guide .formula b { color: #8dccff; }
+.rg-guide .formula b { color: inherit; }
 @media (max-width: 680px) {
     .rg-guide .notes { grid-template-columns: 1fr; }
 }
@@ -7865,24 +7893,6 @@ def perform_space_syntax(intents: Dict[str, Any]) -> None:
     st.toast(f"✅ Space Syntax เสร็จใน {result.meta['seconds']:.1f} วินาที", icon="🧭")
 
 
-def handle_map_click(map_output: Optional[Dict[str, Any]], locked: bool) -> None:
-    """Process a map click event — add marker if debounce passes."""
-    if locked:
-        return
-    if not map_output:
-        return
-    clicked = map_output.get("last_clicked")
-    if not clicked:
-        return
-
-    last = StateManager.get_last_click()
-    if should_add_marker(clicked["lat"], clicked["lng"], last):
-        StateManager.add_marker(clicked["lat"], clicked["lng"])
-        StateManager.record_click(clicked["lat"], clicked["lng"])
-        StateManager.clear_results(["isochrone", "intersection", "rent"])
-        st.rerun()
-
-
 # ============================================================================
 # SECTION 7: MAIN EXECUTION
 # ============================================================================
@@ -7931,9 +7941,8 @@ def main() -> None:
         _render_sidebar_layers_panel(ctx, intents["locked"])
     render_header()
     render_metrics_row()
-    map_output = render_map(ctx)
+    render_map(ctx)
     render_views(ctx)
-    handle_map_click(map_output, intents["locked"])
 
 
 if __name__ == "__main__":

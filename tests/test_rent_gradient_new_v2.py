@@ -6,6 +6,7 @@ The ledger below is what stops the copy from drifting: every top-level name of t
 in v2 with the *same source* unless it is listed — with a reason — in ``MODIFIED`` or ``REPLACED``.
 """
 import ast
+import copy
 import importlib.util
 import json
 import re
@@ -61,8 +62,11 @@ MODIFIED = {
     "PAGE_CONFIG": "page title/icon of the merged page",
     "MAP_STYLES": "adds the black (depthmap) and dark basemaps used by the Space Syntax layer",
     "_OVERPASS_LOCK": "one lock per server process (cache_resource) — a module-level RLock is rebuilt on every rerun",
-    "StateManager": "cached remote defaults, config guard, layer/Space Syntax keys",
+    "StateManager": "cached remote defaults, config guard, layer/Space Syntax keys; no click-debounce state",
+    "NETWORK_CONFIG": "the two click-debounce keys are gone (the map no longer adds pins)",
     "SESSION_KEYS_TO_SAVE": "the three anchor-detail layer checkboxes (and the Space Syntax settings)",
+    "_render_sidebar_marker_input": "the only place a pin is entered: range-checked like the anchor centre, says where to read coordinates",
+    "_render_sidebar_marker_list": "pin label readable on white and on black (CSS names such as black / pink were not)",
     "_render_sidebar_network_panel": "the three layer checkboxes moved to the layers panel",
     "_render_sidebar_rent_panel": "the two layer checkboxes moved to the layers panel",
     "render_sidebar": "pipeline order (… Space Syntax before Rent), returns the intents as a dict",
@@ -72,6 +76,8 @@ MODIFIED = {
 }
 # Replaced by new SHELL code (the behaviour moved into the layer registry / panels / views).
 REPLACED = {
+    "should_add_marker": "the map no longer adds pins on click — Active Markers are entered in the sidebar only",
+    "handle_map_click": "same: the map sends nothing back (st_folium returned_objects=[]), so a click is not an event",
     "_add_wms_layer": "→ _wms(): the three WMS overlays are registry rows that return the tile layer",
     "_add_map_legend": "→ legend_stack(): one box stacked from the legend section of every layer that is on",
     "_render_sidebar_map_settings": "→ _render_sidebar_layers_panel() + _render_sidebar_isochrone_settings()",
@@ -516,15 +522,30 @@ def test_the_base_map_uses_the_canvas_renderer_and_the_black_style_has_a_black_b
     assert "background:#000" not in light.get_root().render()
 
 
-def test_render_map_asks_streamlit_folium_only_for_clicks_and_shows_layer_warnings(monkeypatch):
+def test_render_map_asks_streamlit_folium_for_nothing_and_shows_layer_warnings(monkeypatch):
     calls, warned = [], []
-    monkeypatch.setattr(v2, "st_folium", lambda m, **kw: calls.append(kw) or {"last_clicked": None})
+    monkeypatch.setattr(v2, "st_folium", lambda m, **kw: calls.append(kw) or {})
     monkeypatch.setattr(v2.st, "warning", lambda text, *a, **k: warned.append(text))
     broken = v2.Layer("bad", "Bad", "บริบท & overlay", lambda c: 1 / 0, lambda c: True)
     monkeypatch.setattr(v2, "LAYERS", (broken,) + tuple(v2.LAYERS))
-    out = v2.render_map(make_ctx())
-    assert out == {"last_clicked": None} and calls[0]["returned_objects"] == ["last_clicked"]
+    assert v2.render_map(make_ctx()) is None
+    assert calls[0]["returned_objects"] == []              # nothing comes back: a click / pan / zoom is not a rerun
     assert calls[0]["key"] == "main_map" and any("Bad" in w and "ZeroDivisionError" in w for w in warned)
+
+
+def test_the_map_cannot_add_a_pin_and_the_click_machinery_is_gone():
+    text = PAGE.read_text(encoding="utf-8")
+    assert "last_clicked" not in text and "click_debounce" not in text
+    for name in ("handle_map_click", "should_add_marker"):
+        assert not hasattr(v2, name), name
+    assert not hasattr(v2.StateManager, "record_click") and not hasattr(v2.StateManager, "get_last_click")
+    assert "last_processed_click" not in v2.StateManager._DEFAULTS
+    adders = {fn.name for fn in ast.parse(text).body if isinstance(fn, ast.FunctionDef)
+              and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_marker"
+                      for n in ast.walk(fn))}
+    # the typed coordinates, the two "add this point" buttons of the Network panel, the Golden Spots table button —
+    # explicit commands only; neither main() nor render_map() (nor anything fed by the map) adds a pin
+    assert adders == {"_render_sidebar_marker_input", "_render_sidebar_network_panel", "view_gold"}
 
 
 def test_lru_reuses_an_entry_only_for_the_same_source_object():
@@ -875,31 +896,56 @@ def test_the_study_centre_falls_back_to_markers_then_anchor_as_before(monkeypatc
 
 
 # ----------------------------------------------------------------------------- views (the old tabs, one runs)
-def tab_bodies(path):
+def dump(statement, strip_style=False):
+    """``ast.dump`` of a statement; with ``strip_style`` every ``<style>…</style>`` inside a string literal is dropped."""
+    if strip_style:
+        statement = copy.deepcopy(statement)
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                node.value = re.sub(r"<style>.*?</style>", "", node.value, flags=re.S)
+    return ast.dump(statement)
+
+
+def tab_bodies(path, strip_style=False):
     tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "render_analytics_panel")
     bodies = {}
     for node in ast.walk(function):
         if isinstance(node, ast.With) and isinstance(node.items[0].context_expr, ast.Name) \
                 and node.items[0].context_expr.id.startswith("tab_"):
-            bodies[node.items[0].context_expr.id] = [ast.dump(statement) for statement in node.body]
+            bodies[node.items[0].context_expr.id] = [dump(statement, strip_style) for statement in node.body]
     return bodies
 
 
-def view_statements(name):
+def view_statements(name, strip_style=False):
     tree = ast.parse(PAGE.read_text(encoding="utf-8"))
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
     body = function.body[1:]                                                  # skip the docstring
     if name != "view_theory":
         body = body[1:]                                                       # skip the shared-inputs line
-    return [ast.dump(statement) for statement in body]
+    return [dump(statement, strip_style) for statement in body]
+
+
+# Views that differ from the tab of Rent_Gradient.py they came from — each with its reason. The test fails if a listed
+# view is in fact identical (the list cannot rot) and if an unlisted one differs (nothing drifts silently).
+MODIFIED_VIEWS = {
+    "view_marks": "the empty-state hint sends the user to ⚙️ การตั้งค่า — the map no longer adds pins on click",
+    "view_theory": "only the <style> block: the cards take the page's text colour, so they read on white and on black",
+}
 
 
 @pytest.mark.parametrize("tab, view", [("tab_curve", "view_curve"), ("tab_rings", "view_rings"),
                                        ("tab_gold", "view_gold"), ("tab_marks", "view_marks"),
                                        ("tab_theory", "view_theory")])
 def test_every_view_runs_exactly_the_statements_of_the_tab_it_came_from(tab, view):
-    assert tab_bodies(BASE)[tab] == view_statements(view)
+    if view in MODIFIED_VIEWS:
+        assert tab_bodies(BASE)[tab] != view_statements(view), f"{view} is listed as modified but identical"
+    else:
+        assert tab_bodies(BASE)[tab] == view_statements(view)
+
+
+def test_the_theory_view_changed_only_its_style_block_and_still_says_the_same_thing():
+    assert tab_bodies(BASE, strip_style=True)["tab_theory"] == view_statements("view_theory", strip_style=True)
 
 
 def test_views_have_unique_keys_and_only_the_chosen_one_runs(monkeypatch):
@@ -1107,3 +1153,179 @@ def test_tab_bodies_still_work_with_results(monkeypatch):
         at.radio(key="analytics_view").set_value(key).run()
         assert not at.exception, key
     assert at.radio(key="analytics_view").value == "curve"
+
+
+# ----------------------------------------------------------------------------- pins are typed in, never clicked in
+def exact_button(at, label):
+    return next(b for b in at.button if b.label == label)
+
+
+def test_a_pin_typed_in_the_sidebar_is_added_active_and_makes_the_old_results_stale(monkeypatch):
+    at = make_app(monkeypatch, rendered=[]).run()
+    before = len(at.session_state["markers"])
+    assert at.session_state["isochrone_data"] is not None and at.session_state["network_data"] is not None
+    at.text_input(key="manual_coords").set_value("20.3, 100.5")
+    exact_button(at, "เพิ่ม").click().run()
+    assert not at.exception and not at.error
+    assert at.session_state["markers"][-1] == {"lat": 20.3, "lng": 100.5, "active": True}
+    assert len(at.session_state["markers"]) == before + 1
+    assert at.session_state["isochrone_data"] is None and at.session_state["intersection_data"] is None
+    assert at.session_state["rent_gradient_data"] is None
+    assert at.session_state["network_data"] is not None            # the road analysis does not depend on the pins
+
+
+@pytest.mark.parametrize("text, message", [
+    ("abc, def", "พิกัดไม่ถูกต้อง"),
+    ("hello", "กรุณากรอกพิกัดเป็น Lat, Lon"),
+    ("20.3", "กรุณากรอกพิกัดเป็น Lat, Lon"),
+    ("", "กรุณากรอกพิกัดเป็น Lat, Lon"),
+    ("20.3, 100.5, 7", "กรุณากรอกพิกัดเป็น Lat, Lon"),
+    ("95, 100", "Lat ต้องอยู่ระหว่าง"),
+    ("20, 200", "Lon ต้องอยู่ระหว่าง"),
+])
+def test_coordinates_that_cannot_be_a_pin_are_explained_and_nothing_is_added(monkeypatch, text, message):
+    at = make_app(monkeypatch, rendered=[]).run()
+    before = [dict(m) for m in at.session_state["markers"]]
+    at.text_input(key="manual_coords").set_value(text)
+    exact_button(at, "เพิ่ม").click().run()
+    assert not at.exception and any(message in e.value for e in at.error), [e.value for e in at.error]
+    assert at.session_state["markers"] == before
+    assert at.session_state["isochrone_data"] is not None          # a rejected entry must not throw results away
+
+
+def test_locking_the_menus_locks_the_coordinate_entry_too(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[]).run()
+    assert not exact_button(at, "เพิ่ม").disabled and not at.text_input(key="manual_coords").disabled
+    at.toggle(key="ui_locked").set_value(True).run()
+    assert exact_button(at, "เพิ่ม").disabled and at.text_input(key="manual_coords").disabled
+
+
+def test_the_sidebar_says_where_pins_are_entered_and_the_empty_view_points_there(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[], analytics_view="marks").run()
+    assert not at.exception and at.session_state["markers"] == []
+    assert any("เพิ่ม Active Marker" in c.value and "Lat, Lng" in c.value for c in at.caption)
+    hint = next(i.value for i in at.info if "ยังไม่มีหมุด" in i.value)
+    assert "⚙️ การตั้งค่า" in hint and "คลิก" not in hint
+
+
+PINS = [{"lat": 20.1, "lng": 100.1, "active": True}, {"lat": 20.2, "lng": 100.2, "active": False},
+        {"lat": 20.3, "lng": 100.3, "active": True}]
+
+
+def pin_states(at):
+    return [(m["lat"], m["active"]) for m in at.session_state["markers"]]
+
+
+def test_deleting_a_pin_keeps_the_on_off_state_of_the_pins_that_remain(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[], markers=[dict(m) for m in PINS]).run()
+    assert pin_states(at) == [(20.1, True), (20.2, False), (20.3, True)]
+    next(b for b in at.button if b.key == "del_btn_0").click().run()
+    assert not at.exception and pin_states(at) == [(20.2, False), (20.3, True)]      # was: [(20.2, True), (20.3, False)]
+    assert at.checkbox(key="active_chk_0").value is False and at.checkbox(key="active_chk_1").value is True
+
+
+def test_a_pin_added_after_the_last_one_was_deleted_starts_active(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[], markers=[dict(m) for m in PINS]).run()
+    at.checkbox(key="active_chk_2").uncheck().run()                                  # the last pin is switched off …
+    exact = next(b for b in at.button if "ลบจุดล่าสุด" in b.label)
+    exact.click().run()                                                              # … and deleted
+    at.text_input(key="manual_coords").set_value("20.4, 100.4")
+    exact_button(at, "เพิ่ม").click().run()
+    assert pin_states(at) == [(20.1, True), (20.2, False), (20.4, True)]
+    assert at.checkbox(key="active_chk_2").value is True
+
+
+def test_reset_and_a_config_import_start_the_pin_checkboxes_afresh(monkeypatch):
+    state = make_state(monkeypatch)
+    state.update({"markers": [dict(m) for m in PINS], "active_chk_0": True, "active_chk_1": False, "other": 1})
+    v2.StateManager.reset()
+    assert "active_chk_0" not in state and "active_chk_1" not in state and state["other"] == 1
+    state["active_chk_0"] = False
+    v2.StateManager.import_config({"markers": [dict(m) for m in PINS]})
+    assert "active_chk_0" not in state
+
+
+def test_the_active_marker_count_follows_the_ticks_of_the_same_run(monkeypatch):
+    at = make_app(monkeypatch, config=False, rendered=[], markers=[dict(m, active=True) for m in PINS]).run()
+    counts = lambda: [m.value for m in at.markdown if "Active Markers:" in m.value]
+    assert counts() == ["📍 Active Markers: **3**"]
+    at.checkbox(key="active_chk_1").uncheck().run()
+    assert counts() == ["📍 Active Markers: **2**"]                                  # was one run behind: still **3**
+    assert at.metric[0].value == "2"
+
+
+# ----------------------------------------------------------------------------- white and black
+def css_palettes(css):
+    """``(light, dark)`` custom properties of ``MAP_CHROME_CSS``: ``{name: value}``."""
+    def read(block):
+        return {name: value.strip() for name, value in re.findall(r"--(rg-[a-z]+):([^;}]+)", block)}
+    light = re.search(r":root\{(.*?)\}", css, re.S).group(1)
+    dark = re.search(r"prefers-color-scheme:dark\)\{:root\{(.*?)\}\}", css, re.S).group(1)
+    return read(light), read(dark)
+
+
+def rgb_of(value):
+    if value.startswith("#"):
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+    return tuple(int(float(p)) for p in re.match(r"rgba?\(([^)]*)\)", value).group(1).split(",")[:3])
+
+
+def contrast(a, b):
+    def luminance(rgb):
+        lin = [c / 255 / 12.92 if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+    hi, lo = sorted((luminance(rgb_of(a)), luminance(rgb_of(b))), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_the_map_panels_carry_a_white_and_a_black_palette():
+    light, dark = css_palettes(v2.MAP_CHROME_CSS)
+    assert set(dark) <= set(light)                                  # black only overrides what white defines
+    assert {"rg-panel", "rg-text", "rg-muted", "rg-line", "rg-link", "rg-shadow", "rg-icon"} <= set(dark)
+    used = set(re.findall(r"var\(--(rg-[a-z]+)\)", v2.MAP_CHROME_CSS))
+    assert used <= set(light), used - set(light)                    # no rule refers to a colour that is not defined
+    assert all(light[name] != dark[name] for name in ("rg-panel", "rg-text", "rg-muted", "rg-link"))
+
+
+@pytest.mark.parametrize("name", ["rg-text", "rg-muted", "rg-link"])
+def test_map_panel_text_is_readable_in_both_palettes(name):
+    for palette in css_palettes(v2.MAP_CHROME_CSS):
+        assert contrast(palette[name], palette["rg-panel"]) >= 4.5, (name, palette)
+
+
+def test_the_base_map_carries_the_panel_colours_and_the_legend_has_none_of_its_own():
+    html = v2.build_base_map(make_ctx()).get_root().render()
+    assert v2.MAP_CHROME_CSS in html and "prefers-color-scheme:dark" in html
+    ctx = rich_ctx()
+    drawn, _ = v2.render_layers(ctx, folium.Map())
+    legend = v2.legend_stack(ctx, drawn).box_html
+    assert 'class="rg-legend"' in legend
+    assert not re.search(r"background:\s*(rgba?\(|#fff|white)", legend.split(">", 1)[0])    # the box itself
+    assert not re.search(r"(?<![-\w])color:\s*#", legend)                                   # no fixed text colour
+
+
+def test_a_pin_label_reads_on_white_and_on_black():
+    labels = [v2._marker_label_html(i, {"lat": 20.21944, "lng": 100.40363}, True) for i in range(len(v2.HEX_COLORS) + 2)]
+    assert not any(re.search(r"(?<![-\w])color:", label) for label in labels), "text takes the theme's colour"
+    for i, label in enumerate(labels):
+        assert f"background:{v2.HEX_COLORS[i % len(v2.HEX_COLORS)]}" in label        # the dot is the pin's colour …
+        assert "rgba(128,128,128" in label                                           # … ringed so no hue vanishes
+        assert f"จุดที่ {i + 1}" in label and "(20.2194, 100.4036)" in label
+    off = v2._marker_label_html(0, {"lat": 20.1, "lng": 100.2}, False)
+    assert "line-through" in off and "opacity:.45" in off and "background:" not in off and "#D63E2A" not in off
+
+
+def theory_css():
+    function = next(n for n in ast.parse(PAGE.read_text(encoding="utf-8")).body
+                    if isinstance(n, ast.FunctionDef) and n.name == "view_theory")
+    html = next(n.value for n in ast.walk(function) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and "<style>" in n.value)
+    return re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+
+
+def test_the_theory_cards_take_the_page_colours_instead_of_fixed_light_on_dark_ones():
+    css = theory_css()
+    assert set(re.findall(r"#[0-9a-fA-F]{3,8}\b", css)) <= {"#1f7a70", "#fff"}      # one accent, white on the badge
+    assert "rgba(" not in css and "color-mix(in srgb, currentColor" in css
+    text_colours = set(re.findall(r"(?<![-\w])color:\s*([^;]+);", css))
+    assert text_colours <= {"inherit", "var(--rg-muted)", "#fff"}, text_colours
