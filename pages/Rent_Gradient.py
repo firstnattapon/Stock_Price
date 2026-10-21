@@ -21,6 +21,7 @@ import requests
 from shapely.geometry import shape, mapping, box
 from shapely.ops import unary_union
 from shapely import wkt
+import copy
 import json
 import networkx as nx
 import osmnx as ox
@@ -39,7 +40,7 @@ import zipfile
 import io
 import xml.etree.ElementTree as ET
 import pandas as pd
-from math import radians, sin, cos, sqrt, atan2, log, exp, pi, floor, hypot
+from math import radians, sin, cos, sqrt, atan2, log, exp, pi, floor, hypot, isfinite
 
 # Automated CBD search uses metric coordinates, independent of map projection.
 from pyproj import CRS, Transformer
@@ -126,7 +127,10 @@ TIME_OPTIONS: List[int] = [5, 10, 15, 20, 30, 45, 60]
 
 # Cache Directory (disk-based OSM graph storage)
 CACHE_DIR: Path = Path("./cache")
-CACHE_DIR.mkdir(exist_ok=True)
+try:
+    CACHE_DIR.mkdir(exist_ok=True)
+except OSError:
+    pass  # read-only deployment: every cache read and write below already degrades to "no cache"
 
 # Network Analysis Configuration
 NETWORK_CONFIG: Dict[str, Any] = {
@@ -196,7 +200,20 @@ OVERPASS_CONFIG: Dict[str, Any] = {
     "attempts_per_endpoint": 1,
     "retry_backoff_seconds": 1.0,
 }
-_OVERPASS_LOCK = threading.RLock()
+
+
+@st.cache_resource(show_spinner=False)
+def _overpass_lock() -> Any:
+    """The one lock of the server process.
+
+    Streamlit executes this script again on every rerun, so a bare module-level
+    ``threading.RLock()`` would be a different lock for every run and session and
+    would serialise nothing.
+    """
+    return threading.RLock()
+
+
+_OVERPASS_LOCK = _overpass_lock()
 
 # Rent Gradient (Bid-Rent Model: Alonso-Muth-Mills) Configuration
 # หลักการ: ค่าเช่า/มูลค่าที่ดินลดลงแบบ negative exponential ตามระยะจาก CBD
@@ -273,6 +290,32 @@ GITHUB_BUNDLE_URL: str = (
 # ============================================================================
 # SECTION 2: STATE MANAGER (Centralized Session State)
 # ============================================================================
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
+
+
+def _importable(key: str, value: Any) -> bool:
+    """Whether the page's own code can consume ``value`` for ``key`` (remote defaults, config import).
+
+    Only structures that plain Python indexes or iterates on every rerun are checked —
+    ``markers``, ``colors``, ``rent_samples`` and the saved results — because a bad one raises
+    before the sidebar (and its Reset button) is reached. Widget-bound settings are left alone.
+    """
+    if key == "markers":
+        return isinstance(value, list) and all(
+            isinstance(m, dict) and _is_number(m.get("lat")) and _is_number(m.get("lng")) for m in value)
+    if key == "colors":
+        return isinstance(value, dict) and all(
+            isinstance(value.get(step), str) for step in ("step1", "step2", "step3", "step4"))
+    if key == "rent_samples":
+        return isinstance(value, list) and all(
+            isinstance(s, dict) and all(_is_number(s.get(field)) for field in ("lat", "lon", "rent"))
+            for s in value)
+    if key in RESULT_KEYS_TO_SAVE:
+        return value is None or isinstance(value, dict)
+    return True
+
 
 class StateManager:
     """
@@ -371,8 +414,9 @@ class StateManager:
         """
         first_run = cls.K_MARKERS not in st.session_state
 
-        # Resolve starting defaults (possibly from remote)
-        defaults = dict(cls._DEFAULTS)
+        # Resolve starting defaults (possibly from remote). Deep copy: the class-level
+        # dict/list defaults must never be the objects a session mutates.
+        defaults = copy.deepcopy(cls._DEFAULTS)
         if first_run:
             defaults[cls.K_MARKERS] = cls._load_remote_defaults(defaults)
 
@@ -397,11 +441,12 @@ class StateManager:
             )
             if resp.status_code == 200:
                 data: Dict[str, Any] = resp.json()
-                # Merge remote settings into defaults
-                for k in defaults:
-                    if k in data:
-                        defaults[k] = data[k]
-                return data.get("markers")
+                if not isinstance(data, dict):
+                    return None
+                # Merge the remote settings the page can use into defaults
+                usable = {k: data[k] for k in defaults if k in data and _importable(k, data[k])}
+                defaults.update(usable)
+                return usable.get("markers")
         except Exception:
             pass
         return None
@@ -559,14 +604,26 @@ class StateManager:
         cls.clear_results()
 
     @classmethod
-    def import_config(cls, data: Dict[str, Any]) -> None:
-        """Import settings + optional precomputed outputs from config."""
-        if "markers" in data:
+    def import_config(cls, data: Dict[str, Any]) -> List[str]:
+        """Import settings + optional precomputed outputs from config.
+
+        Returns the keys that were skipped because the page cannot use their value
+        (see ``_importable``); a config exported by this page skips nothing.
+        """
+        skipped: List[str] = []
+
+        def usable(key: str, value: Any) -> bool:
+            if _importable(key, value):
+                return True
+            skipped.append(key)
+            return False
+
+        if "markers" in data and usable("markers", data["markers"]):
             st.session_state[cls.K_MARKERS] = data["markers"]
 
         settings = data.get("settings", {})
         for k, v in settings.items():
-            if k in SESSION_KEYS_TO_SAVE:
+            if k in SESSION_KEYS_TO_SAVE and usable(k, v):
                 st.session_state[k] = v
 
         # The combined coordinate widget is UI-only. Keep it synchronized with
@@ -583,13 +640,15 @@ class StateManager:
 
         precomputed_results = data.get("precomputed_results", {})
         for result_key in RESULT_KEYS_TO_SAVE:
-            if result_key in precomputed_results:
+            if result_key in precomputed_results and usable(result_key, precomputed_results[result_key]):
                 st.session_state[result_key] = precomputed_results[result_key]
 
         # Backward compatibility: allow old flat structure.
         for result_key in RESULT_KEYS_TO_SAVE:
-            if result_key in data:
+            if result_key in data and usable(result_key, data[result_key]):
                 st.session_state[result_key] = data[result_key]
+
+        return list(dict.fromkeys(skipped))
 
     @classmethod
     def export_config(cls) -> str:
@@ -3540,6 +3599,14 @@ def export_bundle_zip() -> bytes:
     return out.getvalue()
 
 
+def _read_member(zf: zipfile.ZipFile, name: str, limit: int) -> Optional[bytes]:
+    """Bytes of an archive member, or ``None`` when it is larger than ``limit`` once inflated.
+
+    ``file_size`` is the inflated size, so a zip bomb is refused before any of it is read.
+    """
+    return zf.read(name) if zf.getinfo(name).file_size <= limit else None
+
+
 def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
     """Import bundle.zip with validation and fallback policy."""
     result = {"success": False, "config_loaded": False, "cache_loaded": False, "warnings": [], "errors": []}
@@ -3561,8 +3628,8 @@ def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
                 return result
 
             config_bytes = zf.read("config/config.json")
-            cache_bytes = zf.read("cache/cache.zip")
-            if len(cache_bytes) > MAX_CACHE_ENTRY_BYTES:
+            cache_bytes = _read_member(zf, "cache/cache.zip", MAX_CACHE_ENTRY_BYTES)
+            if cache_bytes is None:
                 result["warnings"].append("cache ใหญ่เกินกำหนด ระบบจะโหลดเฉพาะ config")
                 cache_bytes = b""
 
@@ -3574,8 +3641,10 @@ def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
                 result["warnings"].append("checksum cache ไม่ถูกต้อง โหลดเฉพาะ config")
                 cache_bytes = b""
 
-            StateManager.import_config(json.loads(config_bytes.decode("utf-8")))
+            skipped = StateManager.import_config(json.loads(config_bytes.decode("utf-8")))
             result["config_loaded"] = True
+            if skipped:
+                result["warnings"].append("ข้ามค่าใน config ที่ใช้งานไม่ได้: " + ", ".join(skipped))
             if cache_bytes:
                 cache_result = import_cache_from_zip(cache_bytes)
                 if cache_result.get("success"):
@@ -3932,7 +4001,29 @@ def _compute_centrality_impl(
 # SECTION 4: CACHED WRAPPERS (@st.cache_data)
 # ============================================================================
 
+class _NotCached(Exception):
+    """Raised inside an ``@st.cache_data`` body to hand a failure back without storing it.
+
+    Streamlit keeps whatever a function returns for the whole ``ttl`` (an error tuple or an
+    ``{"error": …}`` dict included) but never an exception, so one transient Geoapify or
+    Overpass failure would otherwise be replayed on every retry for an hour.
+    """
+
+
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG["cache_ttl_seconds"])
+def _isochrone_features_cached(
+    api_key: str,
+    travel_mode: str,
+    ranges_str: str,
+    marker_lat: float,
+    marker_lon: float,
+) -> List[Dict[str, Any]]:
+    features, error = safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    if features is None:
+        raise _NotCached(error)
+    return features
+
+
 def fetch_api_data_cached(
     api_key: str,
     travel_mode: str,
@@ -3940,8 +4031,12 @@ def fetch_api_data_cached(
     marker_lat: float,
     marker_lon: float,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """Streamlit-cached wrapper around the isochrone API call."""
-    return safe_fetch_isochrone(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    """Isochrone fetch as ``(features, None)`` or ``(None, error)``; only successes are cached."""
+    try:
+        features = _isochrone_features_cached(api_key, travel_mode, ranges_str, marker_lat, marker_lon)
+    except _NotCached as failure:
+        return None, failure.args[0]
+    return features, None
 
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG["cache_ttl_seconds"])
@@ -3960,11 +4055,21 @@ def union_all_polygons_cached(features_json_str: str) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=NETWORK_CONFIG["cache_ttl_seconds"])
+def _centrality_cached(polygon_wkt_str: str, network_type: str = "drive") -> Dict[str, Any]:
+    result = _compute_centrality_impl(polygon_wkt_str, network_type)
+    if "error" in result:
+        raise _NotCached(result)
+    return result
+
+
 def compute_centrality_cached(
     polygon_wkt_str: str, network_type: str = "drive"
 ) -> Dict[str, Any]:
-    """Streamlit-cached wrapper for the pure centrality computation."""
-    return _compute_centrality_impl(polygon_wkt_str, network_type)
+    """Centrality result, or ``{"error": …}``; only successful results are cached."""
+    try:
+        return _centrality_cached(polygon_wkt_str, network_type)
+    except _NotCached as failure:
+        return failure.args[0]
 
 
 # ------------------------------------------------------------ KML → GeoJSON
@@ -4139,7 +4244,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
         # สร้าง bundle เฉพาะเมื่อผู้ใช้กดปุ่ม — ไม่ zip cache ก้อนใหญ่ทุก rerun
-        if st.button("📦 เตรียม Bundle (.zip)", use_container_width=True, disabled=locked):
+        if st.button("📦 เตรียม Bundle (.zip)", width="stretch", disabled=locked):
             st.session_state["_bundle_bytes"] = export_bundle_zip()
         if st.session_state.get("_bundle_bytes"):
             st.download_button(
@@ -4147,7 +4252,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
                 st.session_state["_bundle_bytes"],
                 "rent_gradient_bundle.zip",
                 "application/zip",
-                use_container_width=True,
+                width="stretch",
                 disabled=locked,
             )
 
@@ -4156,7 +4261,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
             type=["zip"],
             key="bundle_uploader",
         )
-        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", use_container_width=True, disabled=locked):
+        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", width="stretch", disabled=locked):
             bundle_result = import_bundle_zip(uploaded_bundle.read())
             if bundle_result["success"]:
                 mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
@@ -4171,7 +4276,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
         st.markdown("---")
         st.markdown("##### Import Bundle from GitHub")
         st.caption("แหล่งข้อมูลคงที่: เชียงของ.zip")
-        if st.button("นำเข้า Bundle จาก GitHub", use_container_width=True, disabled=locked):
+        if st.button("นำเข้า Bundle จาก GitHub", width="stretch", disabled=locked):
             bundle_bytes, err = download_github_bundle()
             if err:
                 st.error(err)
@@ -4200,7 +4305,7 @@ def _render_sidebar_marker_input(locked: bool) -> None:
         key="manual_coords",
         disabled=locked,
     )
-    if c2.button("เพิ่ม", use_container_width=True, disabled=locked):
+    if c2.button("เพิ่ม", width="stretch", disabled=locked):
         try:
             lat_str, lng_str = coords_input.strip().split(",")
             StateManager.add_marker(float(lat_str), float(lng_str))
@@ -4216,11 +4321,11 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
     # Delete last / Reset buttons
     c1, c2 = st.columns(2)
-    if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
+    if c1.button("❌ ลบจุดล่าสุด", width="stretch", disabled=locked) and markers:
         StateManager.pop_last_marker()
         StateManager.clear_results(["isochrone", "intersection", "rent"])
         st.rerun()
-    if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
+    if c2.button("🔄 รีเซ็ต", width="stretch", disabled=locked):
         StateManager.reset()
         st.rerun()
 
@@ -4293,7 +4398,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
 
             if st.button(
                 "📤 Export Cache (.zip)",
-                use_container_width=True,
+                width="stretch",
                 key="export_cache_btn",
                 disabled=locked,
             ):
@@ -4304,12 +4409,12 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                     data=st.session_state["_cache_zip_bytes"],
                     file_name="osmnx_cache.zip",
                     mime="application/zip",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             if st.button(
                 "🗑️ ล้าง Cache",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -4323,7 +4428,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
         st.markdown("---")
         do_network: bool = st.button(
             "🚀 Run Network Analysis",
-            use_container_width=True,
+            width="stretch",
             disabled=(not can_analyze) or locked,
         )
 
@@ -4349,7 +4454,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
 
             if st.button(
                 "➕ เพิ่มจุดนี้ลงในรายการ",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -4377,7 +4482,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
             best = golden_spots[0]
             if st.button(
                 "➕ เพิ่มจุดทำเลที่ดินทองอันดับ 1",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -4671,7 +4776,7 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
         run_anchor = st.button(
             "🎯 ค้นหา CBD Anchor อัตโนมัติ",
             disabled=locked or not HAS_SCIPY or not center_valid,
-            use_container_width=True,
+            width="stretch",
         )
 
         if result:
@@ -4738,7 +4843,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
             df,
             num_rows="dynamic",
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             disabled=locked,
             column_config={
                 "lat": st.column_config.NumberColumn("Lat", format="%.5f"),
@@ -4758,7 +4863,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
         do_rent: bool = st.button(
             "🧮 คำนวณ Rent Gradient",
-            use_container_width=True,
+            width="stretch",
             disabled=(not can_run) or locked,
         )
 
@@ -4832,6 +4937,20 @@ def _render_sidebar_map_settings(locked: bool) -> None:
         st.multiselect("เวลา (นาที)", TIME_OPTIONS, key="time_intervals", disabled=locked)
 
 
+def _guarded(step: Callable[..., Any], *args: Any, default: Any = None) -> Any:
+    """Run one step of the page; if it raises, show the traceback where the step would have
+    drawn and carry on with the rest of the page.
+
+    Without this, one failing section stops the whole script run — the sidebar and its Reset
+    button included. Streamlit's rerun/stop signals derive from ``BaseException`` and pass through.
+    """
+    try:
+        return step(*args)
+    except Exception as exc:
+        st.exception(exc)
+        return default
+
+
 def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, Any]]]]:
     """
     Orchestrate the full sidebar — เรียงตามลำดับ pipeline:
@@ -4844,30 +4963,30 @@ def render_sidebar() -> Tuple[bool, bool, bool, bool, List[Tuple[int, Dict[str, 
         st.header("⚙️ การตั้งค่า")
 
         ui_locked = st.toggle("🔒 Lock Active Markers + เมนูทั้งหมด", key=StateManager.K_UI_LOCKED)
-        _render_sidebar_config_section(ui_locked)
+        _guarded(_render_sidebar_config_section, ui_locked)
         st.markdown("---")
-        _render_sidebar_marker_input(ui_locked)
+        _guarded(_render_sidebar_marker_input, ui_locked)
 
         st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
 
-        active_list = _render_sidebar_marker_list(ui_locked)
+        active_list = _guarded(_render_sidebar_marker_list, ui_locked, default=[])
 
         do_calc: bool = st.button(
             "🧩 ① คำนวณหา Isochrone CBD",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=ui_locked,
         )
         st.markdown("---")
 
-        do_network = _render_sidebar_network_panel(ui_locked)
+        do_network = _guarded(_render_sidebar_network_panel, ui_locked, default=False)
         st.markdown("---")
 
-        do_rent = _render_sidebar_rent_panel(ui_locked)
+        do_rent = _guarded(_render_sidebar_rent_panel, ui_locked, default=False)
         st.markdown("---")
 
-        _render_sidebar_map_settings(ui_locked)
-        do_anchor = _render_sidebar_anchor_panel(ui_locked)
+        _guarded(_render_sidebar_map_settings, ui_locked)
+        do_anchor = _guarded(_render_sidebar_anchor_panel, ui_locked, default=False)
 
     return do_calc, do_network, do_rent, do_anchor, active_list
 
@@ -5397,7 +5516,6 @@ def render_analytics_panel() -> None:
             model = rent_data["model"]
             st.plotly_chart(
                 _build_bid_rent_figure(rent_data),
-                use_container_width=True,
                 config={"displayModeBar": False},
             )
             eq_r0 = f"{model['r0']:,.1f}" if not model["is_index"] else f"{model['r0']:.0f}"
@@ -5422,7 +5540,7 @@ def render_analytics_panel() -> None:
             )
             has_net_cols = bool(net_data and "error" not in net_data and net_data.get("nodes", {}).get("features"))
             df_rings = pd.DataFrame(ring_rows)
-            st.dataframe(df_rings, use_container_width=True, hide_index=True)
+            st.dataframe(df_rings, width="stretch", hide_index=True)
 
             csv_bytes = df_rings.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
@@ -5459,7 +5577,7 @@ def render_analytics_panel() -> None:
     with tab_gold:
         if golden_spots:
             df_gold = _build_golden_spots_df(golden_spots, rent_data)
-            st.dataframe(df_gold, use_container_width=True, hide_index=True)
+            st.dataframe(df_gold, width="stretch", hide_index=True)
             if has_rent:
                 if rent_data["model"].get("is_index"):
                     st.caption(
@@ -5479,7 +5597,7 @@ def render_analytics_panel() -> None:
                 csv_bytes,
                 "golden_spots.csv",
                 "text/csv",
-                use_container_width=True,
+                width="stretch",
             )
             rank = c2.selectbox(
                 "เพิ่มอันดับลงแผนที่",
@@ -5487,7 +5605,7 @@ def render_analytics_panel() -> None:
                 label_visibility="collapsed",
                 format_func=lambda r: f"➕ เพิ่มอันดับ {r} ลงแผนที่",
             )
-            if c2.button("ยืนยันเพิ่มหมุด", use_container_width=True, disabled=locked):
+            if c2.button("ยืนยันเพิ่มหมุด", width="stretch", disabled=locked):
                 spot = golden_spots[rank - 1]
                 StateManager.add_marker(spot["lat"], spot["lon"])
                 StateManager.clear_results(["isochrone", "intersection", "rent"])
@@ -5516,7 +5634,7 @@ def render_analytics_panel() -> None:
                         predict_rent(d_km, model["r0"], model["lam"]), model
                     )
                 rows.append(row)
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
             if not has_rent:
                 st.caption("คำนวณ Rent Gradient เพื่อดูราคาประเมินของแต่ละหมุด")
         else:
@@ -6066,29 +6184,30 @@ def main() -> None:
     StateManager.initialize()
 
     # 2. Render Sidebar → capture user intents
-    do_calc, do_net, do_rent, do_anchor, active_list = render_sidebar()
+    do_calc, do_net, do_rent, do_anchor, active_list = _guarded(
+        render_sidebar, default=(False, False, False, False, []))
 
     # 3. Execute Business Logic (based on user intents)
     if do_calc:
-        perform_calculation(active_list)
+        _guarded(perform_calculation, active_list)
 
     if do_net:
-        perform_network_analysis()
+        _guarded(perform_network_analysis)
 
     if do_rent:
-        perform_rent_gradient()
+        _guarded(perform_rent_gradient)
 
     if do_anchor:
-        perform_automated_anchor()
+        _guarded(perform_automated_anchor)
 
     # 4. Render Header + Metrics + Map + Analytics
-    render_header()
-    render_metrics_row()
-    map_output = render_map()
-    render_analytics_panel()
+    _guarded(render_header)
+    _guarded(render_metrics_row)
+    map_output = _guarded(render_map)
+    _guarded(render_analytics_panel)
 
     # 5. Handle Map Click → mutate state & rerun
-    handle_map_click(map_output, st.session_state[StateManager.K_UI_LOCKED])
+    _guarded(handle_map_click, map_output, st.session_state[StateManager.K_UI_LOCKED])
 
 
 if __name__ == "__main__":
