@@ -1,5 +1,6 @@
 """Stability probe, shared distance rows and covering-cache reuse (all offline)."""
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -10,8 +11,10 @@ import shapely.wkt
 from pyproj.enums import TransformDirection
 from shapely.geometry import Point, Polygon
 
+from _rg_patch import patch_everywhere  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("anchor_stability_cache_test", ROOT / "pages/Rent_Gradient.py")
+spec = importlib.util.spec_from_file_location("anchor_stability_cache_test", ROOT / os.environ.get("RENT_GRADIENT_PAGE", "pages/Rent_Gradient.py"))
 page = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = page
 spec.loader.exec_module(page)
@@ -46,7 +49,7 @@ def road_grid(size=11, spacing=100):
 
 @pytest.fixture
 def real_graph(tmp_path, monkeypatch):
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     page.import_cache_from_zip(REAL_BUNDLE.read_bytes())
     graph = page.load_graph_from_cache("d25de118f9e82b8a2e8768e70ec4b5d5")
     lon = np.mean([d["x"] for _, d in graph.nodes(data=True)])
@@ -94,7 +97,7 @@ def test_probe_thresholds_define_the_level(monkeypatch):
 def test_each_exact_row_is_computed_once_and_shared_by_both_anchors_and_the_probe(monkeypatch):
     rows = []
     real = page.csgraph_dijkstra
-    monkeypatch.setattr(page, "csgraph_dijkstra",
+    patch_everywhere(monkeypatch, page, "csgraph_dijkstra",
                         lambda matrix, directed, indices: rows.append(len(indices))
                         or real(matrix, directed=directed, indices=indices))
     page.find_cbd_anchors(road_grid(11), CENTER, 4000.0)
@@ -137,7 +140,7 @@ def circle(lat, lon, radius_km):
 
 @pytest.fixture
 def cache_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(page, "CACHE_DIR", tmp_path)
+    patch_everywhere(monkeypatch, page, "CACHE_DIR", tmp_path)
     monkeypatch.delenv("OVERPASS_ENDPOINTS", raising=False)
     downloads = []
     source = road_grid(21)
@@ -283,7 +286,7 @@ def test_a2_ties_are_explicit_and_survive_one_ulp_noise(monkeypatch):
             row_sums[int(source)] = float(rows[k].sum())
         return rows
 
-    monkeypatch.setattr(page, "csgraph_dijkstra", noisy)
+    patch_everywhere(monkeypatch, page, "csgraph_dijkstra", noisy)
     result = page.find_cbd_anchors(graph, CENTER, 4000.0, stability=False)["closeness"]["anchor"]
     assert row_sums[5] < row_sums[4]          # a raw float comparison would now pick node 5 ...
     assert result["node_id"] == "4"           # ... but the tie is explicit: the lowest index wins
