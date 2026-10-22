@@ -725,6 +725,10 @@ def test_every_basemap_builds(style):
     assert fmap.get_root().render()
 
 
+def test_no_basemap_needs_an_api_key():
+    assert not any("cartocdn" in str(style) for style in rgn.MAP_STYLES.values())   # CARTO watermarks keyless tiles
+
+
 def test_histogram_bars_wear_their_map_colours():
     scaled = rgn.scale_scores(np.linspace(0, 1, 200), "linear")
     fig = rgn.histogram_figure(scaled, rgn.DEFAULT_PALETTE, "NAIN")
@@ -903,6 +907,14 @@ def test_cold_start_asks_for_the_network_first():
     assert app.info and "โหลดโครงข่ายถนน" in app.info[0].value
     assert any("🧪" in b.label for b in app.sidebar.button)
     assert _widget(app.sidebar.button, "วิเคราะห์ Space Syntax").disabled
+
+
+def test_a_session_left_on_a_removed_basemap_still_opens():
+    app = AppTest.from_file(str(PAGE), default_timeout=120)
+    app.session_state["rgn_basemap"] = "Dark (CARTO)"
+    app.run()
+    assert not app.exception
+    assert app.selectbox(key="rgn_basemap").value == next(iter(rgn.MAP_STYLES))
 
 
 def test_page_analyses_and_every_view_renders_without_errors():

@@ -109,21 +109,54 @@ HEX_COLORS: List[str] = [
     "#F69730", "#333333", "#FF91EA", "#436978",
 ]
 
-MAP_STYLES: Dict[str, Dict[str, Optional[str]]] = {
+# "labels" = ชั้นป้ายชื่อที่วางทับไทล์ฐาน · "max_native_zoom" = ซูมสูงสุดที่ผู้ให้บริการมีไทล์จริง
+# (ซูมเกินนั้น Leaflet ขยายไทล์ระดับนี้แทน — Esri Canvas มีถึง 16 ถ้าขอเกินจะได้ภาพ "Map data not yet available")
+# ทุกสไตล์ไม่ต้องใช้ API key
+MAP_STYLES: Dict[str, Dict[str, Any]] = {
     "Esri Light Gray (แนะนำสำหรับดูผังเมือง)": {
         "tiles": (
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
             "Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
         ),
         "attr": "Tiles &copy; Esri",
+        "max_native_zoom": 16,
     },
     "Google Maps (ผสม/Hybrid)": {
         "tiles": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
         "attr": "Google Maps",
     },
+    "Google Maps (ถนน/Roadmap)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+        "attr": "Google Maps",
+    },
+    "Google Maps (ภูมิประเทศ/Terrain)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
+        "attr": "Google Maps",
+    },
+    "Google Satellite (ดาวเทียมล้วน ไม่มีป้าย)": {
+        "tiles": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+        "attr": "Google Maps",
+    },
     "OpenStreetMap (มาตรฐาน)": {
         "tiles": "OpenStreetMap",
         "attr": None,
+    },
+    # ไทยมีข้อมูลถนนของ Esri ราวมาตราส่วน 1:5,000 (ซูม 17)
+    "Esri Street Map (ถนนละเอียด)": {
+        "tiles": (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+        ),
+        "attr": "Tiles &copy; Esri",
+        "max_native_zoom": 17,
+    },
+    "Esri Topographic (ภูมิประเทศ)": {
+        "tiles": (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "World_Topo_Map/MapServer/tile/{z}/{y}/{x}"
+        ),
+        "attr": "Tiles &copy; Esri",
+        "max_native_zoom": 17,
     },
     "Esri Satellite (ดาวเทียมชัด)": {
         "tiles": (
@@ -134,11 +167,23 @@ MAP_STYLES: Dict[str, Dict[str, Optional[str]]] = {
     },
     # พื้นหลังมืดสำหรับชั้น Space Syntax (แดง→น้ำเงินอ่านง่ายที่สุดบนพื้นดำแบบ depthmap)
     "พื้นดำ (เหมือน depthmap)": {"tiles": None, "attr": None},
-    "Dark (CARTO)": {
-        "tiles": "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-        "attr": "&copy; OpenStreetMap contributors &copy; CARTO",
+    # CARTO ต้องใช้ API key แล้ว (ไทล์ที่ไม่มี key มีลายน้ำ "API KEY REQUIRED") → Esri Dark Gray ไม่ต้องใช้ key
+    "Dark (Esri Dark Gray)": {
+        "tiles": (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+        ),
+        "labels": (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+        ),
+        "attr": "Tiles &copy; Esri",
+        "max_native_zoom": 16,
     },
 }
+
+# ชื่อสไตล์ที่เลิกใช้ → สไตล์ที่ใช้แทน (session ที่เปิดค้างและ config JSON เก่ายังได้พื้นหลังแบบเดิม)
+LEGACY_MAP_STYLES: Dict[str, str] = {"Dark (CARTO)": "Dark (Esri Dark Gray)"}
 
 TRAVEL_MODE_NAMES: Dict[str, str] = {
     "drive": "🚗 ขับรถ",
@@ -610,6 +655,12 @@ class StateManager:
         for key, value in defaults.items():
             st.session_state.setdefault(key, value)
 
+        # A renamed style keeps the user's choice (LEGACY_MAP_STYLES); any other unknown name → the default style
+        style = st.session_state[cls.K_MAP_STYLE]
+        if not (isinstance(style, str) and style in MAP_STYLES):
+            renamed = LEGACY_MAP_STYLES.get(style) if isinstance(style, str) else None
+            st.session_state[cls.K_MAP_STYLE] = renamed or cls._DEFAULTS[cls.K_MAP_STYLE]
+
         # A widget that is not drawn in a run loses its state; writing the value back keeps it for later.
         for key in KEEP_ALIVE_KEYS:
             if key in st.session_state:
@@ -800,6 +851,8 @@ class StateManager:
 
         settings = data.get("settings", {})
         for k, v in settings.items():
+            if k == cls.K_MAP_STYLE and isinstance(v, str):
+                v = LEGACY_MAP_STYLES.get(v, v)
             if k in SESSION_KEYS_TO_SAVE:
                 if _setting_ok(k, v):
                     st.session_state[k] = v
@@ -5922,21 +5975,35 @@ def legend_stack(ctx: Ctx, drawn: Sequence[Layer]) -> Optional[Any]:
     return LegendBox(sections) if sections else None
 
 
+def add_basemap(m: Any, name: str) -> None:
+    """Draw ``MAP_STYLES[name]`` under every other layer: its tiles (+ label tiles), or the black depthmap background."""
+    import folium
+
+    style = MAP_STYLES[name]
+    if style["tiles"] is None:
+        m.get_root().header.add_child(folium.Element(
+            "<style>.leaflet-container{background:#000 !important;}</style>"))
+        return
+    zoom = style.get("max_native_zoom")
+    folium.TileLayer(style["tiles"], attr=style["attr"], name=name, max_native_zoom=zoom).add_to(m)
+    if style.get("labels"):
+        # the labels are part of the basemap: no LayerControl entry of their own, not an overlay
+        folium.TileLayer(style["labels"], attr=style["attr"], name=f"{name} · ป้ายชื่อ", control=False,
+                         max_native_zoom=zoom).add_to(m)
+
+
 def build_base_map(ctx: Ctx) -> Any:
     """Tiles + survey tools. Layers, view memory, layer control and legend are added by ``render_map``."""
-    style = MAP_STYLES[ctx.show["map_style_name"]]
     m = folium.Map(
         location=list(ctx.center),
         zoom_start=14,
-        tiles=style["tiles"],
-        attr=style["attr"],
+        tiles=None,
         prefer_canvas=True,               # thousands of road segments: canvas, not one SVG node each
         control_scale=True,
     )
+    add_basemap(m, ctx.show["map_style_name"])
     header = m.get_root().header
     header.add_child(folium.Element(TOOLTIP_STYLE))
-    if style["tiles"] is None:
-        header.add_child(folium.Element("<style>.leaflet-container{background:#000 !important;}</style>"))
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
     MeasureControl(

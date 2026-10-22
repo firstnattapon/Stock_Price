@@ -157,16 +157,24 @@ SCALE_MODES: Dict[str, str] = {
     "quantile": "Quantile (ตามลำดับเปอร์เซ็นไทล์)",
 }
 
-MAP_STYLES: Dict[str, Dict[str, Optional[str]]] = {
+# "labels" = ชั้นป้ายชื่อที่วางทับไทล์ฐาน · "max_native_zoom" = ซูมสูงสุดที่ผู้ให้บริการมีไทล์จริง
+# (ซูมเกินนั้น Leaflet ขยายไทล์ระดับนี้แทน — Esri Canvas มีถึง 16 ถ้าขอเกินจะได้ภาพ "Map data not yet available")
+MAP_STYLES: Dict[str, Dict[str, Any]] = {
     "พื้นดำ (เหมือน depthmap)": {"tiles": None, "attr": None},
-    "Dark (CARTO)": {
-        "tiles": "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-        "attr": "&copy; OpenStreetMap contributors &copy; CARTO",
+    # CARTO ต้องใช้ API key แล้ว (ไทล์ที่ไม่มี key มีลายน้ำ "API KEY REQUIRED") → Esri Dark Gray ไม่ต้องใช้ key
+    "Dark (Esri Dark Gray)": {
+        "tiles": ("https://server.arcgisonline.com/ArcGIS/rest/services/"
+                  "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"),
+        "labels": ("https://server.arcgisonline.com/ArcGIS/rest/services/"
+                   "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"),
+        "attr": "Tiles &copy; Esri",
+        "max_native_zoom": 16,
     },
     "Esri Light Gray": {
         "tiles": ("https://server.arcgisonline.com/ArcGIS/rest/services/"
                   "Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"),
         "attr": "Tiles &copy; Esri",
+        "max_native_zoom": 16,
     },
     "OpenStreetMap": {"tiles": "OpenStreetMap", "attr": None},
 }
@@ -983,6 +991,23 @@ def legend_html(title: str, palette: str, low: str, high: str, note: str = "") -
     )
 
 
+def add_basemap(m: Any, name: str) -> None:
+    """Draw ``MAP_STYLES[name]`` under every other layer: its tiles (+ label tiles), or the black depthmap background."""
+    import folium
+
+    style = MAP_STYLES[name]
+    if style["tiles"] is None:
+        m.get_root().header.add_child(folium.Element(
+            "<style>.leaflet-container{background:#000 !important;}</style>"))
+        return
+    zoom = style.get("max_native_zoom")
+    folium.TileLayer(style["tiles"], attr=style["attr"], name=name, max_native_zoom=zoom).add_to(m)
+    if style.get("labels"):
+        # the labels are part of the basemap: no LayerControl entry of their own, not an overlay
+        folium.TileLayer(style["labels"], attr=style["attr"], name=f"{name} · ป้ายชื่อ", control=False,
+                         max_native_zoom=zoom).add_to(m)
+
+
 def build_map(
     net: SegmentNetwork, geojson: Dict[str, Any], *, basemap: str, legend: str,
     study_circle: Optional[Tuple[float, float, float]] = None,
@@ -997,7 +1022,6 @@ def build_map(
     from branca.element import MacroElement, Template
     from folium.plugins import Fullscreen, MousePosition
 
-    style = MAP_STYLES[basemap]
     features = [
         {**f, "properties": {**f["properties"], "label": escape(str(f["properties"].get("label", "")))}}
         for f in geojson["features"]
@@ -1010,10 +1034,8 @@ def build_map(
     else:
         south, north, west, east = (net.origin[0],) * 2 + (net.origin[1],) * 2
     m = folium.Map(location=[(south + north) / 2, (west + east) / 2], zoom_start=14,
-                   tiles=style["tiles"], attr=style["attr"], prefer_canvas=True, control_scale=True)
-    if style["tiles"] is None:
-        m.get_root().header.add_child(folium.Element(
-            "<style>.leaflet-container{background:#000 !important;}</style>"))
+                   tiles=None, prefer_canvas=True, control_scale=True)
+    add_basemap(m, basemap)
     m.fit_bounds([[south, west], [north, east]])
 
     folium.GeoJson(

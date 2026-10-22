@@ -129,7 +129,7 @@ LAYERS = (...,
 2. **สลับชั้นแล้วซูม/ตำแหน่งที่เลื่อนไว้ไม่เด้งกลับ** (แผนที่ยังถูกสร้างใหม่ แต่กู้มุมมองให้) · เพิ่มหมุด/พบ anchor ใหม่ → ยัง re-center เหมือนเดิม · ถ้าเบราว์เซอร์บล็อก `sessionStorage` → กลับไปพฤติกรรมเดิมโดยไม่พัง (ปิดฟีเจอร์ทั้งหมดได้ด้วย `REMEMBER_VIEW = False`)
 3. legend เป็นกล่องเดียวมุมล่างซ้าย
 4. ใต้แผนที่เป็นตัวเลือก (radio) แทนแท็บ + เพิ่มมุมมอง 🧭 Space Syntax
-5. พื้นหลังแผนที่เพิ่ม "พื้นดำ (เหมือน depthmap)" และ "Dark (CARTO)" — แนะนำสำหรับไล่สีแดง→น้ำเงิน
+5. พื้นหลังแผนที่เพิ่ม "พื้นดำ (เหมือน depthmap)" และ "Dark (Esri Dark Gray)" (พื้นมืด + ป้ายชื่อ) — แนะนำสำหรับไล่สีแดง→น้ำเงิน · เดิมเป็น "Dark (CARTO)" แต่ CARTO บังคับ API key แล้ว (ไทล์ที่ไม่มี key มีลายน้ำ "API KEY REQUIRED") — session/config เก่าที่เลือกไว้จะเปิดเป็น Dark ใหม่เอง (`LEGACY_MAP_STYLES`) · สไตล์อื่นที่เพิ่ม (ไม่ต้องใช้ key ทั้งหมด): Google Maps ถนน / ภูมิประเทศ / ดาวเทียมล้วน, Esri Street Map, Esri Topographic · Esri Canvas (Light/Dark Gray) มีไทล์ถึงซูม 16 จึงตั้ง `max_native_zoom` ให้ Leaflet ขยายไทล์แทนภาพ "Map data not yet available"
 6. config JSON รูปแบบเดิม (ไฟล์เก่าโหลดได้) + คีย์ใหม่ของ Space Syntax / ชั้น anchor
 7. **Active Markers เพิ่มได้จากการกรอกพิกัดที่ ⚙️ การตั้งค่า เท่านั้น — คลิกแผนที่ไม่เพิ่มหมุดอีกแล้ว**
    - แผนที่เรียก `st_folium(..., returned_objects=[])` → ไม่ส่งอะไรกลับ: คลิก/เลื่อน/ซูมไม่ทำให้หน้า rerun และไม่ล้างผล Isochrone / CBD / Rent ที่คำนวณไว้ (เดิมคลิกพลาดครั้งเดียวก็เพิ่มหมุดและล้างผลทั้งสามอย่าง) · โค้ด `handle_map_click` / `should_add_marker` / debounce ถูกลบ (ledger: แทน 2 ตัว)
@@ -154,11 +154,11 @@ selector ของ `MAP_CHROME_CSS` ขึ้นต้นด้วย `html .lea
 
 | ไฟล์ต้นทาง | ชื่อระดับบนสุด | คงเดิมตรงตัว | แก้ (มีเหตุผลรายตัว) | แทนด้วยโค้ด SHELL | ตกหล่น |
 |---|---|---|---|---|---|
-| `Rent_Gradient.py` | 189 | **169** (4,026 บรรทัด) | 14 | 6 | **0** |
-| `Rent_Gradient_new.py` | 83 | **59** (793 บรรทัด) | 2 | 22 | **0** |
+| `Rent_Gradient.py` | 189 | **168** (4,016 บรรทัด) | 15 | 6 | **0** |
+| `Rent_Gradient_new.py` | 84 | **60** (808 บรรทัด) | 2 | 22 | **0** |
 
 เทสต์เทียบซอร์สรายฟังก์ชัน: ชื่อที่ไม่อยู่ในรายการ "แก้/แทน" แล้วซอร์สต่างจากต้นฉบับ = เทสต์ล้ม; ชื่อที่อยู่ในรายการแต่จริง ๆ ไม่ต่าง = เทสต์ล้ม (รายการจึงไม่เน่า)
-แก้ 14: `PAGE_CONFIG`, `MAP_STYLES`, `_OVERPASS_LOCK`, `StateManager`, `NETWORK_CONFIG`, `SESSION_KEYS_TO_SAVE`, `_render_sidebar_marker_input`, `_render_sidebar_marker_list`, `_render_sidebar_network_panel`, `_render_sidebar_rent_panel`, `render_sidebar`, `render_header`, `render_map`, `main`
+แก้ 15: `PAGE_CONFIG`, `DEFAULT_CONFIG`, `MAP_STYLES`, `_OVERPASS_LOCK`, `StateManager`, `NETWORK_CONFIG`, `SESSION_KEYS_TO_SAVE`, `_render_sidebar_marker_input`, `_render_sidebar_marker_list`, `_render_sidebar_network_panel`, `_render_sidebar_rent_panel`, `render_sidebar`, `render_header`, `render_map`, `main`
 แทน 6: `should_add_marker`, `handle_map_click`, `_add_wms_layer`, `_add_map_legend`, `_render_sidebar_map_settings`, `render_analytics_panel`
 ทั้งไฟล์ 7,949 บรรทัด: ส่วนที่คัดลอกตรงตัวราว 4,820 บรรทัด (≈ 61 %) · ส่วนที่เขียนใหม่/แก้ (SHELL) 105 รายการ รวม 2,350 บรรทัด (≈ 30 %) · ที่เหลือคือ import, หัวข้อ section และบรรทัดว่าง
 
@@ -216,7 +216,7 @@ Chromium จริง (Playwright + Chromium 141, ชั้นหนักเป
 
 - **บริการภายนอกจริง**: Overpass (ดาวน์โหลดถนน + failover), Geoapify isochrone API, WMS (ผังเมือง/ประชากร/แปลงที่ดิน), ไทล์พื้นหลังและ Google Traffic — sandbox ต่อเน็ตไม่ได้ จึงตรวจด้วย config + กราฟที่บันทึกไว้เท่านั้น (โค้ดชั้น WMS ตรวจได้ว่าสร้างถูก ไม่ใช่ภาพจริง) · เทสต์ภาพ WMS 3 ข้อถูกข้าม
 - **Streamlit Community Cloud**: ยังไม่เคยรันบนของจริง (หน่วยความจำ/ทรัพยากรจำกัด, `requirements.txt` จริง) — ควรเปิดหน้าครั้งแรกหลัง deploy แล้วลอง: Run Space Syntax ตัวอย่าง, สลับชั้น, เพิ่มหมุด
-- **พื้นหลังแผนที่ไม่เปลี่ยนตามธีม**: โหมดมืดของ Streamlit ไม่ได้เปลี่ยนไทล์ — ค่าเริ่มต้น Esri Light Gray ยังสว่าง ให้เลือก "Dark (CARTO)" / "พื้นดำ" เอง · สีข้อมูล (Betweenness แบบ plasma เริ่มจากน้ำเงินเข้ม, จุด Node `#000000` ที่มาจากเอนจิน) ออกแบบสำหรับพื้นอ่อน จึงจางบนพื้นดำ — ไม่ได้ปรับเพราะสื่อความหมายและอยู่ในโค้ดที่คัดลอกตรงตัว
+- **พื้นหลังแผนที่ไม่เปลี่ยนตามธีม**: โหมดมืดของ Streamlit ไม่ได้เปลี่ยนไทล์ — ค่าเริ่มต้น Esri Light Gray ยังสว่าง ให้เลือก "Dark (Esri Dark Gray)" / "พื้นดำ" เอง · สีข้อมูล (Betweenness แบบ plasma เริ่มจากน้ำเงินเข้ม, จุด Node `#000000` ที่มาจากเอนจิน) ออกแบบสำหรับพื้นอ่อน จึงจางบนพื้นดำ — ไม่ได้ปรับเพราะสื่อความหมายและอยู่ในโค้ดที่คัดลอกตรงตัว
 - **แผงบนแผนที่ตามระบบปฏิบัติการ ไม่ใช่ตามปุ่มธีมของ Streamlit**: ใช้ `prefers-color-scheme` เพราะเอกสาร `st.context.theme` ระบุว่าค่าอาจผิดตอนโหลดครั้งแรกและตอนเปลี่ยนธีม · ถ้าเลือกธีม Streamlit ต่างจากระบบ แผงบนแผนที่จะใช้สีของระบบ (ยังอ่านออกทั้งคู่ เพียงไม่กลมกลืน)
 - **สีหลักของ Streamlit** (ปุ่ม/checkbox/radio สีแดง) เป็นธีมทั้งแอป ไม่ได้แก้ในหน้านี้ — ต้องตั้ง `.streamlit/config.toml` ซึ่งกระทบทุกหน้า
 - **ปุ่มเพิ่มหมุดที่ไม่ใช่การคลิกแผนที่ยังอยู่** (§6 ข้อ 7) — ปุ่มยืนยันใน view 💎 Golden Spots อยู่นอก ⚙️ การตั้งค่า ถ้าต้องการให้เพิ่มได้ที่ sidebar เท่านั้นเต็มรูปแบบ ย้ายเข้าแผง Network ได้ (ต้องให้ sidebar แสดงผลหลังรัน Network ทันที — ตอนนี้แผงนั้นตามหลังหนึ่ง rerun)

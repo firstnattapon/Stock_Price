@@ -60,7 +60,9 @@ def top_level(path):
 # (so the list cannot rot) and if an unlisted name differs (so nothing drifts silently).
 MODIFIED = {
     "PAGE_CONFIG": "page title/icon of the merged page",
-    "MAP_STYLES": "adds the black (depthmap) and dark basemaps used by the Space Syntax layer",
+    "DEFAULT_CONFIG": "the default map centre (LAT / LON) of the merged page was moved",
+    "MAP_STYLES": "adds the black (depthmap) and Esri dark basemaps for the Space Syntax layer, five more keyless "
+                  "styles (Google roadmap/terrain/satellite, Esri street/topo) and max_native_zoom / labels",
     "_OVERPASS_LOCK": "one lock per server process (cache_resource) — a module-level RLock is rebuilt on every rerun",
     "StateManager": "cached remote defaults, config guard, layer/Space Syntax keys; no click-debounce state",
     "NETWORK_CONFIG": "the two click-debounce keys are gone (the map no longer adds pins)",
@@ -91,7 +93,7 @@ NEW_MODIFIED = {
 }
 NEW_REPLACED = {
     "PAGE_CONFIG": "the merged page has its own (Rent_Gradient.py's, retitled)",
-    "MAP_STYLES": "the black/dark basemaps were added to Rent_Gradient.py's MAP_STYLES",
+    "MAP_STYLES": "the black/dark basemaps (and Esri Light Gray's zoom limit) were added to Rent_Gradient.py's MAP_STYLES",
     "_node_sort_key": "identical code, only the docstring differs — Rent_Gradient.py's copy is used",
     "DEFAULT_LAT": "the study centre is anchor_lat / anchor_lon (shared with the CBD-anchor search)",
     "DEFAULT_LON": "the study centre is anchor_lat / anchor_lon (shared with the CBD-anchor search)",
@@ -520,6 +522,41 @@ def test_the_base_map_uses_the_canvas_renderer_and_the_black_style_has_a_black_b
     assert "preferCanvas" in html and "background:#000" in html
     light = v2.build_base_map(make_ctx())
     assert "background:#000" not in light.get_root().render()
+
+
+def tile_layers(m):
+    return [c for c in m._children.values() if isinstance(c, folium.TileLayer)]
+
+
+@pytest.mark.parametrize("name", list(v2.MAP_STYLES))
+def test_every_map_style_builds_its_tiles_and_labels_under_the_data_layers(name):
+    style = v2.MAP_STYLES[name]
+    m = v2.build_base_map(make_ctx(show={"map_style_name": name}))
+    html = m.get_root().render()
+    tiles = tile_layers(m)
+    assert len(tiles) == (style["tiles"] is not None) + bool(style.get("labels"))
+    if tiles:
+        assert tiles[0].layer_name == name and tiles[0].control      # the LayerControl names the style, not a URL
+        assert all(t.options["max_native_zoom"] == (style.get("max_native_zoom") or t.options["max_zoom"]) for t in tiles)
+    if style.get("labels"):
+        assert tiles[1].tiles == style["labels"] and not tiles[1].control
+    if style.get("max_native_zoom"):
+        assert f'"maxNativeZoom": {style["max_native_zoom"]}' in html
+    assert layer_names(m) == []                                      # the basemap is not one of the data layers
+
+
+def test_no_map_style_needs_an_api_key_and_the_carto_style_is_renamed():
+    assert not any("cartocdn" in str(style) for style in v2.MAP_STYLES.values())
+    assert not set(v2.LEGACY_MAP_STYLES) & set(v2.MAP_STYLES)
+    assert all(name in v2.MAP_STYLES for name in v2.LEGACY_MAP_STYLES.values())
+    assert v2.LEGACY_MAP_STYLES["Dark (CARTO)"] == "Dark (Esri Dark Gray)"
+    assert v2.MAP_STYLES["Dark (Esri Dark Gray)"]["labels"]                # CARTO dark_all had place names too
+
+
+def test_a_config_saved_with_the_carto_style_opens_on_its_replacement(monkeypatch):
+    state = make_state(monkeypatch)
+    assert v2.StateManager.import_config({"settings": {"map_style_name": "Dark (CARTO)"}}) == []
+    assert state["map_style_name"] == "Dark (Esri Dark Gray)"
 
 
 def test_render_map_asks_streamlit_folium_for_nothing_and_shows_layer_warnings(monkeypatch):
@@ -1047,6 +1084,16 @@ def test_skipped_config_values_are_reported_once(monkeypatch):
     assert any("ข้ามค่าที่ไม่ถูกต้อง" in w.value and "time_intervals" in w.value for w in at.warning)
     at.run()
     assert not any("ข้ามค่าที่ไม่ถูกต้อง" in w.value for w in at.warning)
+
+
+@pytest.mark.parametrize("stale, now", [("Dark (CARTO)", "Dark (Esri Dark Gray)"),
+                                        ("no such style", "Esri Light Gray (แนะนำสำหรับดูผังเมือง)")])
+def test_a_session_left_on_a_removed_map_style_still_opens(monkeypatch, stale, now):
+    rendered = []
+    at = make_app(monkeypatch, config=False, rendered=rendered, map_style_name=stale).run()
+    assert not at.exception and not at.error
+    assert at.selectbox(key="map_style_name").value == now
+    assert tile_layers(rendered[-1])[0].layer_name == now
 
 
 def test_demo_button_runs_space_syntax_and_the_gradient_appears_as_a_layer_with_its_legend(monkeypatch):
