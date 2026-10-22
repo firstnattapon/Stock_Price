@@ -5162,6 +5162,12 @@ html .leaflet-container .leaflet-tooltip-right:before{border-right-color:var(--r
 .rg-legend{background:var(--rg-panel);color:var(--rg-text);border:1px solid var(--rg-line);
 box-shadow:var(--rg-shadow)}
 .rg-muted{color:var(--rg-muted)}
+html .leaflet-container .rg-layer-all{display:flex;gap:4px;margin:0 0 5px;padding-bottom:5px;
+border-bottom:1px solid var(--rg-line)}
+html .leaflet-container .rg-layer-all button{flex:1;font:inherit;padding:2px 8px;cursor:pointer;white-space:nowrap;
+color:var(--rg-text);background:transparent;border:1px solid var(--rg-line);border-radius:4px}
+html .leaflet-container .rg-layer-all button:hover,html .leaflet-container .rg-layer-all button:focus{
+background:var(--rg-hover)}
 </style>"""
 PANEL_GROUPS: Tuple[str, ...] = ("โครงข่ายถนน", "Rent Gradient", "Automated Anchor", "บริบท & overlay")
 
@@ -5376,6 +5382,45 @@ class ViewMemory(MacroElement):
         super().__init__()
         self._name = "ViewMemory"
         self.token_json = _json_js(token)
+
+
+class LayerToggleAll(MacroElement):
+    """Two buttons at the top of the map's layer control: untick / tick every layer in one click.
+
+    Each button clicks the overlay checkboxes that need changing, so Leaflet adds / removes the layers exactly as
+    if they were clicked by hand. The basemap (radio) is not touched. Like the control itself, this only changes
+    what the map shows — the sidebar checkboxes stay as they are.
+    """
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function (map) {
+            setTimeout(function () {            // after the whole map script: the layer control exists by then
+                var list = map.getContainer().querySelector(".leaflet-control-layers-list");
+                var boxes = function () {
+                    return list.querySelectorAll(".leaflet-control-layers-overlays input[type=checkbox]");
+                };
+                if (!list || list.querySelector(".rg-layer-all") || !boxes().length) { return; }
+                var row = document.createElement("div");
+                row.className = "rg-layer-all";
+                [["ปิดทั้งหมด", false], ["เปิดทั้งหมด", true]].forEach(function (b) {
+                    var button = document.createElement("button");
+                    button.type = "button";
+                    button.textContent = b[0];
+                    button.addEventListener("click", function () {
+                        boxes().forEach(function (box) { if (box.checked !== b[1]) { box.click(); } });
+                    });
+                    row.appendChild(button);
+                });
+                list.insertBefore(row, list.firstChild);
+            }, 0);
+        })({{ this._parent.get_name() }});
+        {% endmacro %}
+        """)
+
+    def __init__(self):
+        super().__init__()
+        self._name = "LayerToggleAll"
 
 
 class LegendBox(MacroElement):
@@ -6061,6 +6106,7 @@ def render_map(ctx: Ctx) -> None:
     if REMEMBER_VIEW:
         ViewMemory(f"{ctx.center[0]:.5f},{ctx.center[1]:.5f}").add_to(m)
     folium.LayerControl().add_to(m)
+    LayerToggleAll().add_to(m)
     legend = legend_stack(ctx, drawn)
     if legend is not None:
         m.get_root().add_child(legend)

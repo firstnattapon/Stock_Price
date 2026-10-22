@@ -560,6 +560,20 @@ def test_a_config_saved_with_the_carto_style_opens_on_its_replacement(monkeypatc
     assert state["map_style_name"] == "Dark (Esri Dark Gray)"
 
 
+def test_the_layer_control_has_one_click_buttons_to_untick_and_tick_every_layer(monkeypatch):
+    shown = []
+    monkeypatch.setattr(v2, "st_folium", lambda m, **kw: shown.append(m) or {})
+    monkeypatch.setattr(v2.st, "warning", lambda *a, **k: None)
+    v2.render_map(rich_ctx())
+    kinds = [type(c).__name__ for c in shown[-1]._children.values()]
+    assert kinds.count("LayerToggleAll") == 1 and kinds.index("LayerToggleAll") > kinds.index("LayerControl")
+    html = shown[-1].get_root().render()
+    assert '[["ปิดทั้งหมด", false], ["เปิดทั้งหมด", true]]' in html
+    # only the overlay checkboxes are clicked (the basemap radio is left alone), through Leaflet's own handler
+    assert ".leaflet-control-layers-overlays input[type=checkbox]" in html and "box.click()" in html
+    assert "html .leaflet-container .rg-layer-all button{" in v2.MAP_CHROME_CSS
+
+
 def test_render_map_asks_streamlit_folium_for_nothing_and_shows_layer_warnings(monkeypatch):
     calls, warned = [], []
     monkeypatch.setattr(v2, "st_folium", lambda m, **kw: calls.append(kw) or {})
