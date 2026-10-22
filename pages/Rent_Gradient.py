@@ -5554,10 +5554,10 @@ def draw_betweenness(ctx: Ctx) -> Any:
 
 
 # Node Integration: the engine sizes nodes 2–8 px and colours them black (saved results too); drawn at half that
-# size, in blue, with a thinner outline
+# size, in white with a dark-grey outline (the outline keeps them visible on light basemaps)
 NODE_RADIUS_SCALE: float = 0.5
-NODE_FILL: str = "#1E88E5"
-NODE_STROKE: str = "#0D47A1"
+NODE_FILL: str = "#FFFFFF"
+NODE_STROKE: str = "#424242"
 
 
 def draw_closeness(ctx: Ctx) -> Any:
@@ -5941,7 +5941,7 @@ LAYERS: Tuple[Layer, ...] = (
           requires="รัน Network Analysis ก่อน"),
     Layer("closeness", "Node Integration", "โครงข่ายถนน", draw_closeness,
           lambda c: bool(c.net and c.net.get("nodes")), show_key="show_closeness",
-          label="Show Nodes (Integration)", hint="จุดสีน้ำเงิน: จุดเข้าถึงง่าย (Central Hub)",
+          label="Show Nodes (Integration)", hint="จุดสีขาว: จุดเข้าถึงง่าย (Central Hub)",
           requires="รัน Network Analysis ก่อน"),
     Layer("golden", "Golden Land Spots", "โครงข่ายถนน", draw_golden,
           lambda c: bool(c.net and c.net.get("golden_spots_geojson")), show_key="show_golden_spots",
