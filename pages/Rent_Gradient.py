@@ -5560,7 +5560,7 @@ def draw_travel_areas(ctx: Ctx) -> Any:
         name="Travel Areas",
         style_function=lambda x: {
             "fillColor": get_fill_color(x["properties"]["travel_time_minutes"], clrs),
-            "color": get_border_color(x["properties"]["original_index"]),
+            "color": "#FFFFFF",                 # white outline for every area (was the colour of its pin)
             "weight": 1,
             "fillOpacity": 0.2,
         },

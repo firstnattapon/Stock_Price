@@ -632,6 +632,15 @@ def test_node_integration_is_drawn_grey_at_half_the_engine_size_and_rent_heat_is
     assert {r[0] for r in cached} == {"#000000"}         # changes
 
 
+def test_travel_areas_have_a_white_outline_and_keep_their_time_colours():
+    ctx = rich_ctx()
+    areas = v2.draw_travel_areas(ctx)
+    styles = [areas.style_function(f) for f in ctx.iso["features"]]
+    assert styles and {s["color"] for s in styles} == {"#FFFFFF"}
+    assert [s["fillColor"] for s in styles] == [
+        v2.get_fill_color(f["properties"]["travel_time_minutes"], ctx.colors) for f in ctx.iso["features"]]
+
+
 def wms_dol(ctx):
     layer = next(layer for layer in v2.LAYERS if layer.id == "wms_dol")
     return layer.draw(ctx).options["opacity"]
