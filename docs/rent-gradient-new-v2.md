@@ -54,7 +54,7 @@ render_header(); render_metrics_row(); render_map(ctx); render_views(ctx)   # �
 | 8 | `rent_rings` | Rent Gradient Rings | Rent Gradient | rent | `show_rent_rings` · เปิด |
 | 9 | `rent_heat` | Rent Heat (Nodes) | Rent Gradient | rent + network | `show_rent_nodes` · ปิด |
 | 10 | `betweenness` | Road Betweenness | โครงข่ายถนน | network | `show_betweenness` · ปิด |
-| 11 | `closeness` | Node Integration | โครงข่ายถนน | network | `show_closeness` · ปิด (วาดสีเทา `NODE_FILL` / `NODE_STROKE` และครึ่งขนาดของเอนจิน `NODE_RADIUS_SCALE` = 0.5 → 1–4 px) |
+| 11 | `closeness` | Node Integration | โครงข่ายถนน | network | `show_closeness` · ปิด (วาดสีน้ำเงิน `NODE_FILL` / `NODE_STROKE` และครึ่งขนาดของเอนจิน `NODE_RADIUS_SCALE` = 0.5 → 1–4 px) |
 | 12 | `golden` | Golden Land Spots | โครงข่ายถนน | network | `show_golden_spots` · เปิด |
 | 13 | `travel_areas` | Travel Areas | โครงข่ายถนน | isochrone | แสดงเสมอเมื่อมีข้อมูล (ขอบสีขาว) |
 | 14 | `cbd_zone` | CBD Zone | โครงข่ายถนน | CBD (∩) | แสดงเสมอเมื่อมีข้อมูล |
@@ -137,6 +137,7 @@ LAYERS = (...,
    - ปุ่ม ➕ ที่เพิ่ม "จุดที่ได้จากการวิเคราะห์" ยังอยู่ตามเดิม (Integration Center และ Golden Spot อันดับ 1 ใน sidebar · ปุ่มยืนยันเพิ่มหมุดใน view 💎 Golden Spots) — เป็นคำสั่งที่กดเอง ไม่ใช่การคลิกแผนที่ (เทสต์ `test_the_map_cannot_add_a_pin…` ล็อกรายการฟังก์ชันที่เพิ่มหมุดได้)
    - แก้บั๊กเดิมของรายการหมุดที่เจอระหว่างตรวจ (มีใน `Rent_Gradient.py` ด้วย): ลบหมุดกลางรายการทำให้ติ๊ก เปิด/ปิด ของหมุดที่เหลือสลับกัน (checkbox ผูก key ตามลำดับ) และตัวเลข "Active Markers: N" ใน sidebar ช้ากว่าความจริงหนึ่งรอบหลังติ๊ก
 8. **สี UI อ่านสบายตาทั้งพื้นขาวและพื้นดำ** (ตามโหมดของ Streamlit / ระบบ — ดูรายละเอียดใน §6b)
+9. **กล่องเลือกชั้นบนแผนที่ (มุมขวาบน) มีปุ่ม "ปิดทั้งหมด" / "เปิดทั้งหมด"** — คลิกเดียวติ๊กออก/ติ๊กเข้าทุกชั้น (`LayerToggleAll` กด checkbox แต่ละอันแทนผู้ใช้ Leaflet จึงซ่อน/แสดงชั้นเหมือนกดเอง) · ไม่แตะสไตล์แผนที่ (radio) · เหมือนกล่องนี้เดิม: เปลี่ยนแค่สิ่งที่แผนที่แสดง ไม่เปลี่ยน checkbox ใน sidebar
 
 ### 6b) สี UI: เรียบง่าย สบายตา ทั้งพื้นขาวและพื้นดำ
 

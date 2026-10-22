@@ -560,6 +560,20 @@ def test_a_config_saved_with_the_carto_style_opens_on_its_replacement(monkeypatc
     assert state["map_style_name"] == "Dark (Esri Dark Gray)"
 
 
+def test_the_layer_control_has_one_click_buttons_to_untick_and_tick_every_layer(monkeypatch):
+    shown = []
+    monkeypatch.setattr(v2, "st_folium", lambda m, **kw: shown.append(m) or {})
+    monkeypatch.setattr(v2.st, "warning", lambda *a, **k: None)
+    v2.render_map(rich_ctx())
+    kinds = [type(c).__name__ for c in shown[-1]._children.values()]
+    assert kinds.count("LayerToggleAll") == 1 and kinds.index("LayerToggleAll") > kinds.index("LayerControl")
+    html = shown[-1].get_root().render()
+    assert '[["ปิดทั้งหมด", false], ["เปิดทั้งหมด", true]]' in html
+    # only the overlay checkboxes are clicked (the basemap radio is left alone), through Leaflet's own handler
+    assert ".leaflet-control-layers-overlays input[type=checkbox]" in html and "box.click()" in html
+    assert "html .leaflet-container .rg-layer-all button{" in v2.MAP_CHROME_CSS
+
+
 def test_render_map_asks_streamlit_folium_for_nothing_and_shows_layer_warnings(monkeypatch):
     calls, warned = [], []
     monkeypatch.setattr(v2, "st_folium", lambda m, **kw: calls.append(kw) or {})
@@ -615,18 +629,18 @@ def test_heavy_layer_rows_are_built_once_per_result_not_once_per_rerun(monkeypat
     assert len(calls) == 2
 
 
-def test_node_integration_is_drawn_grey_at_half_the_engine_size_and_rent_heat_is_not():
+def test_node_integration_is_drawn_blue_at_half_the_engine_size_and_rent_heat_is_not():
     ctx = rich_ctx()
     nodes = next(c for c in v2.draw_closeness(ctx)._children.values() if isinstance(c, v2.CompactPoints))
     assert nodes.radius_scale == v2.NODE_RADIUS_SCALE == 0.5 and nodes.weight == 0.5
-    assert nodes.fill_json == '"#808080"' and nodes.stroke_json == '"#5A5A5A"'
+    assert nodes.fill_json == '"#1E88E5"' and nodes.stroke_json == '"#0D47A1"'
     heat = next(c for c in v2.draw_rent_heat(ctx)._children.values() if isinstance(c, v2.CompactPoints))
     assert heat.radius_scale == 1.0 and heat.fill_json == heat.stroke_json == "null"     # keeps its own colours
     m = folium.Map()
     v2.draw_closeness(ctx).add_to(m)
     html = m.get_root().render()
     assert "radius: r[2] * radiusScale" in html and "fillColor: fill || r[0], color: stroke || r[1]" in html
-    assert ', "#808080", "#5A5A5A");' in html
+    assert ', "#1E88E5", "#0D47A1");' in html
     cached = json.loads(v2.lru_get(ctx.cache, ("rows", "closeness", id(ctx.net["nodes"])), ctx.net["nodes"], lambda: None))
     assert max(r[2] for r in cached) > 4                 # the engine's radius and colour are kept; only the drawing
     assert {r[0] for r in cached} == {"#000000"}         # changes

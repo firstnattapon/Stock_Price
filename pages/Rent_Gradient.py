@@ -5162,6 +5162,12 @@ html .leaflet-container .leaflet-tooltip-right:before{border-right-color:var(--r
 .rg-legend{background:var(--rg-panel);color:var(--rg-text);border:1px solid var(--rg-line);
 box-shadow:var(--rg-shadow)}
 .rg-muted{color:var(--rg-muted)}
+html .leaflet-container .rg-layer-all{display:flex;gap:4px;margin:0 0 5px;padding-bottom:5px;
+border-bottom:1px solid var(--rg-line)}
+html .leaflet-container .rg-layer-all button{flex:1;font:inherit;padding:2px 8px;cursor:pointer;white-space:nowrap;
+color:var(--rg-text);background:transparent;border:1px solid var(--rg-line);border-radius:4px}
+html .leaflet-container .rg-layer-all button:hover,html .leaflet-container .rg-layer-all button:focus{
+background:var(--rg-hover)}
 </style>"""
 PANEL_GROUPS: Tuple[str, ...] = ("โครงข่ายถนน", "Rent Gradient", "Automated Anchor", "บริบท & overlay")
 
@@ -5378,6 +5384,45 @@ class ViewMemory(MacroElement):
         self.token_json = _json_js(token)
 
 
+class LayerToggleAll(MacroElement):
+    """Two buttons at the top of the map's layer control: untick / tick every layer in one click.
+
+    Each button clicks the overlay checkboxes that need changing, so Leaflet adds / removes the layers exactly as
+    if they were clicked by hand. The basemap (radio) is not touched. Like the control itself, this only changes
+    what the map shows — the sidebar checkboxes stay as they are.
+    """
+
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function (map) {
+            setTimeout(function () {            // after the whole map script: the layer control exists by then
+                var list = map.getContainer().querySelector(".leaflet-control-layers-list");
+                var boxes = function () {
+                    return list.querySelectorAll(".leaflet-control-layers-overlays input[type=checkbox]");
+                };
+                if (!list || list.querySelector(".rg-layer-all") || !boxes().length) { return; }
+                var row = document.createElement("div");
+                row.className = "rg-layer-all";
+                [["ปิดทั้งหมด", false], ["เปิดทั้งหมด", true]].forEach(function (b) {
+                    var button = document.createElement("button");
+                    button.type = "button";
+                    button.textContent = b[0];
+                    button.addEventListener("click", function () {
+                        boxes().forEach(function (box) { if (box.checked !== b[1]) { box.click(); } });
+                    });
+                    row.appendChild(button);
+                });
+                list.insertBefore(row, list.firstChild);
+            }, 0);
+        })({{ this._parent.get_name() }});
+        {% endmacro %}
+        """)
+
+    def __init__(self):
+        super().__init__()
+        self._name = "LayerToggleAll"
+
+
 class LegendBox(MacroElement):
     """One fixed box (bottom-left) holding the legend sections of every layer that is on."""
 
@@ -5509,10 +5554,10 @@ def draw_betweenness(ctx: Ctx) -> Any:
 
 
 # Node Integration: the engine sizes nodes 2–8 px and colours them black (saved results too); drawn at half that
-# size, in grey, with a thinner outline
+# size, in blue, with a thinner outline
 NODE_RADIUS_SCALE: float = 0.5
-NODE_FILL: str = "#808080"
-NODE_STROKE: str = "#5A5A5A"
+NODE_FILL: str = "#1E88E5"
+NODE_STROKE: str = "#0D47A1"
 
 
 def draw_closeness(ctx: Ctx) -> Any:
@@ -5896,7 +5941,7 @@ LAYERS: Tuple[Layer, ...] = (
           requires="รัน Network Analysis ก่อน"),
     Layer("closeness", "Node Integration", "โครงข่ายถนน", draw_closeness,
           lambda c: bool(c.net and c.net.get("nodes")), show_key="show_closeness",
-          label="Show Nodes (Integration)", hint="จุดสีเทา: จุดเข้าถึงง่าย (Central Hub)",
+          label="Show Nodes (Integration)", hint="จุดสีน้ำเงิน: จุดเข้าถึงง่าย (Central Hub)",
           requires="รัน Network Analysis ก่อน"),
     Layer("golden", "Golden Land Spots", "โครงข่ายถนน", draw_golden,
           lambda c: bool(c.net and c.net.get("golden_spots_geojson")), show_key="show_golden_spots",
@@ -6061,6 +6106,7 @@ def render_map(ctx: Ctx) -> None:
     if REMEMBER_VIEW:
         ViewMemory(f"{ctx.center[0]:.5f},{ctx.center[1]:.5f}").add_to(m)
     folium.LayerControl().add_to(m)
+    LayerToggleAll().add_to(m)
     legend = legend_stack(ctx, drawn)
     if legend is not None:
         m.get_root().add_child(legend)
