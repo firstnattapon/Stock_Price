@@ -47,19 +47,19 @@ render_header(); render_metrics_row(); render_map(ctx); render_views(ctx)   # �
 | 1 | `traffic` | Google Traffic | บริบท & overlay | – | `show_traffic` · ปิด |
 | 2 | `wms_population` | ความหนาแน่นประชากร | บริบท & overlay | – | `show_population` · ปิด |
 | 3 | `wms_cityplan` | ผังเมืองรวม | บริบท & overlay | – | `show_cityplan` · ปิด (+ ตัวเลือกความโปร่งใส) |
-| 4 | `wms_dol` | รูปแปลงที่ดิน | บริบท & overlay | – | `show_dol` · ปิด |
+| 4 | `wms_dol` | รูปแปลงที่ดิน | บริบท & overlay | – | `show_dol` · ปิด (+ ตัวเลือกความโปร่งใส `dol_opacity` ค่าเริ่มต้น 0.2) |
 | 5 | `anchor_boundary` | Automated Anchor study boundary | Automated Anchor | anchor | `show_anchor_boundary` · ปิด (ใหม่) |
 | 6 | `evidence_zone` | Peak colour zone (ผังสีสูงสุด) | Automated Anchor | evidence | `show_evidence_zone` · ปิด (ใหม่) |
 | 7 | `evidence_clusters` | Parcel clusters (แปลงถี่) | Automated Anchor | evidence | `show_evidence_clusters` · ปิด (ใหม่) |
 | 8 | `rent_rings` | Rent Gradient Rings | Rent Gradient | rent | `show_rent_rings` · เปิด |
 | 9 | `rent_heat` | Rent Heat (Nodes) | Rent Gradient | rent + network | `show_rent_nodes` · ปิด |
 | 10 | `betweenness` | Road Betweenness | โครงข่ายถนน | network | `show_betweenness` · ปิด |
-| 11 | `closeness` | Node Integration | โครงข่ายถนน | network | `show_closeness` · ปิด |
+| 11 | `closeness` | Node Integration | โครงข่ายถนน | network | `show_closeness` · ปิด (วาดครึ่งขนาดของเอนจิน `NODE_RADIUS_SCALE` = 0.5 → 1–4 px) |
 | 12 | `golden` | Golden Land Spots | โครงข่ายถนน | network | `show_golden_spots` · เปิด |
 | 13 | `travel_areas` | Travel Areas | โครงข่ายถนน | isochrone | แสดงเสมอเมื่อมีข้อมูล |
 | 14 | `cbd_zone` | CBD Zone | โครงข่ายถนน | CBD (∩) | แสดงเสมอเมื่อมีข้อมูล |
 | 15 | **`space_syntax`** | 🧭 Space Syntax (ไล่สีตามคะแนน) | โครงข่ายถนน | ผล Space Syntax | `show_space_syntax` · เปิด (ใหม่) |
-| 16 | `railway` | แนวรถไฟเชียงของ | บริบท & overlay | KML | `show_railway` · ปิด |
+| 16 | `railway` | แนวรถไฟเชียงของ | บริบท & overlay | KML | `show_railway` · ปิด (+ ตัวเลือกความโปร่งใส `railway_opacity` ค่าเริ่มต้น 0.2) |
 | 17 | `top_node` | Integration Center | โครงข่ายถนน | network | แสดงเสมอเมื่อมีข้อมูล |
 | 18 | `cbd_anchor` | CBD Anchor (Composite / Closeness / Evidence / Rent) | Automated Anchor | anchor / rent | แสดงเสมอเมื่อมีข้อมูล |
 | 19 | `markers` | หมุดของฉัน | บริบท & overlay | หมุด | แสดงเสมอเมื่อมีหมุด |
@@ -229,5 +229,5 @@ Chromium จริง (Playwright + Chromium 141, ชั้นหนักเป
 ## 10) ทางเลือกในอนาคต (ยังไม่ได้ทำ)
 
 - **อัปเดตชั้นโดยไม่ re-mount แผนที่** ด้วย `feature_group_to_add` ของ `streamlit-folium`: อ่านซอร์ส frontend (0.27.4) แล้วพบว่า `window.feature_group` ถูก push เพิ่มทุกครั้งที่อัปเดตและไม่เคยล้างอาร์เรย์ → ชั้นเก่า (หมื่นเส้น) ค้างในหน่วยความจำเบราว์เซอร์ตามจำนวนครั้งที่สลับ และ legend/HTML ของแผนที่ถูกฉีดครั้งเดียวตอน mount ไม่อัปเดต จึงเลือกแผนที่ static + จำมุมมองแทน — ถ้าจะทำต้องแก้ที่ตัว component
-- **สไตล์แผนที่ตามธีมอัตโนมัติ** (ไทล์มืดเมื่อโหมดมืด) ต้องทำคู่กับชุดสีข้อมูลสำหรับพื้นมืด · **ตัวเลื่อนความโปร่งใสของ "รูปแปลงที่ดิน"** แบบเดียวกับผังเมือง (เส้นแดงของ WMS เป็นสิ่งที่แรงที่สุดบนแผนที่) · **ธีมทั้งแอป** ใน `.streamlit/config.toml` (สีหลักที่นุ่มกว่าแดง) — สามข้อนี้กระทบนอกหน้านี้หรือเปลี่ยนข้อมูลที่เห็น จึงยังไม่ทำ
+- **สไตล์แผนที่ตามธีมอัตโนมัติ** (ไทล์มืดเมื่อโหมดมืด) ต้องทำคู่กับชุดสีข้อมูลสำหรับพื้นมืด · **ธีมทั้งแอป** ใน `.streamlit/config.toml` (สีหลักที่นุ่มกว่าแดง) — สองข้อนี้กระทบนอกหน้านี้หรือเปลี่ยนข้อมูลที่เห็น จึงยังไม่ทำ
 - ย้าย API key ไป `st.secrets` · `st.fragment` สำหรับ view ที่หนัก · ให้ Space Syntax เลือกศูนย์จากหมุด/anchor อัตโนมัติ · ใช้ Space Syntax เป็นตัวแปรในโมเดล Rent
