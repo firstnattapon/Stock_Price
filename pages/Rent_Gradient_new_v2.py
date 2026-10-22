@@ -90,8 +90,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "https://raw.githubusercontent.com/firstnattapon/Stock_Price/"
         "refs/heads/main/Geoapify_Map/geoapify_cbd_project.json"
     ),
-    "LAT": 20.219443,
-    "LON": 100.403630,
+    "LAT": 20.24284464136462,
+    "LON": 100.41109063750005,
     "GEOAPIFY_KEY": "4eefdfb0b0d349e595595b9c03a69e3d",
     "LONGDO_KEY": "0a999afb0da60c5c45d010e9c171ffc8",
 }
