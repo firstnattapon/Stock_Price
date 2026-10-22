@@ -5322,19 +5322,19 @@ class CompactPoints(MacroElement):
 
     _template = Template("""
         {% macro script(this, kwargs) %}
-        (function (group, rows, weight, fillOpacity, radiusScale) {""" + _TOOLTIP_JS + """
+        (function (group, rows, weight, fillOpacity, radiusScale, fill, stroke) {""" + _TOOLTIP_JS + """
             for (var i = 0; i < rows.length; i++) {
                 var r = rows[i];
-                var dot = L.circleMarker([r[4], r[5]], {radius: r[2] * radiusScale, fillColor: r[0], color: r[1], weight: weight, fillOpacity: fillOpacity});
+                var dot = L.circleMarker([r[4], r[5]], {radius: r[2] * radiusScale, fillColor: fill || r[0], color: stroke || r[1], weight: weight, fillOpacity: fillOpacity});
                 if (r[3]) { dot._vals = r[3]; dot.bindTooltip(tipHtml, tip); }
                 group.addLayer(dot);
             }
-        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.weight }}, {{ this.fill_opacity }}, {{ this.radius_scale }});
+        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.weight }}, {{ this.fill_opacity }}, {{ this.radius_scale }}, {{ this.fill_json }}, {{ this.stroke_json }});
         {% endmacro %}
         """)
 
     def __init__(self, rows_json: str, heads: Sequence[str] = (), weight: float = 1.0, fill_opacity: float = 0.9,
-                 radius_scale: float = 1.0):
+                 radius_scale: float = 1.0, fill: Optional[str] = None, stroke: Optional[str] = None):
         super().__init__()
         self._name = "CompactPoints"
         self.rows_json = rows_json
@@ -5342,6 +5342,9 @@ class CompactPoints(MacroElement):
         self.weight = float(weight)
         self.fill_opacity = float(fill_opacity)
         self.radius_scale = float(radius_scale)
+        # one colour for every dot instead of each row's own (None = the row's colour)
+        self.fill_json = _json_js(fill)
+        self.stroke_json = _json_js(stroke)
 
 
 class ViewMemory(MacroElement):
@@ -5505,8 +5508,11 @@ def draw_betweenness(ctx: Ctx) -> Any:
     return group
 
 
-# Node Integration: the engine sizes nodes 2–8 px (saved results too); drawn at half that, with a thinner outline
+# Node Integration: the engine sizes nodes 2–8 px and colours them black (saved results too); drawn at half that
+# size, in grey, with a thinner outline
 NODE_RADIUS_SCALE: float = 0.5
+NODE_FILL: str = "#808080"
+NODE_STROKE: str = "#5A5A5A"
 
 
 def draw_closeness(ctx: Ctx) -> Any:
@@ -5515,7 +5521,7 @@ def draw_closeness(ctx: Ctx) -> Any:
         point_rows(nodes["features"], "color", "radius", ("closeness",), stroke="#000000")))
     group = folium.FeatureGroup(name="Node Integration", show=True)
     CompactPoints(rows, heads=("Integration Score:",), weight=0.5, fill_opacity=0.9,
-                  radius_scale=NODE_RADIUS_SCALE).add_to(group)
+                  radius_scale=NODE_RADIUS_SCALE, fill=NODE_FILL, stroke=NODE_STROKE).add_to(group)
     return group
 
 
@@ -5554,7 +5560,7 @@ def draw_travel_areas(ctx: Ctx) -> Any:
         name="Travel Areas",
         style_function=lambda x: {
             "fillColor": get_fill_color(x["properties"]["travel_time_minutes"], clrs),
-            "color": get_border_color(x["properties"]["original_index"]),
+            "color": "#FFFFFF",                 # white outline for every area (was the colour of its pin)
             "weight": 1,
             "fillOpacity": 0.2,
         },
@@ -5890,7 +5896,7 @@ LAYERS: Tuple[Layer, ...] = (
           requires="รัน Network Analysis ก่อน"),
     Layer("closeness", "Node Integration", "โครงข่ายถนน", draw_closeness,
           lambda c: bool(c.net and c.net.get("nodes")), show_key="show_closeness",
-          label="Show Nodes (Integration)", hint="⚫: จุดเข้าถึงง่าย (Central Hub)",
+          label="Show Nodes (Integration)", hint="จุดสีเทา: จุดเข้าถึงง่าย (Central Hub)",
           requires="รัน Network Analysis ก่อน"),
     Layer("golden", "Golden Land Spots", "โครงข่ายถนน", draw_golden,
           lambda c: bool(c.net and c.net.get("golden_spots_geojson")), show_key="show_golden_spots",

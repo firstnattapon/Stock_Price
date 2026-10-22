@@ -19,9 +19,10 @@ pytest.importorskip("streamlit")
 pytest.importorskip("folium")
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = ROOT / "pages" / "Rent_Gradient.py"
-NEW = ROOT / "pages" / "Rent_Gradient_new.py"
-PAGE = ROOT / "pages" / "Rent_Gradient_new_v2.py"
+# The merged page is now pages/Rent_Gradient.py; its two sources were kept without ".py" (not Streamlit pages)
+BASE = ROOT / "pages" / "Rent_Gradient_01"
+NEW = ROOT / "pages" / "Rent_Gradient_new"
+PAGE = ROOT / "pages" / "Rent_Gradient.py"
 
 
 def load(path, name):
@@ -614,17 +615,30 @@ def test_heavy_layer_rows_are_built_once_per_result_not_once_per_rerun(monkeypat
     assert len(calls) == 2
 
 
-def test_node_integration_is_drawn_at_half_the_engine_size_and_rent_heat_is_not():
+def test_node_integration_is_drawn_grey_at_half_the_engine_size_and_rent_heat_is_not():
     ctx = rich_ctx()
     nodes = next(c for c in v2.draw_closeness(ctx)._children.values() if isinstance(c, v2.CompactPoints))
     assert nodes.radius_scale == v2.NODE_RADIUS_SCALE == 0.5 and nodes.weight == 0.5
+    assert nodes.fill_json == '"#808080"' and nodes.stroke_json == '"#5A5A5A"'
     heat = next(c for c in v2.draw_rent_heat(ctx)._children.values() if isinstance(c, v2.CompactPoints))
-    assert heat.radius_scale == 1.0
+    assert heat.radius_scale == 1.0 and heat.fill_json == heat.stroke_json == "null"     # keeps its own colours
     m = folium.Map()
     v2.draw_closeness(ctx).add_to(m)
-    assert "radius: r[2] * radiusScale" in m.get_root().render()
+    html = m.get_root().render()
+    assert "radius: r[2] * radiusScale" in html and "fillColor: fill || r[0], color: stroke || r[1]" in html
+    assert ', "#808080", "#5A5A5A");' in html
     cached = json.loads(v2.lru_get(ctx.cache, ("rows", "closeness", id(ctx.net["nodes"])), ctx.net["nodes"], lambda: None))
-    assert max(r[2] for r in cached) > 4                 # the engine's radius is kept; only the drawing is scaled
+    assert max(r[2] for r in cached) > 4                 # the engine's radius and colour are kept; only the drawing
+    assert {r[0] for r in cached} == {"#000000"}         # changes
+
+
+def test_travel_areas_have_a_white_outline_and_keep_their_time_colours():
+    ctx = rich_ctx()
+    areas = v2.draw_travel_areas(ctx)
+    styles = [areas.style_function(f) for f in ctx.iso["features"]]
+    assert styles and {s["color"] for s in styles} == {"#FFFFFF"}
+    assert [s["fillColor"] for s in styles] == [
+        v2.get_fill_color(f["properties"]["travel_time_minutes"], ctx.colors) for f in ctx.iso["features"]]
 
 
 def wms_dol(ctx):

@@ -54,9 +54,9 @@ render_header(); render_metrics_row(); render_map(ctx); render_views(ctx)   # �
 | 8 | `rent_rings` | Rent Gradient Rings | Rent Gradient | rent | `show_rent_rings` · เปิด |
 | 9 | `rent_heat` | Rent Heat (Nodes) | Rent Gradient | rent + network | `show_rent_nodes` · ปิด |
 | 10 | `betweenness` | Road Betweenness | โครงข่ายถนน | network | `show_betweenness` · ปิด |
-| 11 | `closeness` | Node Integration | โครงข่ายถนน | network | `show_closeness` · ปิด (วาดครึ่งขนาดของเอนจิน `NODE_RADIUS_SCALE` = 0.5 → 1–4 px) |
+| 11 | `closeness` | Node Integration | โครงข่ายถนน | network | `show_closeness` · ปิด (วาดสีเทา `NODE_FILL` / `NODE_STROKE` และครึ่งขนาดของเอนจิน `NODE_RADIUS_SCALE` = 0.5 → 1–4 px) |
 | 12 | `golden` | Golden Land Spots | โครงข่ายถนน | network | `show_golden_spots` · เปิด |
-| 13 | `travel_areas` | Travel Areas | โครงข่ายถนน | isochrone | แสดงเสมอเมื่อมีข้อมูล |
+| 13 | `travel_areas` | Travel Areas | โครงข่ายถนน | isochrone | แสดงเสมอเมื่อมีข้อมูล (ขอบสีขาว) |
 | 14 | `cbd_zone` | CBD Zone | โครงข่ายถนน | CBD (∩) | แสดงเสมอเมื่อมีข้อมูล |
 | 15 | **`space_syntax`** | 🧭 Space Syntax (ไล่สีตามคะแนน) | โครงข่ายถนน | ผล Space Syntax | `show_space_syntax` · เปิด (ใหม่) |
 | 16 | `railway` | แนวรถไฟเชียงของ | บริบท & overlay | KML | `show_railway` · ปิด (+ ตัวเลือกความโปร่งใส `railway_opacity` ค่าเริ่มต้น 0.2) |

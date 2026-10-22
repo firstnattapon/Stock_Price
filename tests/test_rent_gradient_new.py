@@ -8,6 +8,7 @@ The analysis is checked three ways:
   3. the real Chiang Khong graphs bundled in ``Geoapify_Map/osmnx_cache.zip``.
 Nothing here touches the network: Overpass is never called.
 """
+import importlib.machinery
 import importlib.util
 import io
 import json
@@ -29,12 +30,13 @@ from scipy.spatial import Delaunay  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-PAGE = ROOT / "pages" / "Rent_Gradient_new.py"
+PAGE = ROOT / "pages" / "Rent_Gradient_new"          # kept without ".py" so it is no longer a Streamlit page
 BUNDLE = ROOT / "Geoapify_Map" / "osmnx_cache.zip"
 
 
 def _load_page():
-    spec = importlib.util.spec_from_file_location("rent_gradient_new_under_test", PAGE)
+    loader = importlib.machinery.SourceFileLoader("rent_gradient_new_under_test", str(PAGE))   # no ".py" suffix
+    spec = importlib.util.spec_from_file_location("rent_gradient_new_under_test", PAGE, loader=loader)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
