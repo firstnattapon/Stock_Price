@@ -19,9 +19,10 @@ pytest.importorskip("streamlit")
 pytest.importorskip("folium")
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = ROOT / "pages" / "Rent_Gradient.py"
-NEW = ROOT / "pages" / "Rent_Gradient_new.py"
-PAGE = ROOT / "pages" / "Rent_Gradient_new_v2.py"
+# The merged page is now pages/Rent_Gradient.py; its two sources were kept without ".py" (not Streamlit pages)
+BASE = ROOT / "pages" / "Rent_Gradient_01"
+NEW = ROOT / "pages" / "Rent_Gradient_new"
+PAGE = ROOT / "pages" / "Rent_Gradient.py"
 
 
 def load(path, name):
