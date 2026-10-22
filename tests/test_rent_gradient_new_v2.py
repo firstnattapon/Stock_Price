@@ -629,18 +629,18 @@ def test_heavy_layer_rows_are_built_once_per_result_not_once_per_rerun(monkeypat
     assert len(calls) == 2
 
 
-def test_node_integration_is_drawn_grey_at_half_the_engine_size_and_rent_heat_is_not():
+def test_node_integration_is_drawn_blue_at_half_the_engine_size_and_rent_heat_is_not():
     ctx = rich_ctx()
     nodes = next(c for c in v2.draw_closeness(ctx)._children.values() if isinstance(c, v2.CompactPoints))
     assert nodes.radius_scale == v2.NODE_RADIUS_SCALE == 0.5 and nodes.weight == 0.5
-    assert nodes.fill_json == '"#808080"' and nodes.stroke_json == '"#5A5A5A"'
+    assert nodes.fill_json == '"#1E88E5"' and nodes.stroke_json == '"#0D47A1"'
     heat = next(c for c in v2.draw_rent_heat(ctx)._children.values() if isinstance(c, v2.CompactPoints))
     assert heat.radius_scale == 1.0 and heat.fill_json == heat.stroke_json == "null"     # keeps its own colours
     m = folium.Map()
     v2.draw_closeness(ctx).add_to(m)
     html = m.get_root().render()
     assert "radius: r[2] * radiusScale" in html and "fillColor: fill || r[0], color: stroke || r[1]" in html
-    assert ', "#808080", "#5A5A5A");' in html
+    assert ', "#1E88E5", "#0D47A1");' in html
     cached = json.loads(v2.lru_get(ctx.cache, ("rows", "closeness", id(ctx.net["nodes"])), ctx.net["nodes"], lambda: None))
     assert max(r[2] for r in cached) > 4                 # the engine's radius and colour are kept; only the drawing
     assert {r[0] for r in cached} == {"#000000"}         # changes
