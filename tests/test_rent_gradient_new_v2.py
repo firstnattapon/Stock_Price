@@ -614,6 +614,48 @@ def test_heavy_layer_rows_are_built_once_per_result_not_once_per_rerun(monkeypat
     assert len(calls) == 2
 
 
+def test_node_integration_is_drawn_at_half_the_engine_size_and_rent_heat_is_not():
+    ctx = rich_ctx()
+    nodes = next(c for c in v2.draw_closeness(ctx)._children.values() if isinstance(c, v2.CompactPoints))
+    assert nodes.radius_scale == v2.NODE_RADIUS_SCALE == 0.5 and nodes.weight == 0.5
+    heat = next(c for c in v2.draw_rent_heat(ctx)._children.values() if isinstance(c, v2.CompactPoints))
+    assert heat.radius_scale == 1.0
+    m = folium.Map()
+    v2.draw_closeness(ctx).add_to(m)
+    assert "radius: r[2] * radiusScale" in m.get_root().render()
+    cached = json.loads(v2.lru_get(ctx.cache, ("rows", "closeness", id(ctx.net["nodes"])), ctx.net["nodes"], lambda: None))
+    assert max(r[2] for r in cached) > 4                 # the engine's radius is kept; only the drawing is scaled
+
+
+def wms_dol(ctx):
+    layer = next(layer for layer in v2.LAYERS if layer.id == "wms_dol")
+    return layer.draw(ctx).options["opacity"]
+
+
+def railway_opacity(ctx):
+    railway = v2.draw_railway(ctx)
+    return railway.style_function(railway.data["features"][0])["opacity"]
+
+
+def test_parcels_and_the_railway_start_faint_and_follow_their_opacity_sliders():
+    assert v2.StateManager._DEFAULTS["dol_opacity"] == v2.StateManager._DEFAULTS["railway_opacity"] == 0.2
+    assert wms_dol(make_ctx()) == 0.2 and railway_opacity(make_ctx()) == 0.2
+    show = {key: v2.StateManager._DEFAULTS.get(key) for key in v2.SHOW_KEYS}
+    assert wms_dol(make_ctx(show=dict(show, dol_opacity=0.65))) == 0.65
+    assert railway_opacity(make_ctx(show=dict(show, railway_opacity=0.65))) == 0.65
+    layers = {layer.id: layer for layer in v2.LAYERS}
+    assert layers["wms_dol"].options is v2._options_dol and layers["railway"].options is v2._options_railway
+    assert {"dol_opacity", "railway_opacity"} <= set(v2.SESSION_KEYS_TO_SAVE) & set(v2.KEEP_ALIVE_KEYS)
+
+
+def test_a_saved_parcel_or_railway_opacity_out_of_range_is_skipped(monkeypatch):
+    state = make_state(monkeypatch)
+    assert v2.StateManager.import_config({"settings": {"dol_opacity": 0.5, "railway_opacity": 0.35}}) == []
+    assert state["dol_opacity"] == 0.5 and state["railway_opacity"] == 0.35
+    assert set(v2.StateManager.import_config({"settings": {"dol_opacity": 5, "railway_opacity": "x"}})) == {
+        "dol_opacity", "railway_opacity"}
+
+
 def test_the_network_layers_carry_every_feature_of_the_saved_result():
     ctx = rich_ctx()
     v2.draw_betweenness(ctx)
@@ -828,7 +870,7 @@ def test_widgets_that_are_sometimes_hidden_keep_their_value(monkeypatch):
     state["ss_palette"] = next(reversed(v2.PALETTES))
     v2.StateManager.initialize()
     assert state["ss_palette"] == next(reversed(v2.PALETTES))
-    assert {"ss_palette", "ss_scale", "ss_thick", "ss_topn", "cityplan_opacity"} <= set(v2.KEEP_ALIVE_KEYS)
+    assert {"ss_palette", "ss_scale", "ss_thick", "ss_topn", "cityplan_opacity", "dol_opacity", "railway_opacity"} <= set(v2.KEEP_ALIVE_KEYS)
 
 
 def ss_ctx(graph=None, **show):
@@ -1084,6 +1126,23 @@ def test_skipped_config_values_are_reported_once(monkeypatch):
     assert any("ข้ามค่าที่ไม่ถูกต้อง" in w.value and "time_intervals" in w.value for w in at.warning)
     at.run()
     assert not any("ข้ามค่าที่ไม่ถูกต้อง" in w.value for w in at.warning)
+
+
+def test_the_parcel_and_railway_sliders_appear_under_their_checkboxes_and_change_the_map(monkeypatch):
+    rendered = []
+    at = make_app(monkeypatch, config=False, rendered=rendered).run()
+    assert not any(s.key in ("dol_opacity", "railway_opacity") for s in at.slider)      # hidden while unticked
+    at.checkbox(key="show_dol").check().run()
+    at.checkbox(key="show_railway").check().run()
+    assert not at.exception
+    assert at.slider(key="dol_opacity").value == 0.2 and at.slider(key="railway_opacity").value == 0.2
+    at.slider(key="dol_opacity").set_value(0.6).run()
+    at.slider(key="railway_opacity").set_value(0.45).run()
+    m = rendered[-1]
+    wms = next(c for c in m._children.values() if isinstance(c, folium.WmsTileLayer) and c.layer_name == "รูปแปลงที่ดิน")
+    railway = next(c for c in m._children.values() if getattr(c, "layer_name", "") == "แนวรถไฟเชียงของ")
+    assert wms.options["opacity"] == 0.6
+    assert railway.style_function(railway.data["features"][0])["opacity"] == 0.45
 
 
 @pytest.mark.parametrize("stale, now", [("Dark (CARTO)", "Dark (Esri Dark Gray)"),

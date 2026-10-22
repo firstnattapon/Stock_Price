@@ -324,9 +324,9 @@ TRAVEL_MODE_TO_NETWORK_TYPE: Dict[str, str] = {
 # Keys to persist in config file
 SESSION_KEYS_TO_SAVE: List[str] = [
     "api_key", "map_style_name", "travel_mode", "time_intervals",
-    "show_dol", "show_cityplan", "cityplan_opacity", "show_population",
+    "show_dol", "dol_opacity", "show_cityplan", "cityplan_opacity", "show_population",
     "show_traffic", "colors", "show_betweenness", "show_closeness",
-    "show_railway", "show_golden_spots",
+    "show_railway", "railway_opacity", "show_golden_spots",
     "show_anchor_boundary", "show_evidence_zone", "show_evidence_clusters",
     "show_space_syntax", "ss_kind", "ss_turn", "ss_radii", "ss_choice", "ss_radius_m", "ss_network",
     "ss_palette", "ss_scale", "ss_thick", "ss_topn",
@@ -452,7 +452,7 @@ SS_STATE_KEYS = (SS_NET, SS_META, SS_RESULT, SS_RUN, SS_KEY, SS_MASK)
 # Widgets that are drawn only sometimes: Streamlit forgets the state of a widget that was not rendered, so the
 # value is written back on every run (see StateManager.initialize) and survives the widget being hidden.
 KEEP_ALIVE_KEYS = ("ss_turn", "ss_measure", "ss_view_radius", "ss_palette", "ss_scale", "ss_thick", "ss_topn",
-                   "ss_view", "cityplan_opacity")
+                   "ss_view", "cityplan_opacity", "dol_opacity", "railway_opacity")
 
 
 # ============================================================================
@@ -492,6 +492,8 @@ _SETTING_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "travel_mode": lambda v: v in TRAVEL_MODE_NAMES,
     "time_intervals": lambda v: isinstance(v, list) and all(t in TIME_OPTIONS for t in v),
     "cityplan_opacity": lambda v: _is_number(v) and 0.2 <= v <= 1.0,
+    "dol_opacity": lambda v: _is_number(v) and 0.1 <= v <= 1.0,
+    "railway_opacity": lambda v: _is_number(v) and 0.1 <= v <= 1.0,
     "anchor_radius_km": lambda v: _is_number(v) and 4.0 <= v <= 20.0,
     "anchor_lat": lambda v: _is_number(v) and -85.0 <= v <= 85.0,
     "anchor_lon": lambda v: _is_number(v) and -180.0 <= v <= 180.0,
@@ -549,6 +551,7 @@ class StateManager:
     K_TRAVEL_MODE: str = "travel_mode"
     K_TIME_INTERVALS: str = "time_intervals"
     K_SHOW_DOL: str = "show_dol"
+    K_DOL_OPACITY: str = "dol_opacity"
     K_SHOW_CITYPLAN: str = "show_cityplan"
     K_CITYPLAN_OPACITY: str = "cityplan_opacity"
     K_SHOW_POPULATION: str = "show_population"
@@ -556,6 +559,7 @@ class StateManager:
     K_SHOW_BETWEENNESS: str = "show_betweenness"
     K_SHOW_CLOSENESS: str = "show_closeness"
     K_SHOW_RAILWAY: str = "show_railway"
+    K_RAILWAY_OPACITY: str = "railway_opacity"
     K_SHOW_GOLDEN: str = "show_golden_spots"
     K_UI_LOCKED: str = "ui_locked"
     K_RENT_SAMPLES: str = "rent_samples"
@@ -584,6 +588,7 @@ class StateManager:
         K_TRAVEL_MODE: "drive",
         K_TIME_INTERVALS: [5],
         K_SHOW_DOL: False,
+        K_DOL_OPACITY: 0.2,
         K_SHOW_CITYPLAN: False,
         K_CITYPLAN_OPACITY: 0.7,
         K_SHOW_POPULATION: False,
@@ -591,6 +596,7 @@ class StateManager:
         K_SHOW_BETWEENNESS: False,
         K_SHOW_CLOSENESS: False,
         K_SHOW_RAILWAY: False,
+        K_RAILWAY_OPACITY: 0.2,
         K_SHOW_GOLDEN: True,
         K_UI_LOCKED: False,
         K_RENT_SAMPLES: [],
@@ -5316,24 +5322,26 @@ class CompactPoints(MacroElement):
 
     _template = Template("""
         {% macro script(this, kwargs) %}
-        (function (group, rows, weight, fillOpacity) {""" + _TOOLTIP_JS + """
+        (function (group, rows, weight, fillOpacity, radiusScale) {""" + _TOOLTIP_JS + """
             for (var i = 0; i < rows.length; i++) {
                 var r = rows[i];
-                var dot = L.circleMarker([r[4], r[5]], {radius: r[2], fillColor: r[0], color: r[1], weight: weight, fillOpacity: fillOpacity});
+                var dot = L.circleMarker([r[4], r[5]], {radius: r[2] * radiusScale, fillColor: r[0], color: r[1], weight: weight, fillOpacity: fillOpacity});
                 if (r[3]) { dot._vals = r[3]; dot.bindTooltip(tipHtml, tip); }
                 group.addLayer(dot);
             }
-        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.weight }}, {{ this.fill_opacity }});
+        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.weight }}, {{ this.fill_opacity }}, {{ this.radius_scale }});
         {% endmacro %}
         """)
 
-    def __init__(self, rows_json: str, heads: Sequence[str] = (), weight: float = 1.0, fill_opacity: float = 0.9):
+    def __init__(self, rows_json: str, heads: Sequence[str] = (), weight: float = 1.0, fill_opacity: float = 0.9,
+                 radius_scale: float = 1.0):
         super().__init__()
         self._name = "CompactPoints"
         self.rows_json = rows_json
         self.heads_json = _json_js(list(heads))
         self.weight = float(weight)
         self.fill_opacity = float(fill_opacity)
+        self.radius_scale = float(radius_scale)
 
 
 class ViewMemory(MacroElement):
@@ -5497,12 +5505,17 @@ def draw_betweenness(ctx: Ctx) -> Any:
     return group
 
 
+# Node Integration: the engine sizes nodes 2–8 px (saved results too); drawn at half that, with a thinner outline
+NODE_RADIUS_SCALE: float = 0.5
+
+
 def draw_closeness(ctx: Ctx) -> Any:
     nodes = ctx.net["nodes"]
     rows = lru_get(ctx.cache, ("rows", "closeness", id(nodes)), nodes, lambda: _json_js(
         point_rows(nodes["features"], "color", "radius", ("closeness",), stroke="#000000")))
     group = folium.FeatureGroup(name="Node Integration", show=True)
-    CompactPoints(rows, heads=("Integration Score:",), weight=1, fill_opacity=0.9).add_to(group)
+    CompactPoints(rows, heads=("Integration Score:",), weight=0.5, fill_opacity=0.9,
+                  radius_scale=NODE_RADIUS_SCALE).add_to(group)
     return group
 
 
@@ -5562,17 +5575,18 @@ def draw_cbd_zone(ctx: Ctx) -> Any:
     )
 
 
-def draw_railway(_ctx: Ctx) -> Any:
+def draw_railway(ctx: Ctx) -> Any:
     railway_geojson = _parse_kml_to_geojson()
     if not (railway_geojson and railway_geojson.get("features")):
         return None
+    opacity = float(ctx.show.get("railway_opacity", StateManager._DEFAULTS[StateManager.K_RAILWAY_OPACITY]))
     return folium.GeoJson(
         railway_geojson,
         name="แนวรถไฟเชียงของ",
         style_function=lambda _x: {
             "color": "#E63946",
             "weight": 4,
-            "opacity": 0.85,
+            "opacity": opacity,
             "dashArray": "8, 4",
             "fillOpacity": 0,
         },
@@ -5697,6 +5711,14 @@ def legend_rent_rings(ctx: Ctx) -> str:
 # ------------------------------------------------------------------ layer options (widgets under a checkbox)
 def _options_cityplan(_ctx: Ctx, locked: bool) -> None:
     st.slider("ความโปร่งใส (ผังเมือง)", 0.2, 1.0, key="cityplan_opacity", disabled=locked)
+
+
+def _options_dol(_ctx: Ctx, locked: bool) -> None:
+    st.slider("ความโปร่งใส (รูปแปลงที่ดิน)", 0.1, 1.0, key="dol_opacity", disabled=locked)
+
+
+def _options_railway(_ctx: Ctx, locked: bool) -> None:
+    st.slider("ความโปร่งใส (แนวรถไฟ)", 0.1, 1.0, key="railway_opacity", disabled=locked)
 
 
 # ------------------------------------------------------------------ Space Syntax layer
@@ -5841,8 +5863,8 @@ LAYERS: Tuple[Layer, ...] = (
           label="👥 ความหนาแน่นประชากร"),
     Layer("wms_cityplan", "ผังเมืองรวม", "บริบท & overlay", _wms("cityplan_dpt", "ผังเมืองรวม", "cityplan_opacity"),
           _always, show_key="show_cityplan", label="🏙️ ผังเมืองรวม", options=_options_cityplan),
-    Layer("wms_dol", "รูปแปลงที่ดิน", "บริบท & overlay", _wms("dol", "รูปแปลงที่ดิน"), _always,
-          show_key="show_dol", label="📜 รูปแปลงที่ดิน"),
+    Layer("wms_dol", "รูปแปลงที่ดิน", "บริบท & overlay", _wms("dol", "รูปแปลงที่ดิน", "dol_opacity"), _always,
+          show_key="show_dol", label="📜 รูปแปลงที่ดิน", options=_options_dol),
     # automated-anchor details: small, unticked by default — they stay on the map's LayerControl (start_hidden)
     # exactly as before, and the checkbox now also decides whether they start visible
     Layer("anchor_boundary", "Automated Anchor study boundary", "Automated Anchor", draw_anchor_boundary,
@@ -5883,7 +5905,7 @@ LAYERS: Tuple[Layer, ...] = (
           hint="🔴 เข้าถึงง่ายที่สุด → 🔵 เข้าถึงยากที่สุด", requires="วิเคราะห์ Space Syntax ที่แผง Space Syntax ก่อน",
           legend=legend_space_syntax, legend_rank=30, options=_options_space_syntax, panel_rank=10),
     Layer("railway", "แนวรถไฟเชียงของ", "บริบท & overlay", draw_railway, _always, show_key="show_railway",
-          label="🚂 แนวรถไฟเชียงของ"),
+          label="🚂 แนวรถไฟเชียงของ", options=_options_railway),
     Layer("top_node", "Integration Center (จุดตรงกลางที่สุด)", "โครงข่ายถนน", draw_top_node,
           lambda c: bool(c.net and c.net.get("top_node"))),
     Layer("cbd_anchor", "CBD Anchor", "Automated Anchor", draw_cbd_anchor,
@@ -5892,7 +5914,7 @@ LAYERS: Tuple[Layer, ...] = (
 )
 
 SHOW_KEYS: Tuple[str, ...] = tuple(layer.show_key for layer in LAYERS if layer.show_key) + (
-    "cityplan_opacity", "map_style_name") + SS_DISPLAY_KEYS
+    "cityplan_opacity", "dol_opacity", "railway_opacity", "map_style_name") + SS_DISPLAY_KEYS
 
 
 def build_ctx() -> Ctx:
