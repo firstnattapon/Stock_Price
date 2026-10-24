@@ -5301,6 +5301,36 @@ def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
     return float(np.average(values[ok], weights=weights[ok])) if ok.any() and weights[ok].sum() > 0 else float("nan")
 
 
+def _change_pct(before: float, after: float) -> float:
+    return 100.0 * (after - before) / abs(before) if np.isfinite(before) and abs(before) > 1e-12 else float("nan")
+
+
+def scenario_totals(base_net: SegmentNetwork, base_mask: np.ndarray, scenario: RoadScenario, before: np.ndarray,
+                    after_base: np.ndarray, after_all: np.ndarray) -> Dict[str, float]:
+    """Whole-network score before → after, with the new roads *added to* the existing ones.
+
+    ``total`` = Σ index × length (km) — before: the shown existing roads; after: the same roads **+** every new road,
+    so ``after = old_after + new`` and the change splits into what the existing roads gained or lost and what the
+    new roads bring. ``mean`` = total / km: the length-weighted mean of the whole network (existing + new).
+    """
+    old = np.asarray(base_mask, dtype=bool) & np.isfinite(before) & np.isfinite(after_base)
+    new = scenario.is_new & np.isfinite(after_all)
+    km_old, km_new = base_net.seg_len[old] / 1000.0, scenario.net.seg_len[new] / 1000.0
+    total_before = float((before[old] * km_old).sum())
+    old_after = float((after_base[old] * km_old).sum())
+    new_total = float((after_all[new] * km_new).sum())
+    km_before, km_after = float(km_old.sum()), float(km_old.sum() + km_new.sum())
+    mean_before = total_before / km_before if km_before > 0 else float("nan")
+    mean_after = (old_after + new_total) / km_after if km_after > 0 else float("nan")
+    return {
+        "before": total_before, "old_after": old_after, "new": new_total, "after": old_after + new_total,
+        "change_pct": _change_pct(total_before, old_after + new_total),
+        "old_change_pct": _change_pct(total_before, old_after), "km_old": km_before, "km_new": float(km_new.sum()),
+        "mean_before": mean_before, "mean_after": mean_after, "mean_change_pct": _change_pct(mean_before, mean_after),
+        "old_mean_after": old_after / km_before if km_before > 0 else float("nan"),
+    }
+
+
 def compare_scenario(
     base_net: SegmentNetwork, base_result: AnalysisResult, base_mask: np.ndarray, scenario: RoadScenario,
     after: AnalysisResult, after_mask: np.ndarray, measure: str, rkey: str, scale: str = "linear",
@@ -5310,7 +5340,8 @@ def compare_scenario(
     ``pct`` is the change of the raw index in percent (NaN where it was 0) — comparable between the two networks.
     ``score_*`` is the 0–100 map score of each network on its own scale (what the Space Syntax layer would show),
     so a road can gain index and still lose score when the new road outranks it. ``new_rank`` = share (%) of the
-    shown existing segments whose index is below the new roads' length-weighted mean.
+    shown existing segments whose index is below the new roads' length-weighted mean. ``totals`` = the whole
+    network, existing roads + new roads (:func:`scenario_totals`).
     """
     before = measure_values(base_result, measure, rkey)
     after_all = measure_values(after, measure, rkey)
@@ -5331,6 +5362,7 @@ def compare_scenario(
         "score_before": s_before["score"], "score_after": scenario_values(scenario, s_after["score"]),
         "score_after_all": s_after["score"], "new_value": new_value,
         "new_score": _weighted_mean(s_after["score"][new], weights[new]), "new_rank": new_rank,
+        "totals": scenario_totals(base_net, base_mask, scenario, before, after_base, after_all),
     }
 
 
@@ -5339,7 +5371,8 @@ def scenario_summary(
     after: AnalysisResult, after_mask: np.ndarray,
 ) -> pd.DataFrame:
     """One row per (measure, radius): the existing roads' length-weighted mean before / after, how many shown
-    segments went up / down by at least ``change_pct`` %, and how the new roads rank among them."""
+    segments went up / down by at least ``change_pct`` %, how the new roads rank among them, and the whole network
+    with the new roads added (``total_*`` = Σ index × km, ``network_*`` = its length-weighted mean)."""
     limit = ROAD_SCENARIO_CONFIG["change_pct"]
     rows = []
     for measure in ["integration"] + (["choice"] if base_result.with_choice else []):
@@ -5347,15 +5380,15 @@ def scenario_summary(
             rkey = radius_key(radius)
             c = compare_scenario(base_net, base_result, base_mask, scenario, after, after_mask, measure, rkey)
             ok = base_mask & np.isfinite(c["before"]) & np.isfinite(c["after"])
-            mean_before = _weighted_mean(c["before"][ok], base_net.seg_len[ok])
-            mean_after = _weighted_mean(c["after"][ok], base_net.seg_len[ok])
-            pct = c["pct"][ok]
+            pct, totals = c["pct"][ok], c["totals"]
             rows.append({
-                "measure": measure, "radius": rkey, "mean_before": mean_before, "mean_after": mean_after,
-                "change_pct": (100.0 * (mean_after - mean_before) / abs(mean_before)
-                               if np.isfinite(mean_before) and abs(mean_before) > 1e-12 else float("nan")),
+                "measure": measure, "radius": rkey, "mean_before": totals["mean_before"],
+                "mean_after": totals["old_mean_after"], "change_pct": totals["old_change_pct"],
                 "up": int((pct >= limit).sum()), "down": int((pct <= -limit).sum()), "segments": int(ok.sum()),
                 "new_value": c["new_value"], "new_rank": c["new_rank"],
+                "total_before": totals["before"], "total_old_after": totals["old_after"], "total_new": totals["new"],
+                "total_after": totals["after"], "total_change_pct": totals["change_pct"],
+                "network_mean_after": totals["mean_after"], "network_change_pct": totals["mean_change_pct"],
             })
     return pd.DataFrame(rows)
 
@@ -7840,6 +7873,9 @@ def _render_scenario_help() -> None:
 - **ค่าดัชนีเปลี่ยน (%)** = NAIN / NACH หลัง − ก่อน เทียบกับก่อน — ใช้เทียบได้ตรง ๆ (สีบนแผนที่ใช้ค่านี้)
 - **คะแนน 0–100** = ตำแหน่งในโครงข่ายของตัวเอง (เหมือนชั้น Space Syntax) — ถนนเดิมอาจค่าดัชนีขึ้นแต่คะแนนลด
   เพราะถนนใหม่แซงขึ้นไปอยู่บนสุด
+- **➕ คะแนนรวม = ถนนเดิม + ถนนใหม่** = Σ (ค่าดัชนี × ความยาว km): ก่อน = ถนนเดิม · หลัง = ถนนเดิมชุดเดียวกัน
+  (ค่าหลังมีถนนใหม่) **บวก** ถนนใหม่ — ส่วนที่เพิ่มแยกได้ว่ามาจากถนนเดิมดีขึ้นเท่าไร และถนนใหม่เพิ่มเข้ามาเท่าไร ·
+  เฉลี่ยทั้งโครงข่าย = คะแนนรวม ÷ ความยาวรวม (เดิม + ใหม่) บอกว่าโดยเฉลี่ยดีขึ้นจริงหรือแค่ถนนยาวขึ้น
 - **Integration ↑** = เข้าถึงง่ายขึ้น (ศักยภาพเป็นย่านการค้า/ที่ดินมูลค่าสูงขึ้น) ·
   **Choice ↓** ของถนนเดิม = เส้นทางสั้นที่สุดย้ายไปใช้ถนนใหม่ (การจราจรผ่านลดลง)
 - ถนนใหม่ที่ "ลึก" (ต้องเลี้ยวหลายครั้งกว่าจะถึง) อาจทำให้ Integration ของถนนเดิมลดลงเล็กน้อย:
@@ -7870,10 +7906,7 @@ def view_road_scenario(ctx: Ctx) -> None:
     st.caption(f"แสดง: {MEASURES[d['measure']]['title']} · รัศมี {radius_label_for(d['rkey'])} · "
                f"{SCALE_MODES[d['scale']]} — เปลี่ยนได้ที่ ชั้นแผนที่ → 🧭 Space Syntax")
     shown = mask & np.isfinite(cmp["before"]) & np.isfinite(cmp["after"])
-    mean_before = _weighted_mean(cmp["before"][shown], net.seg_len[shown])
-    mean_after = _weighted_mean(cmp["after"][shown], net.seg_len[shown])
-    change = (100.0 * (mean_after - mean_before) / abs(mean_before)
-              if np.isfinite(mean_before) and abs(mean_before) > 1e-12 else float("nan"))
+    totals = cmp["totals"]
     limit = ROAD_SCENARIO_CONFIG["change_pct"]
     up, down = int((cmp["pct"][shown] >= limit).sum()), int((cmp["pct"][shown] <= -limit).sum())
     c1, c2, c3, c4 = st.columns(4)
@@ -7882,13 +7915,28 @@ def view_road_scenario(ctx: Ctx) -> None:
               "—" if not np.isfinite(cmp["new_score"]) else f"{cmp['new_score']:.0f}/100",
               help="คะแนน 0–100 ในโครงข่ายหลังตัดถนน (ถ่วงความยาวทุกช่วงของถนนใหม่)")
     c3.metric(f"{index_name} เฉลี่ยถนนเดิม",
-              "—" if not np.isfinite(mean_after) else f"{mean_after:.3f}",
-              None if not np.isfinite(change) else f"{change:+.2f}%",
-              help=f"เฉลี่ยถ่วงความยาวของช่วงถนนเดิมที่แสดง · ก่อนตัดถนน {mean_before:.3f}")
+              "—" if not np.isfinite(totals["old_mean_after"]) else f"{totals['old_mean_after']:.3f}",
+              None if not np.isfinite(totals["old_change_pct"]) else f"{totals['old_change_pct']:+.2f}%",
+              help=f"เฉลี่ยถ่วงความยาวของช่วงถนนเดิมที่แสดง · ก่อนตัดถนน {totals['mean_before']:.3f}")
     c4.metric(f"ช่วงถนนเดิม ขึ้น / ลง ≥ {limit:g}%", f"{up:,} / {down:,}")
     rank = "" if not np.isfinite(cmp["new_rank"]) else f" · ค่าดัชนีถนนใหม่สูงกว่า {cmp['new_rank']:.0f}% ของช่วงถนนเดิม"
     st.caption(f"{len(scenario.roads)} เส้น · ทางแยกใหม่ {len(scenario.junctions)} จุด{rank} · "
                f"จาก {int(shown.sum()):,} ช่วงถนนเดิมที่แสดง")
+
+    st.markdown(f"**➕ คะแนนรวมทั้งโครงข่าย = ถนนเดิม + ถนนใหม่** (Σ {index_name} × ความยาว km)")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("ก่อนตัดถนน (ถนนเดิม)", f"{totals['before']:,.2f}", help=f"{totals['km_old']:,.2f} km")
+    r2.metric("ถนนเดิม หลังตัดถนน", f"{totals['old_after']:,.2f}",
+              None if not np.isfinite(totals["old_change_pct"]) else f"{totals['old_change_pct']:+.2f}%",
+              help="ช่วงถนนเดิมชุดเดียวกัน ค่าดัชนีหลังมีถนนใหม่")
+    r3.metric("+ ถนนใหม่", f"+{totals['new']:,.2f}", help=f"{totals['km_new']:,.2f} km")
+    r4.metric("= รวมหลังตัดถนน", f"{totals['after']:,.2f}",
+              None if not np.isfinite(totals["change_pct"]) else f"{totals['change_pct']:+.2f}%")
+    mean_change = ("" if not np.isfinite(totals["mean_change_pct"])
+                   else f" ({totals['mean_change_pct']:+.2f}%)")
+    st.caption(f"{totals['old_after']:,.2f} (ถนนเดิม) + {totals['new']:,.2f} (ถนนใหม่) = {totals['after']:,.2f} · "
+               f"ก่อน {totals['before']:,.2f} · เฉลี่ยทั้งโครงข่าย (เดิม + ใหม่ ถ่วงความยาว) "
+               f"{totals['mean_before']:.3f} → {totals['mean_after']:.3f}{mean_change}")
     alone = [road["name"] for road in scenario.roads if road["joins"] + road["crossings"] == 0]
     if alone:
         st.warning(f"ถนนใหม่ไม่ได้เชื่อมกับถนนเดิมเลย: {', '.join(alone)} — คะแนนถนนเดิมจึงไม่เปลี่ยน", icon="⚠️")
@@ -7902,19 +7950,27 @@ def view_road_scenario(ctx: Ctx) -> None:
     } for road in scenario.roads]), hide_index=True, width="stretch",
         column_config={"ยาว (m)": st.column_config.NumberColumn(format="%.0f")})
 
-    st.markdown("**📋 ทุกตัวชี้วัด × รัศมี** (ถนนเดิมในพื้นที่ที่แสดง เฉลี่ยถ่วงความยาว)")
+    st.markdown("**📋 ทุกตัวชี้วัด × รัศมี** (เฉลี่ย = ถนนเดิมในพื้นที่ที่แสดง ถ่วงความยาว · "
+                "รวม = Σ ค่าดัชนี × km ของถนนเดิม + ถนนใหม่)")
     summary = lru_get(ctx.cache, ("scn-summary",), scn.result, lambda: scenario_summary(
         net, view.result, mask, scenario, scn.result, scn.mask))
+    summary_columns = {
+        "measure": ("ตัวชี้วัด", None), "radius": ("รัศมี", None),
+        "mean_before": ("ถนนเดิม เฉลี่ยก่อน", "%.3f"), "mean_after": ("ถนนเดิม เฉลี่ยหลัง", "%.3f"),
+        "change_pct": ("ถนนเดิม เปลี่ยน (%)", "%+.2f"), "new_value": ("ค่าถนนใหม่", "%.3f"),
+        "new_rank": ("ถนนใหม่สูงกว่า (%)", "%.0f"), "total_before": ("รวมก่อน", "%.2f"),
+        "total_old_after": ("ถนนเดิม หลัง", "%.2f"), "total_new": ("+ ถนนใหม่", "%.2f"),
+        "total_after": ("= รวมหลัง", "%.2f"), "total_change_pct": ("รวม เปลี่ยน (%)", "%+.2f"),
+        "network_change_pct": ("เฉลี่ยทั้งโครงข่าย เปลี่ยน (%)", "%+.2f"),
+        "up": ("ช่วงที่ขึ้น", None), "down": ("ช่วงที่ลง", None),
+    }
     st.dataframe(summary.assign(
         measure=[MEASURES[m]["title"] for m in summary["measure"]],
         radius=[radius_label_for(r) for r in summary["radius"]],
-    ).rename(columns={
-        "measure": "ตัวชี้วัด", "radius": "รัศมี", "mean_before": "เฉลี่ยก่อน", "mean_after": "เฉลี่ยหลัง",
-        "change_pct": "เปลี่ยน (%)", "up": "ช่วงที่ขึ้น", "down": "ช่วงที่ลง", "segments": "ช่วงที่แสดง",
-        "new_value": "ค่าถนนใหม่", "new_rank": "ถนนใหม่สูงกว่า (%)"}), hide_index=True, width="stretch",
-        column_config={name: st.column_config.NumberColumn(format=fmt) for name, fmt in (
-            ("เฉลี่ยก่อน", "%.3f"), ("เฉลี่ยหลัง", "%.3f"), ("เปลี่ยน (%)", "%+.2f"), ("ค่าถนนใหม่", "%.3f"),
-            ("ถนนใหม่สูงกว่า (%)", "%.0f"))})
+    )[list(summary_columns)].rename(columns={key: name for key, (name, _) in summary_columns.items()}),
+        hide_index=True, width="stretch",
+        column_config={name: st.column_config.NumberColumn(format=fmt)
+                       for name, fmt in summary_columns.values() if fmt})
 
     def changes(order: np.ndarray) -> pd.DataFrame:
         return pd.DataFrame([{
@@ -7954,12 +8010,21 @@ def view_road_scenario(ctx: Ctx) -> None:
 
     frame = segment_table(net, view.result, mask)[["segment", "name", "highway", "length_m", "mid_lat", "mid_lon"]]
     rows = frame["segment"].to_numpy()
-    frame = frame.assign(**{f"{index_name}_before": np.round(cmp["before"][rows], 6),
+    frame = frame.assign(**{"road": "existing", f"{index_name}_before": np.round(cmp["before"][rows], 6),
                             f"{index_name}_after": np.round(cmp["after"][rows], 6),
                             "change_pct": np.round(cmp["pct"][rows], 3),
                             "score_before": np.round(cmp["score_before"][rows], 1),
                             "score_after": np.round(cmp["score_after"][rows], 1)})
-    st.download_button("⬇️ CSV ก่อน/หลัง (ตัวชี้วัด·รัศมีที่แสดง)", frame.to_csv(index=False).encode("utf-8-sig"),
+    new = np.flatnonzero(scenario.is_new)                # the new roads' own rows: no "before", only "after"
+    frame = pd.concat([frame, pd.DataFrame({
+        "segment": [f"new-{s}" for s in new], "name": [scenario.net.seg_name[s] for s in new],
+        "highway": [scenario.net.seg_highway[s] for s in new], "length_m": np.round(scenario.net.seg_len[new], 1),
+        "mid_lat": np.round(scenario.net.seg_mid_lonlat[new, 1], 6),
+        "mid_lon": np.round(scenario.net.seg_mid_lonlat[new, 0], 6), "road": "new",
+        f"{index_name}_after": np.round(cmp["after_all"][new], 6),
+        "score_after": np.round(cmp["score_after_all"][new], 1)})], ignore_index=True)
+    st.download_button("⬇️ CSV ก่อน/หลัง ถนนเดิม + ถนนใหม่ (ตัวชี้วัด·รัศมีที่แสดง)",
+                       frame.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"road_scenario_{d['measure']}_{d['rkey']}.csv", mime="text/csv")
     with st.expander("📖 จำลองอย่างไร / อ่านผลอย่างไร"):
         _render_scenario_help()
