@@ -91,6 +91,8 @@ REPLACED = {
 NEW_MODIFIED = {
     "fetch_graph": "calls this page's own _fetch_osm_graph (no cross-page import, no plain-osmnx fallback)",
     "load_bundled_graph": "reads the zip through this page's _load_graph_bytes / MAX_CACHE_ENTRY_BYTES",
+    "build_segment_network": "its last step (legal moves + components) is _assemble_segment_network(), which the "
+                             "road scenario (add_new_roads) reuses — same arrays, same numbers",
 }
 NEW_REPLACED = {
     "PAGE_CONFIG": "the merged page has its own (Rent_Gradient.py's, retitled)",

@@ -8,6 +8,8 @@ Rent Gradient v2 — ชั้นแผนที่ (Layers): Isochrone · CBD �
   ENGINE  SECTION 3, 3b   ฟังก์ชันคำนวณล้วน (ไม่เรียก ``st.*``) คัดลอกตรงตัวจากสองหน้าเดิม ล็อกด้วย
           tests/test_rent_gradient_new_v2.py (ledger: ซอร์สเท่ากันทุกฟังก์ชัน + ผลตัวเลขเท่ากัน)
           → ไม่ต้องอ่าน/แก้ ถ้าไม่ได้เปลี่ยนวิธีคำนวณ
+  ENGINE  SECTION 3c      จำลองถนนตัดใหม่ (add_new_roads → analyse_network ซ้ำ → compare_scenario) — เขียนใหม่
+          ไม่ได้คัดลอก ล็อกด้วย tests/test_road_scenario.py
   SHELL   SECTION 1-2 ค่าคงที่ + state · 4 cached wrappers · 5 UI (LAYERS → แผงควบคุม → VIEWS) ·
           6 stages (ปุ่ม Run ↔ ผลลัพธ์) · 7 main()          ← ส่วนเดียวที่ต้องอ่านเมื่อแก้หน้าจอ
   TESTS   tests/test_rent_gradient_new_v2.py
@@ -330,6 +332,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_anchor_boundary", "show_evidence_zone", "show_evidence_clusters",
     "show_space_syntax", "ss_kind", "ss_turn", "ss_radii", "ss_choice", "ss_radius_m", "ss_network",
     "ss_palette", "ss_scale", "ss_thick", "ss_topn",
+    "show_road_scenario", "ss_new_roads", "ss_snap_m", "ss_cross",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
     "anchor_lat", "anchor_lon", "anchor_radius_km",
     "anchor_use_evidence", "rent_use_evidence_anchor",
@@ -448,11 +451,32 @@ SS_VIEW_LABELS: Dict[str, str] = {
 SS_NET, SS_META, SS_RESULT, SS_RUN, SS_KEY, SS_MASK = (
     "ss_net", "ss_meta", "ss_result", "ss_run", "ss_study_key", "ss_mask")
 SS_STATE_KEYS = (SS_NET, SS_META, SS_RESULT, SS_RUN, SS_KEY, SS_MASK)
+# the road scenario (🛣️ ถนนตัดใหม่) of that analysis: ``{"scenario", "result", "mask", "base_result"}`` — cleared with it
+SS_SCENARIO = "ss_scenario"
 
 # Widgets that are drawn only sometimes: Streamlit forgets the state of a widget that was not rendered, so the
 # value is written back on every run (see StateManager.initialize) and survives the widget being hidden.
 KEEP_ALIVE_KEYS = ("ss_turn", "ss_measure", "ss_view_radius", "ss_palette", "ss_scale", "ss_thick", "ss_topn",
                    "ss_view", "cityplan_opacity", "dol_opacity", "railway_opacity")
+
+# Road scenario (🛣️ ถนนตัดใหม่ → คะแนน Space Syntax ก่อน/หลัง) — engine: SECTION 3c
+ROAD_SCENARIO_CONFIG: Dict[str, Any] = {
+    "snap_m": 30.0,          # ปลายถนนใหม่ห่างถนนเดิมไม่เกินนี้ → ต่อเข้าถนนเดิม (เกินนี้ = ปลายตัน)
+    "join_node_m": 10.0,     # จุดต่อห่างแยก/ปลายถนนเดิมไม่เกินนี้ (ตามแนวถนน) → ใช้แยกเดิม ไม่สร้างแยกใหม่ติดกัน
+    "end_skip_m": 0.5,       # จุดตัดที่ชิดปลายถนนใหม่กว่านี้คือจุดต่อปลาย (นับไปแล้ว)
+    "max_roads": 10,
+    "max_points": 200,       # ต่อถนน 1 เส้น
+    "highway": "proposed",   # แท็ก highway ของถนนใหม่ (OSM ใช้ highway=proposed กับถนนที่วางแผนไว้)
+    "change_pct": 1.0,       # |Δ| ตั้งแต่ 1 % จึงนับว่า "เพิ่มขึ้น / ลดลง"
+    "shortcut_origins": 60,  # suggest_shortcut: จำนวน segment ต้นทางที่สุ่มมาวัดระยะอ้อม
+    "shortcut_span_m": (150.0, 600.0),   # ระยะเส้นตรงของทางลัดที่เสนอ
+    "shortcut_min_detour": 1.2,          # ทางถนนต้องอ้อมอย่างน้อยเท่านี้ของระยะเส้นตรงจึงเสนอ
+}
+
+# Δ ค่าดัชนี: น้ำเงิน (ลดลง) → เทา (เท่าเดิม) → แดง (เพิ่มขึ้น) — ทิศเดียวกับชั้น Space Syntax (แดง = สูง)
+DELTA_STOPS: List[str] = ["#2166ac", "#4393c3", "#92c5de", "#b0b0b0", "#f4a582", "#d6604d", "#b2182b"]
+
+NEW_ROAD_COLOR = "#ff2bd6"
 
 
 # ============================================================================
@@ -508,6 +532,8 @@ _SETTING_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "ss_radius_m": lambda v: _is_number(v) and MIN_RADIUS_M <= v <= MAX_RADIUS_M,
     "ss_turn": lambda v: _is_number(v) and 0 <= v <= 60,
     "ss_topn": lambda v: _is_number(v) and 0 <= v <= 25,
+    "ss_snap_m": lambda v: _is_number(v) and 5 <= v <= 100,
+    "ss_new_roads": lambda v: isinstance(v, str) and len(v) <= 20_000,
 }
 
 
@@ -629,6 +655,11 @@ class StateManager:
         "ss_thick": True,
         "ss_topn": ANALYSIS_CONFIG["top_n"],
         "ss_view": "stats",
+        # road scenario (🛣️ ถนนตัดใหม่): the typed roads and how they join are saved; the result stays in the session
+        "show_road_scenario": True,
+        "ss_new_roads": "",
+        "ss_snap_m": int(ROAD_SCENARIO_CONFIG["snap_m"]),
+        "ss_cross": True,
         "analytics_view": "curve",
     }
 
@@ -830,7 +861,7 @@ class StateManager:
         if "rent" in layers:
             st.session_state[cls.K_RENT_DATA] = None
         if "space_syntax" in layers:
-            for key in SS_STATE_KEYS:
+            for key in SS_STATE_KEYS + (SS_SCENARIO,):
                 st.session_state.pop(key, None)
 
     @classmethod
@@ -4398,9 +4429,25 @@ def build_segment_network(graph: Any) -> SegmentNetwork:
         seg_xy.append(xy)
         seg_name.append(_first_text(data.get("name")))
         seg_highway.append(_first_text(data.get("highway")))
+    return _assemble_segment_network(
+        (lat0, lon0), node_xy, seg_a, seg_b, seg_len, seg_bend, seg_dir_a, seg_dir_b, seg_mid_xy, seg_mid_lonlat,
+        seg_lonlat, seg_xy, seg_name, seg_highway)
 
+
+def _assemble_segment_network(
+    origin: Tuple[float, float], node_xy: np.ndarray, seg_a: np.ndarray, seg_b: np.ndarray, seg_len: np.ndarray,
+    seg_bend: np.ndarray, seg_dir_a: np.ndarray, seg_dir_b: np.ndarray, seg_mid_xy: np.ndarray,
+    seg_mid_lonlat: np.ndarray, seg_lonlat: List[np.ndarray], seg_xy: List[np.ndarray],
+    seg_name: List[Optional[str]], seg_highway: List[Optional[str]],
+) -> SegmentNetwork:
+    """Finish a :class:`SegmentNetwork` from its per-segment arrays: legal moves at every node + components.
+
+    Shared by :func:`build_segment_network` and :func:`add_new_roads`, so a scenario network is joined up exactly
+    the way an OSM network is.
+    """
+    n_nodes, n_seg = len(node_xy), len(seg_a)
     # Legal moves: arrive at a node on one segment end, leave on a *different* segment's end.
-    incident: List[List[Tuple[int, int]]] = [[] for _ in nodes]
+    incident: List[List[Tuple[int, int]]] = [[] for _ in range(n_nodes)]
     for s in range(n_seg):
         incident[seg_a[s]].append((s, 0))
         incident[seg_b[s]].append((s, 1))
@@ -4426,10 +4473,10 @@ def build_segment_network(graph: Any) -> SegmentNetwork:
     tr_to = np.concatenate(moves_to) if moves_to else empty_i
     tr_defl = np.concatenate(moves_defl) if moves_defl else empty_f
 
-    adjacency = csr_matrix((np.ones(n_seg), (seg_a, seg_b)), shape=(len(nodes), len(nodes)))
+    adjacency = csr_matrix((np.ones(n_seg), (seg_a, seg_b)), shape=(n_nodes, n_nodes))
     _, labels = connected_components(adjacency, directed=False)
     return SegmentNetwork(
-        origin=(lat0, lon0), node_xy=node_xy, seg_a=seg_a, seg_b=seg_b, seg_len=seg_len,
+        origin=origin, node_xy=node_xy, seg_a=seg_a, seg_b=seg_b, seg_len=seg_len,
         seg_bend_deg=seg_bend, seg_dir_a=seg_dir_a, seg_dir_b=seg_dir_b, seg_mid_xy=seg_mid_xy,
         seg_mid_lonlat=seg_mid_lonlat, seg_lonlat=seg_lonlat, seg_xy=seg_xy, seg_name=seg_name,
         seg_highway=seg_highway, seg_component=labels[seg_a].astype(np.int64),
@@ -4984,6 +5031,387 @@ def _display_columns(net: SegmentNetwork, scaled: Dict[str, Any], values: np.nda
 
 
 # ============================================================================
+# SECTION 3c: ENGINE · ROAD SCENARIO — "ถ้าตัดถนนใหม่ คะแนน Space Syntax จะเปลี่ยนอย่างไร" (pure, no st.*)
+# ============================================================================
+# 1. add_new_roads   ต่อถนนใหม่ (polyline Lat, Lon) เข้าโครงข่าย segment เดิม: ปลายที่ห่างถนนเดิมไม่เกิน snap_m
+#                    ต่อเข้าถนนเดิม และทุกจุดที่ตัดผ่านถนนเดิมกลายเป็นทางแยก (ปิดได้ = สะพาน/ทางยกระดับ)
+#                    segment เดิมที่ถูกต่อ/ตัดแยกเป็นชิ้น (ความยาว OSM แบ่งตามสัดส่วน) ทุกชิ้นจำ segment เดิม (parent)
+# 2. analyse_network บนโครงข่ายใหม่ด้วยค่าตั้งเดิมทุกอย่าง (ชนิดระยะ รัศมี Choice) — ทำใน stage ของ SHELL
+# 3. compare_scenario / scenario_summary  ชิ้นที่แยกออกรวมกลับเป็น segment เดิมแบบถ่วงความยาว → Δ รายช่วงถนน
+# (ค่าตั้ง: ROAD_SCENARIO_CONFIG ใน SECTION 1)
+
+
+@dataclass(frozen=True)
+class RoadScenario:
+    """A segment network with new roads joined in, and where every one of its segments came from."""
+
+    net: SegmentNetwork          # existing segments (split where a new road meets them) + the new roads' pieces
+    n_base: int                  # segments of the network the roads were added to
+    parent: np.ndarray           # (S',) existing segment each segment is (a piece of); -1 = part of a new road
+    road: np.ndarray             # (S',) index of the new road a segment belongs to; -1 = an existing road
+    roads: List[Dict[str, Any]]  # per new road: name, length_m, joins, free_ends, crossings, segments
+    junctions: np.ndarray        # (J, 2) lon/lat of every point where a new road meets another road
+
+    @property
+    def is_new(self) -> np.ndarray:
+        return self.parent < 0
+
+
+@dataclass
+class _Line:
+    """A polyline being edited — an existing segment or a new road — with the junctions cut into it so far."""
+
+    xy: np.ndarray
+    cum: np.ndarray                      # arc length at every vertex (m)
+    a: int
+    b: int
+    parent: int
+    road: int
+    name: Optional[str]
+    highway: Optional[str]
+    scale: float                         # segment metres per drawn metre (OSM length / polyline length)
+    cuts: List[Tuple[float, int]] = field(default_factory=list)   # (arc position, node)
+
+
+def _arc_lengths(xy: np.ndarray) -> np.ndarray:
+    return np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))])
+
+
+def _xy_to_lonlat(net: SegmentNetwork, xy: Any) -> np.ndarray:
+    """Inverse of :func:`_to_xy` on ``net``'s plane (the projection is affine, so this is exact)."""
+    lat0, lon0 = net.origin
+    xy = np.asarray(xy, dtype=float)
+    return np.stack([lon0 + xy[..., 0] / (np.cos(np.radians(lat0)) * M_PER_DEG_LON_EQ),
+                     lat0 + xy[..., 1] / M_PER_DEG_LAT], axis=-1)
+
+
+def _flat_pieces(lines: Sequence[_Line], first: int = 0) -> Tuple[np.ndarray, ...]:
+    """``(p0, p1, line, t0)`` of every straight piece of ``lines`` (``line`` counts from ``first``)."""
+    if not lines:
+        return np.empty((0, 2)), np.empty((0, 2)), np.empty(0, dtype=np.int64), np.empty(0)
+    return (np.concatenate([line.xy[:-1] for line in lines]), np.concatenate([line.xy[1:] for line in lines]),
+            np.concatenate([np.full(len(line.xy) - 1, first + i, dtype=np.int64) for i, line in enumerate(lines)]),
+            np.concatenate([line.cum[:-1] for line in lines]))
+
+
+def _nearest_piece(pieces: Tuple[np.ndarray, ...], p: np.ndarray) -> Optional[Tuple[int, float, float]]:
+    """``(line, arc position, distance)`` of the point on any line closest to ``p``."""
+    p0, p1, owner, t0 = pieces
+    if not len(p0):
+        return None
+    d = p1 - p0
+    length2 = (d * d).sum(axis=1)
+    u = np.clip(((p - p0) * d).sum(axis=1) / np.maximum(length2, 1e-12), 0.0, 1.0)
+    gap = np.hypot(*(p0 + u[:, None] * d - p).T)
+    k = int(np.argmin(gap))
+    return int(owner[k]), float(t0[k] + u[k] * np.sqrt(length2[k])), float(gap[k])
+
+
+def _crossings(pieces: Tuple[np.ndarray, ...], xy: np.ndarray, cum: np.ndarray) -> List[Tuple[float, int, float]]:
+    """``(arc position on the road, line, arc position on the line)`` wherever polyline ``xy`` crosses a line.
+
+    Parallel overlaps are not crossings (a new road laid on top of an old one joins it only at its ends).
+    """
+    p0, p1, owner, t0 = pieces
+    lo, hi = xy.min(axis=0), xy.max(axis=0)
+    near = np.flatnonzero((np.minimum(p0, p1) <= hi).all(axis=1) & (np.maximum(p0, p1) >= lo).all(axis=1))
+    found: List[Tuple[float, int, float]] = []
+    if not len(near):
+        return found
+    q0, s = p0[near], p1[near] - p0[near]
+    s_len = np.hypot(s[:, 0], s[:, 1])
+    for j in range(len(xy) - 1):
+        r = xy[j + 1] - xy[j]
+        w = q0 - xy[j]
+        denom = r[0] * s[:, 1] - r[1] * s[:, 0]
+        ok = np.abs(denom) > 1e-9
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (w[:, 0] * s[:, 1] - w[:, 1] * s[:, 0]) / denom
+            u = (w[:, 0] * r[1] - w[:, 1] * r[0]) / denom
+        eps = 1e-9                                 # a road through a vertex hits both pieces (dupes are merged)
+        hit = np.flatnonzero(ok & (t >= -eps) & (t <= 1 + eps) & (u >= -eps) & (u <= 1 + eps))
+        r_len = float(np.hypot(r[0], r[1]))
+        found.extend((float(cum[j] + t[k] * r_len), int(owner[near[k]]), float(t0[near[k]] + u[k] * s_len[k]))
+                     for k in hit)
+    return sorted(found)
+
+
+def add_new_roads(
+    net: SegmentNetwork, roads: Sequence[Dict[str, Any]], snap_m: Optional[float] = None,
+    connect_crossings: bool = True,
+) -> RoadScenario:
+    """Join new roads into ``net``. A road is ``{"name", "points": [(lat, lon), …]}`` with at least two points.
+
+    A road end within ``snap_m`` of a road joins it: at the junction / road end there when one is within
+    ``join_node_m`` along that road, else at a new junction that splits the segment. With ``connect_crossings``
+    every place a new road crosses a road (an existing one or an earlier new one) is a junction too; without it
+    the new road passes over (bridge / flyover). Untouched segments keep every array; pieces of a split segment
+    name it in ``parent``. Raises ``ValueError`` (in Thai) for input that cannot make a road.
+    """
+    cfg = ROAD_SCENARIO_CONFIG
+    snap = float(cfg["snap_m"] if snap_m is None else snap_m)
+    join, skip = float(cfg["join_node_m"]), float(cfg["end_skip_m"])
+    if not roads:
+        raise ValueError("ยังไม่มีถนนใหม่ — กรอกพิกัดอย่างน้อย 2 จุด")
+    if len(roads) > cfg["max_roads"]:
+        raise ValueError(f"จำลองได้ครั้งละไม่เกิน {cfg['max_roads']} เส้น")
+    lines: List[_Line] = []
+    for s in range(net.n_segments):
+        cum = _arc_lengths(net.seg_xy[s])
+        lines.append(_Line(net.seg_xy[s], cum, int(net.seg_a[s]), int(net.seg_b[s]), s, -1, net.seg_name[s],
+                           net.seg_highway[s], float(net.seg_len[s] / cum[-1]) if cum[-1] > 0 else 1.0))
+    pieces = _flat_pieces(lines)
+    extra: List[np.ndarray] = []                   # nodes added after net's own
+
+    def node_xy_of(node: int) -> np.ndarray:
+        return net.node_xy[node] if node < net.n_nodes else extra[node - net.n_nodes]
+
+    def new_node(xy: Any) -> int:
+        extra.append(np.asarray(xy, dtype=float))
+        return net.n_nodes + len(extra) - 1
+
+    def join_line(line: _Line, t: float) -> int:
+        """Node where something meets ``line`` at arc position ``t``: one already within ``join`` m, else a new cut."""
+        stops = [(0.0, line.a), (float(line.cum[-1]), line.b)] + line.cuts
+        best_t, best_node = min(stops, key=lambda stop: abs(stop[0] - t))
+        if abs(best_t - t) <= join:
+            return best_node
+        node = new_node([np.interp(t, line.cum, line.xy[:, 0]), np.interp(t, line.cum, line.xy[:, 1])])
+        line.cuts.append((t, node))
+        return node
+
+    junctions: set = set()
+    infos: List[Dict[str, Any]] = []
+    for i, road in enumerate(roads):
+        name = str(road.get("name") or f"ถนนใหม่ {i + 1}")
+        points = list(road.get("points") or [])
+        if not 2 <= len(points) <= cfg["max_points"]:
+            raise ValueError(f"{name}: ต้องมี 2–{cfg['max_points']} จุด (มี {len(points)})")
+        lat_lon = np.asarray(points, dtype=float).reshape(-1, 2)
+        xy = net.to_xy(lat_lon[:, 1], lat_lon[:, 0])
+        xy = xy[np.concatenate([[True], np.hypot(*np.diff(xy, axis=0).T) > 1e-6])]
+        if len(xy) < 2:
+            raise ValueError(f"{name}: ทุกจุดอยู่ที่เดียวกัน")
+        info: Dict[str, Any] = {"name": name, "joins": 0, "free_ends": 0, "crossings": 0}
+        ends: List[int] = []
+        for e in (0, len(xy) - 1):
+            hit = _nearest_piece(pieces, xy[e])
+            if hit is not None and hit[2] <= snap:
+                node = join_line(lines[hit[0]], hit[1])
+                junctions.add(node)
+                info["joins"] += 1
+            else:
+                node = new_node(xy[e])
+                info["free_ends"] += 1
+            xy[e] = node_xy_of(node)               # the road now ends exactly on the junction
+            ends.append(node)
+        cum = _arc_lengths(xy)
+        if cum[-1] < 1.0:
+            raise ValueError(f"{name}: สั้นเกินไปหลังต่อเข้าถนนเดิม (ปลายทั้งสองต่อที่จุดเดียวกัน)")
+        line = _Line(xy, cum, ends[0], ends[1], -1, i, name, cfg["highway"], 1.0)
+        if connect_crossings:
+            crossed: List[int] = []
+            for t_road, other, t_other in _crossings(pieces, xy, cum):
+                if t_road <= skip or t_road >= cum[-1] - skip:
+                    continue
+                node = join_line(lines[other], t_other)
+                if node in ends or node in crossed:   # the junction an end already uses / one road end of many
+                    continue
+                line.cuts.append((t_road, node))
+                crossed.append(node)
+            info["crossings"] = len(crossed)
+            junctions.update(crossed)
+        info["length_m"] = float(cum[-1])
+        lines.append(line)
+        infos.append(info)
+        pieces = tuple(np.concatenate([a, b]) for a, b in zip(pieces, _flat_pieces([line], len(lines) - 1)))
+
+    node_xy = np.vstack([net.node_xy, np.asarray(extra, dtype=float).reshape(-1, 2)])
+    tol = float(ANALYSIS_CONFIG["simplify_tolerance_m"])
+    out: Dict[str, list] = {k: [] for k in ("a", "b", "len", "bend", "dir_a", "dir_b", "mid_xy", "mid_ll",
+                                            "lonlat", "xy", "name", "highway", "parent", "road")}
+
+    def emit(a: int, b: int, length: float, bend: float, dir_a: Any, dir_b: Any, mid_xy: Any, mid_ll: Any,
+             lonlat: np.ndarray, xy: np.ndarray, line: _Line) -> None:
+        for key, value in (("a", a), ("b", b), ("len", length), ("bend", bend), ("dir_a", dir_a),
+                           ("dir_b", dir_b), ("mid_xy", mid_xy), ("mid_ll", mid_ll), ("lonlat", lonlat),
+                           ("xy", xy), ("name", line.name), ("highway", line.highway), ("parent", line.parent),
+                           ("road", line.road)):
+            out[key].append(value)
+
+    # untouched segments first (same arrays as before), then the pieces of split segments and of the new roads
+    for line in lines:
+        if line.parent >= 0 and not line.cuts:
+            s = line.parent
+            emit(line.a, line.b, net.seg_len[s], net.seg_bend_deg[s], net.seg_dir_a[s], net.seg_dir_b[s],
+                 net.seg_mid_xy[s], net.seg_mid_lonlat[s], net.seg_lonlat[s], net.seg_xy[s], line)
+    for line in lines:
+        if line.parent >= 0 and not line.cuts:
+            continue
+        stops = sorted({(0.0, line.a), (float(line.cum[-1]), line.b), *line.cuts})
+        for (t0, n0), (t1, n1) in zip(stops[:-1], stops[1:]):
+            inside = (line.cum > t0) & (line.cum < t1)
+            xy = np.vstack([node_xy[n0], line.xy[inside], node_xy[n1]])
+            lonlat = _xy_to_lonlat(net, xy)
+            dir_a, dir_b, bend = _polyline_stats(xy, node_xy[n1] - node_xy[n0], tol)
+            mid_xy, mid_ll = _polyline_midpoints(xy, lonlat)
+            emit(n0, n1, max((t1 - t0) * line.scale, 0.1), bend, dir_a, dir_b, mid_xy, mid_ll, lonlat, xy, line)
+
+    built = _assemble_segment_network(
+        net.origin, node_xy, np.asarray(out["a"], dtype=np.int64), np.asarray(out["b"], dtype=np.int64),
+        np.asarray(out["len"], dtype=float), np.asarray(out["bend"], dtype=float),
+        np.asarray(out["dir_a"], dtype=float).reshape(-1, 2), np.asarray(out["dir_b"], dtype=float).reshape(-1, 2),
+        np.asarray(out["mid_xy"], dtype=float).reshape(-1, 2), np.asarray(out["mid_ll"], dtype=float).reshape(-1, 2),
+        out["lonlat"], out["xy"], out["name"], out["highway"])
+    road_of = np.asarray(out["road"], dtype=np.int64)
+    for i, info in enumerate(infos):
+        info["segments"] = np.flatnonzero(road_of == i).tolist()
+    corners = sorted(junctions)
+    return RoadScenario(net=built, n_base=net.n_segments, parent=np.asarray(out["parent"], dtype=np.int64),
+                        road=road_of, roads=infos,
+                        junctions=_xy_to_lonlat(net, node_xy[corners]) if corners else np.empty((0, 2)))
+
+
+def scenario_values(scenario: RoadScenario, values: Any) -> np.ndarray:
+    """Per *existing* segment: the length-weighted mean of ``values`` (one per scenario segment) over its pieces.
+
+    A segment that was not split takes its own value unchanged; new-road segments are left out.
+    """
+    values = np.asarray(values, dtype=float)
+    parent = scenario.parent
+    keep = (parent >= 0) & np.isfinite(values)
+    weight = scenario.net.seg_len[keep]
+    total = np.bincount(parent[keep], weights=weight, minlength=scenario.n_base)
+    summed = np.bincount(parent[keep], weights=weight * values[keep], minlength=scenario.n_base)
+    out = np.full(scenario.n_base, np.nan)
+    np.divide(summed, total, out=out, where=total > 0)
+    pieces = np.bincount(parent[parent >= 0], minlength=scenario.n_base)
+    whole = keep & (pieces[np.maximum(parent, 0)] == 1)
+    out[parent[whole]] = values[whole]
+    return out
+
+
+def measure_values(result: AnalysisResult, measure: str, rkey: str) -> np.ndarray:
+    """NAIN (``integration``) or NACH (``choice``) of one radius."""
+    return result.integration[rkey] if measure == "integration" else result.choice_norm[rkey]
+
+
+def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
+    ok = np.isfinite(values)
+    return float(np.average(values[ok], weights=weights[ok])) if ok.any() and weights[ok].sum() > 0 else float("nan")
+
+
+def compare_scenario(
+    base_net: SegmentNetwork, base_result: AnalysisResult, base_mask: np.ndarray, scenario: RoadScenario,
+    after: AnalysisResult, after_mask: np.ndarray, measure: str, rkey: str, scale: str = "linear",
+) -> Dict[str, Any]:
+    """Before → after of one index (``measure`` at radius ``rkey``) for every existing segment, and the new roads.
+
+    ``pct`` is the change of the raw index in percent (NaN where it was 0) — comparable between the two networks.
+    ``score_*`` is the 0–100 map score of each network on its own scale (what the Space Syntax layer would show),
+    so a road can gain index and still lose score when the new road outranks it. ``new_rank`` = share (%) of the
+    shown existing segments whose index is below the new roads' length-weighted mean.
+    """
+    before = measure_values(base_result, measure, rkey)
+    after_all = measure_values(after, measure, rkey)
+    after_base = scenario_values(scenario, after_all)
+    s_before = scale_scores(before, scale, base_mask)
+    s_after = scale_scores(after_all, scale, after_mask)
+    delta = after_base - before
+    pct = np.full(len(before), np.nan)
+    np.divide(100.0 * delta, np.abs(before), out=pct, where=np.isfinite(delta) & (np.abs(before) > 1e-12))
+    new = scenario.is_new
+    weights = scenario.net.seg_len
+    new_value = _weighted_mean(after_all[new], weights[new])
+    reference = after_all[after_mask & ~new & np.isfinite(after_all)]
+    new_rank = (float(100.0 * (reference < new_value).mean()) if len(reference) and np.isfinite(new_value)
+                else float("nan"))
+    return {
+        "before": before, "after": after_base, "after_all": after_all, "delta": delta, "pct": pct,
+        "score_before": s_before["score"], "score_after": scenario_values(scenario, s_after["score"]),
+        "score_after_all": s_after["score"], "new_value": new_value,
+        "new_score": _weighted_mean(s_after["score"][new], weights[new]), "new_rank": new_rank,
+    }
+
+
+def scenario_summary(
+    base_net: SegmentNetwork, base_result: AnalysisResult, base_mask: np.ndarray, scenario: RoadScenario,
+    after: AnalysisResult, after_mask: np.ndarray,
+) -> pd.DataFrame:
+    """One row per (measure, radius): the existing roads' length-weighted mean before / after, how many shown
+    segments went up / down by at least ``change_pct`` %, and how the new roads rank among them."""
+    limit = ROAD_SCENARIO_CONFIG["change_pct"]
+    rows = []
+    for measure in ["integration"] + (["choice"] if base_result.with_choice else []):
+        for radius in base_result.radii:
+            rkey = radius_key(radius)
+            c = compare_scenario(base_net, base_result, base_mask, scenario, after, after_mask, measure, rkey)
+            ok = base_mask & np.isfinite(c["before"]) & np.isfinite(c["after"])
+            mean_before = _weighted_mean(c["before"][ok], base_net.seg_len[ok])
+            mean_after = _weighted_mean(c["after"][ok], base_net.seg_len[ok])
+            pct = c["pct"][ok]
+            rows.append({
+                "measure": measure, "radius": rkey, "mean_before": mean_before, "mean_after": mean_after,
+                "change_pct": (100.0 * (mean_after - mean_before) / abs(mean_before)
+                               if np.isfinite(mean_before) and abs(mean_before) > 1e-12 else float("nan")),
+                "up": int((pct >= limit).sum()), "down": int((pct <= -limit).sum()), "segments": int(ok.sum()),
+                "new_value": c["new_value"], "new_rank": c["new_rank"],
+            })
+    return pd.DataFrame(rows)
+
+
+def delta_limit(pct: np.ndarray, mask: np.ndarray) -> float:
+    """Half-width (%) of the Δ colour scale: the 95th percentile of |Δ| shown, never below 2 × ``change_pct``."""
+    shown = np.abs(pct[np.asarray(mask, dtype=bool) & np.isfinite(pct)])
+    floor = 2.0 * float(ROAD_SCENARIO_CONFIG["change_pct"])
+    return max(floor, float(np.percentile(shown, 95))) if len(shown) else floor
+
+
+def delta_hex(pct: Any, limit: float) -> List[str]:
+    """Colour of each Δ %: −limit → blue, 0 → gray, +limit → red (beyond ±limit clipped; NaN → gray)."""
+    stops = np.array([_hex_rgb(c) for c in DELTA_STOPS])
+    x = np.clip(np.nan_to_num(np.atleast_1d(np.asarray(pct, dtype=float)) / limit, nan=0.0), -1.0, 1.0)
+    xs = np.linspace(-1.0, 1.0, len(stops))
+    rgb = np.stack([np.interp(x, xs, stops[:, c]) for c in range(3)], axis=-1)
+    return ["#%02x%02x%02x" % tuple(int(round(c * 255)) for c in row) for row in rgb]
+
+
+def suggest_shortcut(net: SegmentNetwork, mask: np.ndarray, seed: int = 0) -> Optional[Dict[str, Any]]:
+    """The biggest "missing link" of the shown area: two segments close as the crow flies but far apart by road.
+
+    From a fixed sample of shown segments, metric depth (midpoint → midpoint along the roads) is compared with the
+    straight distance to every shown segment ``shortcut_span_m`` away; the pair with the largest detour ratio comes
+    back as ``{"points": [(lat, lon), (lat, lon)], "detour", "straight_m", "road_m"}`` (``None`` when no pair
+    detours by ``shortcut_min_detour`` or more).
+    Unconnected pairs are skipped — a river or a border is not a missing link.
+    """
+    cfg = ROAD_SCENARIO_CONFIG
+    lo, hi = cfg["shortcut_span_m"]
+    shown = np.flatnonzero(np.asarray(mask, dtype=bool))
+    if len(shown) < 2:
+        return None
+    rng = np.random.default_rng(seed)
+    origins = np.sort(rng.choice(shown, size=min(int(cfg["shortcut_origins"]), len(shown)), replace=False))
+    matrix = state_matrix(net, "metric")
+    best: Optional[Tuple[float, int, int, float, float]] = None
+    for o in origins:
+        straight = np.hypot(*(net.seg_mid_xy[shown] - net.seg_mid_xy[o]).T)
+        near = (straight >= lo) & (straight <= hi)
+        if not near.any():
+            continue
+        depth = _tree_from(matrix, (2 * int(o), 2 * int(o) + 1), False)[0].reshape(-1, 2).min(axis=1)[shown]
+        ratio = np.where(near & np.isfinite(depth), depth / np.maximum(straight, 1e-9), -1.0)
+        k = int(np.argmax(ratio))
+        if ratio[k] >= cfg["shortcut_min_detour"] and (best is None or ratio[k] > best[0]):
+            best = (float(ratio[k]), int(o), int(shown[k]), float(straight[k]), float(depth[k]))
+    if best is None:
+        return None
+    ratio, a, b, straight_m, road_m = best
+    points = [(float(net.seg_mid_lonlat[s, 1]), float(net.seg_mid_lonlat[s, 0])) for s in (a, b)]
+    return {"points": points, "detour": ratio, "straight_m": straight_m, "road_m": road_m, "segments": (a, b)}
+
+
+# ============================================================================
 # SECTION 4: CACHED WRAPPERS (@st.cache_data)
 # ============================================================================
 
@@ -5189,6 +5617,7 @@ class Ctx:
     center: Tuple[float, float]
     ss: Optional[Any] = None                         # Space Syntax view (see ``SpaceSyntaxView``)
     cache: Any = None                                # per-session LRU for display payloads
+    scenario: Optional[Any] = None                   # road scenario of ``ss`` (see ``ScenarioView``)
 
 
 @dataclass(frozen=True)
@@ -5904,6 +6333,89 @@ def _options_space_syntax(ctx: Ctx, locked: bool) -> None:
     st.caption("แนะนำพื้นหลัง “พื้นดำ (เหมือน depthmap)” ในสไตล์แผนที่ด้านบน")
 
 
+# ------------------------------------------------------------------ Road scenario layer (🛣️ ถนนตัดใหม่)
+SCN_TIP_HEADS: Tuple[str, ...] = ("ถนน:", "ค่าดัชนีเปลี่ยน (%):", "ค่าดัชนี ก่อน → หลัง:", "คะแนน ก่อน → หลัง:")
+NEW_ROAD_TIP_HEADS: Tuple[str, ...] = ("ถนนใหม่:", "ค่าดัชนี:", "คะแนน (0–100):", "ยาวช่วงนี้ (m):")
+
+
+@dataclass(frozen=True)
+class ScenarioView:
+    """A road scenario of the Space Syntax result on screen (read-only; built by ``build_ctx``)."""
+
+    scenario: Any               # RoadScenario
+    result: Any                 # AnalysisResult of the scenario network (the base result's settings)
+    mask: Any                   # bool per scenario segment: shown (display circle + every new road)
+
+
+def _signed(value: float, digits: int = 1) -> str:
+    return "—" if not np.isfinite(value) else f"{value:+.{digits}f}"
+
+
+def scenario_payload(ctx: Ctx) -> Dict[str, Any]:
+    """Comparison, colours and map rows of the road scenario for the current measure / radius / scale.
+
+    Kept in the session LRU per (scenario result, options), like :func:`ss_payload`.
+    """
+    view, scn = ctx.ss, ctx.scenario
+    d = view.display
+    key = ("scn", d["measure"], d["rkey"], d["scale"], d["thick"])
+
+    def build() -> Dict[str, Any]:
+        net, scenario = view.net, scn.scenario
+        cmp = compare_scenario(net, view.result, view.mask, scenario, scn.result, scn.mask,
+                               d["measure"], d["rkey"], d["scale"])
+        limit = delta_limit(cmp["pct"], view.mask)
+        colors = delta_hex(cmp["pct"], limit)
+        rows: List[list] = []
+        for s in np.flatnonzero(view.mask):
+            pct = cmp["pct"][s]
+            weight = 1.6 + 3.0 * min(abs(pct) / limit, 1.0) if d["thick"] and np.isfinite(pct) else 2.2
+            flat = np.round(net.seg_lonlat[s][:, ::-1], COORD_DECIMALS).ravel().tolist()
+            rows.append([colors[s], round(float(weight), 2), [
+                escape(_segment_label(net, s)), _signed(pct),
+                f"{_short(float(cmp['before'][s]))} → {_short(float(cmp['after'][s]))}",
+                f"{_short(round(float(cmp['score_before'][s]), 1))} → {_short(round(float(cmp['score_after'][s]), 1))}",
+            ], flat])
+        new_rows: List[list] = []
+        for s in np.flatnonzero(scenario.is_new):
+            flat = np.round(scenario.net.seg_lonlat[s][:, ::-1], COORD_DECIMALS).ravel().tolist()
+            new_rows.append([NEW_ROAD_COLOR, 6.0, [
+                escape(str(scenario.net.seg_name[s])), _short(float(cmp["after_all"][s])),
+                _short(round(float(cmp["score_after_all"][s]), 1)), round(float(scenario.net.seg_len[s]))], flat])
+        return {"cmp": cmp, "limit": limit, "rows_json": _json_js(rows), "new_json": _json_js(new_rows)}
+
+    return lru_get(ctx.cache, key, scn.result, build)
+
+
+def draw_road_scenario(ctx: Ctx) -> Any:
+    """Existing roads coloured by how much their index changes (red = up … blue = down), the new roads on top in
+    magenta and a white dot at every junction they make."""
+    payload = scenario_payload(ctx)
+    group = folium.FeatureGroup(name="🛣️ ถนนตัดใหม่ (คะแนนเปลี่ยน)", show=True)
+    CompactLines(payload["rows_json"], heads=SCN_TIP_HEADS, opacity=0.95, hover=True).add_to(group)
+    # the hover handler is the group's, so the second set of lines must not add it again (it would stack)
+    CompactLines(payload["new_json"], heads=NEW_ROAD_TIP_HEADS, opacity=1.0).add_to(group)
+    for lon, lat in ctx.scenario.scenario.junctions:
+        folium.CircleMarker([float(lat), float(lon)], radius=4, color="#000000", weight=1.5, fill=True,
+                            fill_color="#ffffff", fill_opacity=1.0, tooltip="ทางแยกใหม่").add_to(group)
+    return group
+
+
+def legend_road_scenario(ctx: Ctx) -> str:
+    payload, d = scenario_payload(ctx), ctx.ss.display
+    limit = payload["limit"]
+    shown = f"{limit:.0f}" if limit >= 10 else f"{limit:.1f}"
+    stops = ", ".join(f"{c} {100 * i / (len(DELTA_STOPS) - 1):.0f}%" for i, c in enumerate(DELTA_STOPS))
+    return (
+        f'<div style="font-weight:600; margin-bottom:4px;">ถนนตัดใหม่: {MEASURES[d["measure"]]["title"]} เปลี่ยน</div>'
+        f'<div style="height:12px; border-radius:3px; background:linear-gradient(90deg, {stops});"></div>'
+        '<div style="display:flex; justify-content:space-between; margin-top:2px;">'
+        f'<span>🔵 −{shown}%</span><span>เท่าเดิม</span><span>+{shown}% 🔴</span></div>'
+        + _legend_swatch_row(NEW_ROAD_COLOR, "ถนนใหม่ · ⚪ ทางแยกใหม่")
+        + f'<div class="rg-muted">{radius_label_for(d["rkey"])}</div>'
+    )
+
+
 # ------------------------------------------------------------------ the registry (bottom → top)
 LAYERS: Tuple[Layer, ...] = (
     # tile overlays first: the browser always paints tiles below vector layers
@@ -5955,6 +6467,12 @@ LAYERS: Tuple[Layer, ...] = (
           lambda c: c.ss is not None, show_key="show_space_syntax", label="🧭 Space Syntax (แดง→น้ำเงิน)",
           hint="🔴 เข้าถึงง่ายที่สุด → 🔵 เข้าถึงยากที่สุด", requires="วิเคราะห์ Space Syntax ที่แผง Space Syntax ก่อน",
           legend=legend_space_syntax, legend_rank=30, options=_options_space_syntax, panel_rank=10),
+    Layer("road_scenario", "🛣️ ถนนตัดใหม่ (คะแนนเปลี่ยน)", "โครงข่ายถนน", draw_road_scenario,
+          lambda c: c.ss is not None and c.scenario is not None, show_key="show_road_scenario",
+          label="🛣️ ถนนตัดใหม่: คะแนนเปลี่ยน (Δ)",
+          hint="🔴 ค่าดัชนีเพิ่ม · เทา = เท่าเดิม · 🔵 ลดลง — ตัวชี้วัด/รัศมีตามชั้น Space Syntax (ปิดชั้นนั้นจะเห็นชัดขึ้น)",
+          requires="จำลองที่แผง 🛣️ จำลองถนนตัดใหม่ ก่อน", legend=legend_road_scenario, legend_rank=31,
+          panel_rank=11),
     Layer("railway", "แนวรถไฟเชียงของ", "บริบท & overlay", draw_railway, _always, show_key="show_railway",
           label="🚂 แนวรถไฟเชียงของ", options=_options_railway),
     Layer("top_node", "Integration Center (จุดตรงกลางที่สุด)", "โครงข่ายถนน", draw_top_node,
@@ -5993,17 +6511,20 @@ def build_ctx() -> Ctx:
     cache = state.get("layer_cache")
     if cache is None:
         cache = state["layer_cache"] = OrderedDict()
-    ss_view = None
+    ss_view = scn_view = None
     if state.get(SS_NET) is not None and state.get(SS_RESULT) is not None:
         ss_view = SpaceSyntaxView(net=state[SS_NET], meta=state.get(SS_META) or {}, result=state[SS_RESULT],
                                   mask=state[SS_MASK], display=ss_display(show, state[SS_RESULT]))
+        scn = state.get(SS_SCENARIO)
+        if scn and scn.get("base_result") is state[SS_RESULT]:      # a scenario of an older analysis is not shown
+            scn_view = ScenarioView(scenario=scn["scenario"], result=scn["result"], mask=scn["mask"])
     return Ctx(
         markers=markers, colors=StateManager.get_colors(), iso=StateManager.get_isochrone_data(),
         inter=StateManager.get_intersection_data(),
         net=net if net and "error" not in net else None,
         rent=rent if rent and "error" not in rent else None,
         anchor=automated, anchor_closeness=closeness, evidence=evidence,
-        show=show, center=center, ss=ss_view, cache=cache,
+        show=show, center=center, ss=ss_view, cache=cache, scenario=scn_view,
     )
 
 
@@ -6878,15 +7399,99 @@ def _render_sidebar_space_syntax_panel(locked: bool) -> Dict[str, Any]:
     return {"run": run, "demo": demo, "params": ss_params(), "status": status}
 
 
+ROAD_INPUT_EXAMPLE = "# ถนนตัดใหม่ 1\n20.265012, 100.402011\n20.266187, 100.408530\n\n# ถนนตัดใหม่ 2\n…"
+
+
+def parse_new_roads(text: str) -> List[Dict[str, Any]]:
+    """Roads typed in the 🛣️ panel: one "Lat, Lon" per line; a blank line or a ``# name`` line starts the next road.
+
+    Returns ``[{"name", "points": [(lat, lon), …]}]``. Raises ``ValueError`` naming the line that is wrong.
+    """
+    roads: List[Dict[str, Any]] = []
+    points: List[Tuple[float, float]] = []
+    name: Optional[str] = None
+
+    def finish() -> None:
+        nonlocal points, name
+        if points:
+            roads.append({"name": name or f"ถนนใหม่ {len(roads) + 1}", "points": points})
+            points, name = [], None
+
+    for number, raw in enumerate(str(text or "").splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            finish()
+        elif line.startswith("#"):
+            finish()
+            name = line.lstrip("#").strip() or None
+        else:
+            try:
+                points.append(_parse_anchor_center_input(line))
+            except ValueError as exc:
+                raise ValueError(f"บรรทัด {number}: {exc}") from None
+    finish()
+    if not roads:
+        raise ValueError("ยังไม่มีแนวถนนใหม่ — กรอกพิกัด Lat, Lon อย่างน้อย 2 บรรทัด (หรือกด ✨ เสนอแนวตัวอย่าง)")
+    short = [road["name"] for road in roads if len(road["points"]) < 2]
+    if short:
+        raise ValueError(f"ถนนต้องมีอย่างน้อย 2 จุด: {', '.join(short)}")
+    return roads
+
+
+def _fill_shortcut_example() -> None:
+    """✨ button (runs before the page): write the shown area's biggest "missing link" into the road box."""
+    state = st.session_state
+    net, mask = state.get(SS_NET), state.get(SS_MASK)
+    if net is None:
+        state["_ss_scn_note"] = ("warning", "วิเคราะห์ Space Syntax ก่อน แล้วจึงขอแนวตัวอย่าง")
+        return
+    found = suggest_shortcut(net, np.ones(net.n_segments, dtype=bool) if mask is None else mask)
+    if found is None:
+        state["_ss_scn_note"] = ("warning", "ไม่พบคู่ถนนที่ใกล้กันแต่ต้องอ้อมไกล — กรอกแนวถนนเองได้เลย")
+        return
+    (lat1, lon1), (lat2, lon2) = found["points"]
+    state["ss_new_roads"] = (f"# ทางลัดตัวอย่าง (เดิมอ้อม {found['detour']:.1f} เท่า)\n"
+                             f"{lat1:.6f}, {lon1:.6f}\n{lat2:.6f}, {lon2:.6f}")
+    state["_ss_scn_note"] = ("info", f"เสนอแนวเชื่อม 2 ถนนที่ห่างกันเป็นเส้นตรง {found['straight_m']:,.0f} m "
+                                     f"แต่ทางถนนต้องอ้อม {found['road_m']:,.0f} m — ดูบนแผนที่ว่าสร้างได้จริง (ไม่ข้ามแม่น้ำ/อาคาร) "
+                                     "แก้พิกัดได้ แล้วกด 🛣️ จำลองคะแนน")
+
+
+def _render_sidebar_road_scenario_panel(locked: bool) -> Dict[str, bool]:
+    """🛣️ Road scenario panel — where the new roads are typed. Returns the pressed buttons."""
+    state = st.session_state
+    with st.expander("🛣️ จำลองถนนตัดใหม่ (คะแนน Space Syntax เปลี่ยนอย่างไร)", expanded=False):
+        st.caption("ใส่แนวถนนใหม่ → วิเคราะห์ Space Syntax ซ้ำด้วยค่าตั้งเดิม → ดูว่าถนนเดิมช่วงไหนคะแนนขึ้น/ลง "
+                   "และถนนใหม่ได้คะแนนเท่าไร · ต้องกด 🧮 วิเคราะห์ Space Syntax ก่อน")
+        note = state.pop("_ss_scn_note", None)
+        if note:
+            (st.info if note[0] == "info" else st.warning)(note[1])
+        st.text_area("แนวถนนใหม่ — Lat, Lon ทีละบรรทัด", key="ss_new_roads", height=150, disabled=locked,
+                     placeholder=ROAD_INPUT_EXAMPLE,
+                     help="ดูพิกัดเมาส์ที่มุมขวาล่างของแผนที่ (หรือคัดลอกจาก Google Maps) · จุดกลางทาง = จุดหักเลี้ยว · "
+                          "บรรทัด `# ชื่อถนน` หรือบรรทัดว่าง = เริ่มถนนเส้นถัดไป")
+        st.button("✨ เสนอแนวตัวอย่าง (ทางลัดที่ขาดหาย)", width="stretch", disabled=locked, key="ss_suggest_btn",
+                  on_click=_fill_shortcut_example,
+                  help="หา 2 ช่วงถนนในพื้นที่ที่ห่างกันเป็นเส้นตรงไม่ไกล แต่ทางถนนต้องอ้อมมากที่สุด แล้วใส่เป็นแนวถนนใหม่")
+        st.slider("ต่อเข้าถนนเดิมเมื่อปลายห่างไม่เกิน (m)", 5, 100, step=5, key="ss_snap_m", disabled=locked,
+                  help="ปลายถนนใหม่ที่ห่างถนนเดิมเกินนี้ = ปลายตัน (ไม่เชื่อม)")
+        st.checkbox("จุดที่ตัดผ่านถนนเดิม = ทางแยก", key="ss_cross", disabled=locked,
+                    help="ปิด = สะพาน / ทางยกระดับ ข้ามถนนเดิมไปโดยไม่เชื่อม")
+        c1, c2 = st.columns([0.65, 0.35])
+        run = c1.button("🛣️ จำลองคะแนน", type="primary", width="stretch", disabled=locked, key="ss_scn_btn")
+        clear = c2.button("ล้างผล", width="stretch", disabled=locked, key="ss_scn_clear_btn")
+    return {"run": run, "clear": clear}
+
+
 def render_sidebar() -> Dict[str, Any]:
     """
     Orchestrate the sidebar in pipeline order:
     markers + Isochrone → Network → Automated Anchor (sets the study area) → Space Syntax → Rent Gradient.
     (The layers panel is drawn by ``main`` after the stages ran, so it can show what has data.)
 
-    Returns the user's intents: ``calc / network / anchor / rent / space_syntax`` are True for the button that
-    was pressed (``demo`` = the offline Space Syntax example), plus ``ss_params`` / ``ss_status`` (a placeholder
-    for the status line) / ``active`` / ``locked``.
+    Returns the user's intents: ``calc / network / anchor / rent / space_syntax / road_scenario`` are True for the
+    button that was pressed (``demo`` = the offline Space Syntax example, ``road_scenario_clear`` = drop the road
+    scenario), plus ``ss_params`` / ``ss_status`` (a placeholder for the status line) / ``active`` / ``locked``.
     """
     with st.sidebar:
         st.header("⚙️ การตั้งค่า")
@@ -6916,6 +7521,7 @@ def render_sidebar() -> Dict[str, Any]:
         st.markdown("---")
 
         space_syntax = _render_sidebar_space_syntax_panel(ui_locked)
+        road_scenario = _render_sidebar_road_scenario_panel(ui_locked)
         st.markdown("---")
 
         do_rent = _render_sidebar_rent_panel(ui_locked)
@@ -6924,6 +7530,7 @@ def render_sidebar() -> Dict[str, Any]:
     return {"calc": do_calc, "network": do_network, "anchor": do_anchor, "rent": do_rent,
             "space_syntax": space_syntax["run"] or space_syntax["demo"], "demo": space_syntax["demo"],
             "ss_params": space_syntax["params"], "ss_status": space_syntax["status"],
+            "road_scenario": road_scenario["run"], "road_scenario_clear": road_scenario["clear"],
             "active": active_list, "locked": ui_locked}
 
 
@@ -7216,6 +7823,146 @@ def view_space_syntax(ctx: Ctx) -> None:
     geojson = json.dumps(segments_geojson(net, columns, mask), ensure_ascii=False)
     d2.download_button("⬇️ GeoJSON (พร้อมสี)", geojson, file_name="space_syntax_segments.geojson",
                        mime="application/geo+json")
+
+
+def _render_scenario_help() -> None:
+    st.markdown(
+        """
+##### จำลองอย่างไร
+1. ถนนใหม่ = เส้นต่อจุดพิกัดที่กรอก · ปลายที่ห่างถนนเดิมไม่เกิน *ระยะต่อ* จะต่อเข้าถนนเดิม
+   (ถ้าใกล้แยกเดิมไม่เกิน 10 ม. ใช้แยกเดิม ไม่งั้นสร้างทางแยกใหม่กลางช่วงถนน) · ปลายที่ไกลกว่านั้น = ปลายตัน
+2. ทุกจุดที่ถนนใหม่ตัดผ่านถนนเดิมกลายเป็นทางแยก (ปิดได้ = สะพาน/ทางยกระดับ)
+3. ช่วงถนนเดิมที่ถูกต่อ/ตัดแยกเป็นชิ้น แล้ววิเคราะห์ทั้งโครงข่ายใหม่ด้วย **ค่าตั้งเดิมทุกอย่าง**
+   (ชนิดระยะ รัศมี Choice) — เหมือนเพิ่มเส้นใน depthmapX แล้วรันใหม่
+4. เทียบรายช่วงถนน: ชิ้นที่แยกออกรวมกลับเป็นช่วงเดิมแบบถ่วงความยาว
+
+##### อ่านผลอย่างไร
+- **ค่าดัชนีเปลี่ยน (%)** = NAIN / NACH หลัง − ก่อน เทียบกับก่อน — ใช้เทียบได้ตรง ๆ (สีบนแผนที่ใช้ค่านี้)
+- **คะแนน 0–100** = ตำแหน่งในโครงข่ายของตัวเอง (เหมือนชั้น Space Syntax) — ถนนเดิมอาจค่าดัชนีขึ้นแต่คะแนนลด
+  เพราะถนนใหม่แซงขึ้นไปอยู่บนสุด
+- **Integration ↑** = เข้าถึงง่ายขึ้น (ศักยภาพเป็นย่านการค้า/ที่ดินมูลค่าสูงขึ้น) ·
+  **Choice ↓** ของถนนเดิม = เส้นทางสั้นที่สุดย้ายไปใช้ถนนใหม่ (การจราจรผ่านลดลง)
+- ถนนใหม่ที่ "ลึก" (ต้องเลี้ยวหลายครั้งกว่าจะถึง) อาจทำให้ Integration ของถนนเดิมลดลงเล็กน้อย:
+  NC เพิ่ม แต่ TD เพิ่มมากกว่า — ระบบใหญ่ขึ้นโดยถนนส่วนใหม่อยู่ชายขอบ
+
+##### ข้อควรระวัง
+- Global (n) ของโครงข่ายใหญ่ (เกินเกณฑ์ exact) ประมาณด้วย pivot สุ่ม → Δ เล็ก ๆ ของ Global อาจเป็นแค่ความคลาดเคลื่อน
+  ดู Local ประกอบ
+- เป็นแบบจำลองโครงข่ายล้วน ไม่ใช่แบบจำลองจราจร: ไม่คิดความกว้างถนน ความเร็ว สัญญาณไฟ หรือการใช้ที่ดิน
+""")
+
+
+def view_road_scenario(ctx: Ctx) -> None:
+    """🛣️ What new roads do to the Space Syntax scores: headline numbers, every measure × radius, the biggest
+    changes, the CBD anchor's road, export."""
+    view, scn = ctx.ss, ctx.scenario
+    if view is None or scn is None:
+        st.info("① กด 🧮 วิเคราะห์ Space Syntax (หรือ 🧪 ตัวอย่างเชียงของ) ② กรอกแนวถนนใหม่ที่แผง "
+                "🛣️ จำลองถนนตัดใหม่ ใน sidebar (หรือกด ✨ เสนอแนวตัวอย่าง) ③ กด 🛣️ จำลองคะแนน — "
+                "ผลขึ้นที่นี่และเป็นชั้นบนแผนที่", icon="🛣️")
+        with st.expander("📖 จำลองอย่างไร / อ่านผลอย่างไร"):
+            _render_scenario_help()
+        return
+    net, mask, d, scenario = view.net, view.mask, view.display, scn.scenario
+    payload = scenario_payload(ctx)
+    cmp = payload["cmp"]
+    index_name = "NAIN" if d["measure"] == "integration" else "NACH"
+    st.caption(f"แสดง: {MEASURES[d['measure']]['title']} · รัศมี {radius_label_for(d['rkey'])} · "
+               f"{SCALE_MODES[d['scale']]} — เปลี่ยนได้ที่ ชั้นแผนที่ → 🧭 Space Syntax")
+    shown = mask & np.isfinite(cmp["before"]) & np.isfinite(cmp["after"])
+    mean_before = _weighted_mean(cmp["before"][shown], net.seg_len[shown])
+    mean_after = _weighted_mean(cmp["after"][shown], net.seg_len[shown])
+    change = (100.0 * (mean_after - mean_before) / abs(mean_before)
+              if np.isfinite(mean_before) and abs(mean_before) > 1e-12 else float("nan"))
+    limit = ROAD_SCENARIO_CONFIG["change_pct"]
+    up, down = int((cmp["pct"][shown] >= limit).sum()), int((cmp["pct"][shown] <= -limit).sum())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ถนนใหม่", f"{sum(r['length_m'] for r in scenario.roads) / 1000:,.2f} km")
+    c2.metric(f"คะแนนถนนใหม่ ({index_name})",
+              "—" if not np.isfinite(cmp["new_score"]) else f"{cmp['new_score']:.0f}/100",
+              help="คะแนน 0–100 ในโครงข่ายหลังตัดถนน (ถ่วงความยาวทุกช่วงของถนนใหม่)")
+    c3.metric(f"{index_name} เฉลี่ยถนนเดิม",
+              "—" if not np.isfinite(mean_after) else f"{mean_after:.3f}",
+              None if not np.isfinite(change) else f"{change:+.2f}%",
+              help=f"เฉลี่ยถ่วงความยาวของช่วงถนนเดิมที่แสดง · ก่อนตัดถนน {mean_before:.3f}")
+    c4.metric(f"ช่วงถนนเดิม ขึ้น / ลง ≥ {limit:g}%", f"{up:,} / {down:,}")
+    rank = "" if not np.isfinite(cmp["new_rank"]) else f" · ค่าดัชนีถนนใหม่สูงกว่า {cmp['new_rank']:.0f}% ของช่วงถนนเดิม"
+    st.caption(f"{len(scenario.roads)} เส้น · ทางแยกใหม่ {len(scenario.junctions)} จุด{rank} · "
+               f"จาก {int(shown.sum()):,} ช่วงถนนเดิมที่แสดง")
+    alone = [road["name"] for road in scenario.roads if road["joins"] + road["crossings"] == 0]
+    if alone:
+        st.warning(f"ถนนใหม่ไม่ได้เชื่อมกับถนนเดิมเลย: {', '.join(alone)} — คะแนนถนนเดิมจึงไม่เปลี่ยน", icon="⚠️")
+    if scn.result.meta.get("approximate_global") or view.result.meta.get("approximate_global"):
+        st.caption("⚡ Global (n) ประมาณด้วย pivot สุ่ม — Δ ที่เล็กมากของ Global อาจเป็นความคลาดเคลื่อน ดู Local ประกอบ")
+
+    st.markdown("**🛣️ ถนนใหม่**")
+    st.dataframe(pd.DataFrame([{
+        "ถนน": road["name"], "ยาว (m)": road["length_m"], "ปลายที่ต่อถนนเดิม": road["joins"],
+        "ปลายตัน": road["free_ends"], "ตัดผ่านถนนเดิม (แยก)": road["crossings"], "ช่วง (segment)": len(road["segments"]),
+    } for road in scenario.roads]), hide_index=True, width="stretch",
+        column_config={"ยาว (m)": st.column_config.NumberColumn(format="%.0f")})
+
+    st.markdown("**📋 ทุกตัวชี้วัด × รัศมี** (ถนนเดิมในพื้นที่ที่แสดง เฉลี่ยถ่วงความยาว)")
+    summary = lru_get(ctx.cache, ("scn-summary",), scn.result, lambda: scenario_summary(
+        net, view.result, mask, scenario, scn.result, scn.mask))
+    st.dataframe(summary.assign(
+        measure=[MEASURES[m]["title"] for m in summary["measure"]],
+        radius=[radius_label_for(r) for r in summary["radius"]],
+    ).rename(columns={
+        "measure": "ตัวชี้วัด", "radius": "รัศมี", "mean_before": "เฉลี่ยก่อน", "mean_after": "เฉลี่ยหลัง",
+        "change_pct": "เปลี่ยน (%)", "up": "ช่วงที่ขึ้น", "down": "ช่วงที่ลง", "segments": "ช่วงที่แสดง",
+        "new_value": "ค่าถนนใหม่", "new_rank": "ถนนใหม่สูงกว่า (%)"}), hide_index=True, width="stretch",
+        column_config={name: st.column_config.NumberColumn(format=fmt) for name, fmt in (
+            ("เฉลี่ยก่อน", "%.3f"), ("เฉลี่ยหลัง", "%.3f"), ("เปลี่ยน (%)", "%+.2f"), ("ค่าถนนใหม่", "%.3f"),
+            ("ถนนใหม่สูงกว่า (%)", "%.0f"))})
+
+    def changes(order: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "ถนน": net.seg_name[s] or "(ไม่มีชื่อ)", "ประเภท": net.seg_highway[s] or "—",
+            "ยาว (m)": float(net.seg_len[s]), f"{index_name} ก่อน": float(cmp["before"][s]),
+            f"{index_name} หลัง": float(cmp["after"][s]), "เปลี่ยน (%)": float(cmp["pct"][s]),
+            "คะแนนก่อน": float(cmp["score_before"][s]), "คะแนนหลัง": float(cmp["score_after"][s]),
+            "Lat": float(net.seg_mid_lonlat[s, 1]), "Lon": float(net.seg_mid_lonlat[s, 0]),
+        } for s in order])
+
+    ranked = np.flatnonzero(shown & np.isfinite(cmp["pct"]))
+    ranked = ranked[np.argsort(-cmp["pct"][ranked], kind="stable")]
+    n_top = max(int(d["top_n"]), 5)
+    number_formats = {"ยาว (m)": "%.0f", f"{index_name} ก่อน": "%.3f", f"{index_name} หลัง": "%.3f",
+                      "เปลี่ยน (%)": "%+.1f", "คะแนนก่อน": "%.0f", "คะแนนหลัง": "%.0f", "Lat": "%.5f", "Lon": "%.5f"}
+    config = {name: st.column_config.NumberColumn(format=fmt) for name, fmt in number_formats.items()}
+    gained, lost = ranked[cmp["pct"][ranked] > 0][:n_top], ranked[cmp["pct"][ranked] < 0][::-1][:n_top]
+    t1, t2 = st.columns(2)
+    for column, picked, title, empty in ((t1, gained, "🔺 ถนนเดิมที่ค่าดัชนีเพิ่มขึ้นมากที่สุด", "ไม่มีช่วงที่เพิ่มขึ้น"),
+                                         (t2, lost, "🔻 ถนนเดิมที่ค่าดัชนีลดลงมากที่สุด", "ไม่มีช่วงที่ลดลง")):
+        with column:
+            st.markdown(f"**{title}** ({MEASURES[d['measure']]['thai']})")
+            if len(picked):
+                st.dataframe(changes(picked), hide_index=True, width="stretch", column_config=config)
+            else:
+                st.caption(empty)
+
+    anchor = rent_anchor_point()
+    if anchor is not None:
+        snapped = net.to_xy(anchor["lon"], anchor["lat"])
+        nearest = int(np.argmin(np.hypot(*(net.seg_mid_xy - snapped).T)))
+        if np.isfinite(cmp["pct"][nearest]):
+            st.info(f"📍 ช่วงถนนใกล้จุดยึด CBD ของ Rent Gradient ({anchor['source']}) — {_segment_label(net, nearest)}: "
+                    f"{index_name} {cmp['before'][nearest]:.3f} → {cmp['after'][nearest]:.3f} "
+                    f"(**{cmp['pct'][nearest]:+.1f}%**) · คะแนน {cmp['score_before'][nearest]:.0f} → "
+                    f"{cmp['score_after'][nearest]:.0f}")
+
+    frame = segment_table(net, view.result, mask)[["segment", "name", "highway", "length_m", "mid_lat", "mid_lon"]]
+    rows = frame["segment"].to_numpy()
+    frame = frame.assign(**{f"{index_name}_before": np.round(cmp["before"][rows], 6),
+                            f"{index_name}_after": np.round(cmp["after"][rows], 6),
+                            "change_pct": np.round(cmp["pct"][rows], 3),
+                            "score_before": np.round(cmp["score_before"][rows], 1),
+                            "score_after": np.round(cmp["score_after"][rows], 1)})
+    st.download_button("⬇️ CSV ก่อน/หลัง (ตัวชี้วัด·รัศมีที่แสดง)", frame.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"road_scenario_{d['measure']}_{d['rkey']}.csv", mime="text/csv")
+    with st.expander("📖 จำลองอย่างไร / อ่านผลอย่างไร"):
+        _render_scenario_help()
 
 
 def _analytics_inputs() -> Tuple[Any, Any, bool, Any, bool]:
@@ -7589,6 +8336,7 @@ VIEWS: Tuple[Tuple[str, str, Callable[[Ctx], None]], ...] = (
     ("gold", "💎 Golden Spots", view_gold),
     ("marks", "📍 หมุด & ราคาประเมิน", view_marks),
     ("space_syntax", "🧭 Space Syntax", view_space_syntax),
+    ("road_scenario", "🛣️ จำลองถนนใหม่", view_road_scenario),
     ("theory", "📐 หลักการ", view_theory),
 )
 
@@ -8005,6 +8753,7 @@ def _ss_load_network(demo: bool) -> bool:
     meta.update(nodes=graph.number_of_nodes(), edges=graph.number_of_edges())
     state.update({SS_NET: net, SS_META: meta, SS_KEY: key, SS_MASK: _display_mask(net, meta)})
     state.pop(SS_RESULT, None)
+    state.pop(SS_SCENARIO, None)                     # its roads were joined into the network that just left
     return True
 
 
@@ -8031,7 +8780,45 @@ def perform_space_syntax(intents: Dict[str, Any]) -> None:
     result.meta["params"] = dict(params)
     state[SS_RESULT] = result
     state[SS_RUN] = int(state.get(SS_RUN, 0)) + 1
+    state.pop(SS_SCENARIO, None)                     # it was compared with the result just replaced
     st.toast(f"✅ Space Syntax เสร็จใน {result.meta['seconds']:.1f} วินาที", icon="🧭")
+
+
+def perform_road_scenario(_intents: Dict[str, Any]) -> None:
+    """Join the typed roads into the analysed network and analyse it again with exactly the base result's settings."""
+    state = st.session_state
+    net, base = state.get(SS_NET), state.get(SS_RESULT)
+    if net is None or base is None:
+        st.error("ยังไม่มีผล Space Syntax — กด 🧮 วิเคราะห์ Space Syntax (หรือ 🧪 ตัวอย่างเชียงของ) ก่อน "
+                 "แล้วจึงจำลองถนนใหม่")
+        return
+    try:
+        scenario = add_new_roads(net, parse_new_roads(state.get("ss_new_roads", "")),
+                                 snap_m=float(state["ss_snap_m"]), connect_crossings=bool(state["ss_cross"]))
+    except ValueError as exc:
+        st.error(f"จำลองถนนใหม่ไม่ได้: {exc}")
+        return
+    bar = st.progress(0.0, text="กำลังวิเคราะห์โครงข่ายที่มีถนนใหม่…")
+    try:
+        after = analyse_network(
+            scenario.net, kind=base.kind, radii=base.radii, with_choice=base.with_choice,
+            topological_turn_deg=base.turn_deg,
+            progress=lambda frac, text: bar.progress(min(max(frac, 0.0), 1.0), text=f"กำลังวิเคราะห์ถนนใหม่… {text}"))
+    except Exception as exc:  # size limits and anything unexpected
+        st.error(f"วิเคราะห์ถนนใหม่ไม่สำเร็จ: {type(exc).__name__}: {exc}")
+        return
+    finally:
+        bar.empty()
+    after.meta["params"] = base.meta.get("params")
+    mask = _display_mask(scenario.net, state.get(SS_META) or {}) | scenario.is_new
+    state[SS_SCENARIO] = {"scenario": scenario, "result": after, "mask": mask, "base_result": base}
+    state["show_road_scenario"] = True               # the layers panel and the views are drawn after the stages
+    state["analytics_view"] = "road_scenario"
+    alone = [road["name"] for road in scenario.roads if road["joins"] + road["crossings"] == 0]
+    if alone:
+        st.warning(f"ถนนใหม่ไม่ได้เชื่อมกับถนนเดิมเลย: {', '.join(alone)} — วางปลายให้ชิดถนนเดิม "
+                   "หรือเพิ่มระยะต่อ", icon="⚠️")
+    st.toast(f"✅ จำลองถนนใหม่ {len(scenario.roads)} เส้นเสร็จใน {after.meta['seconds']:.1f} วินาที", icon="🛣️")
 
 
 # ============================================================================
@@ -8045,6 +8832,8 @@ STAGES: Tuple[Tuple[str, Callable[[Dict[str, Any]], None]], ...] = (
     ("rent", lambda intents: perform_rent_gradient()),
     ("anchor", lambda intents: perform_automated_anchor()),
     ("space_syntax", perform_space_syntax),
+    ("road_scenario", perform_road_scenario),
+    ("road_scenario_clear", lambda intents: st.session_state.pop(SS_SCENARIO, None)),
 )
 
 
