@@ -318,11 +318,11 @@ def make_state(monkeypatch):
     return state
 
 
-def scenario_state(monkeypatch, road_name="ถนนใหม่"):
+def scenario_state(monkeypatch, road_name="ถนนใหม่", points=((100, 120), (300, 120))):
     state = make_state(monkeypatch)
     net = rg.build_segment_network(comb())
     base = analyse(net, radii=(150.0, None))
-    scenario = rg.add_new_roads(net, [road((100, 120), (300, 120), name=road_name)])
+    scenario = rg.add_new_roads(net, [road(*points, name=road_name)])
     after = analyse(scenario.net, radii=(150.0, None))
     state.update({rg.SS_NET: net, rg.SS_RESULT: base, rg.SS_MASK: everything(net), rg.SS_META: {"source": "test"},
                   rg.SS_SCENARIO: {"scenario": scenario, "result": after, "mask": everything(scenario.net),
@@ -343,13 +343,77 @@ def test_the_layer_shows_the_scenario_of_the_analysis_on_screen_only(monkeypatch
     drawn, warnings = rg.render_layers(ctx, folium.Map())
     assert not warnings and "road_scenario" in [layer.id for layer in drawn]
     html = rg.legend_stack(ctx, drawn).box_html
-    assert "ถนนตัดใหม่: Integration (NAIN) เปลี่ยน" in html and rg.NEW_ROAD_COLOR in html
+    assert "ถนนตัดใหม่: Integration (NAIN) หลังตัดถนน" in html and rg.NEW_ROAD_COLOR in html
     lines = [c for c in rg.draw_road_scenario(ctx)._children.values() if isinstance(c, rg.CompactLines)]
-    assert [c.hover_js for c in lines] == ["true", "false"]             # one hover handler for the whole group
+    assert [c.hover_js for c in lines] == ["true", "false", "false"]    # one hover handler for the whole group
     state[rg.SS_RESULT] = analyse(state[rg.SS_NET], radii=(None,))     # a new analysis: the old scenario is stale
     assert rg.build_ctx().scenario is None and not layer.available(rg.build_ctx())
     rg.StateManager.clear_results(["space_syntax"])                    # cleared together with its analysis
     assert rg.SS_SCENARIO not in state
+
+
+def rows(payload, key="rows_json"):
+    return rg.json.loads(payload[key])
+
+
+def test_the_layer_wears_the_space_syntax_colours_of_old_score_plus_change(monkeypatch):
+    state = scenario_state(monkeypatch)
+    ctx = rg.build_ctx()
+    payload, layer = rg.scenario_payload(ctx), rg.ss_payload(ctx)
+    cmp, shown = payload["cmp"], np.flatnonzero(ctx.ss.mask)
+    assert payload["mode"] == "score" == state["ss_scn_color"]
+    # before = the score the Space Syntax layer shows; before + change = after, and the colour is the after-score's
+    assert np.allclose(cmp["score_before"][shown], layer["scaled"]["score"][shown])
+    assert np.allclose(cmp["score_before"] + cmp["score_change"], cmp["score_after"])
+    t = np.clip(cmp["score_after"][shown] / 100.0, 0.0, 1.0)
+    assert [r[0] for r in rows(payload)] == rg.gradient_hex(t, ctx.ss.display["palette"])
+    changed = shown[np.abs(cmp["score_change"][shown]) > 1.0][0]
+    tip = rows(payload)[list(shown).index(changed)][2][1]
+    b, c, a = (float(cmp[k][changed]) for k in ("score_before", "score_change", "score_after"))
+    assert tip == f"{b:.1f} {c:+.1f} = {a:.1f}"
+    # the new roads: same palette, on a magenta outline
+    new = np.flatnonzero(ctx.scenario.scenario.is_new)
+    t_new = np.clip(cmp["score_after_all"][new] / 100.0, 0.0, 1.0)
+    assert [r[0] for r in rows(payload, "new_json")] == rg.gradient_hex(t_new, ctx.ss.display["palette"])
+    assert {r[0] for r in rows(payload, "casing_json")} == {rg.NEW_ROAD_COLOR} and len(rows(payload, "casing_json")) == len(new)
+    html = rg.legend_road_scenario(ctx)
+    assert "หลังตัดถนน" in html and rg.gradient_css(ctx.ss.display["palette"]) in html
+
+
+def test_a_road_that_changes_nothing_looks_exactly_like_the_space_syntax_layer(monkeypatch):
+    scenario_state(monkeypatch, points=((0, 1000), (200, 1000)))
+    ctx = rg.build_ctx()
+    cmp = rg.scenario_payload(ctx)["cmp"]
+    shown = np.flatnonzero(ctx.ss.mask)
+    assert np.all(cmp["score_change"][shown] == 0.0)
+    assert [r[0] for r in rows(rg.scenario_payload(ctx))] == list(rg.ss_payload(ctx)["columns"]["color"][shown])
+
+
+def test_the_layer_can_still_show_the_change_itself(monkeypatch):
+    state = scenario_state(monkeypatch)
+    state["ss_scn_color"] = "delta"
+    ctx = rg.build_ctx()
+    payload = rg.scenario_payload(ctx)
+    assert payload["mode"] == "delta" and rows(payload, "casing_json") == []
+    shown = np.flatnonzero(ctx.ss.mask)
+    assert [r[0] for r in rows(payload)] == rg.delta_hex(payload["cmp"]["pct"][shown], payload["limit"])
+    assert {r[0] for r in rows(payload, "new_json")} == {rg.NEW_ROAD_COLOR}
+    assert "เปลี่ยน" in rg.legend_road_scenario(ctx) and "เท่าเดิม" in rg.legend_road_scenario(ctx)
+    assert "ss_scn_color" in rg.KEEP_ALIVE_KEYS and "ss_scn_color" in rg.SESSION_KEYS_TO_SAVE
+    assert not rg._setting_ok("ss_scn_color", "rainbow") and rg._setting_ok("ss_scn_color", "delta")
+    state["ss_scn_color"] = "rainbow"                                    # a stale value falls back to the colours
+    assert rg.scenario_payload(rg.build_ctx())["mode"] == "score"
+
+
+def test_scores_on_the_old_scale_add_up_and_may_pass_100():
+    scaled = rg.scale_scores(np.array([1.0, 2.0, 3.0]), "linear")
+    assert rg.score_on_scale(scaled, [1.0, 2.0, 3.5, np.nan]).tolist()[:3] == [0.0, 50.0, 125.0]
+    assert np.isnan(rg.score_on_scale(scaled, [np.nan])[0])
+    assert rg.score_on_scale(rg.scale_scores(np.array([2.0, 2.0]), "linear"), [2.0, 5.0]).tolist() == [50.0, 50.0]
+    q = rg.scale_scores(np.array([1.0, 2.0, 3.0, 4.0, 5.0]), "quantile")
+    on = rg.score_on_scale(q, [0.0, 1.0, 3.0, 5.0, 9.0])
+    assert on.tolist() == [0.0, 0.0, 50.0, 100.0, 100.0]                  # bounded, never decreasing
+    assert np.allclose(rg.score_on_scale(q, [1.0, 2.0, 3.0, 4.0, 5.0]), q["score"])
 
 
 def test_road_names_typed_by_the_user_cannot_inject_html_into_the_map(monkeypatch):
