@@ -227,6 +227,40 @@ def test_delta_colours_run_blue_gray_red_and_clip():
     assert rg.delta_limit(np.linspace(0, 100, 101), np.ones(101, bool)) == pytest.approx(95.0)
 
 
+def test_the_total_is_the_existing_roads_plus_the_new_roads():
+    net = rg.build_segment_network(comb())
+    base = analyse(net)
+    scenario = rg.add_new_roads(net, [road((100, 120), (300, 120))])
+    after = analyse(scenario.net)
+    mask = everything(net)
+    c = rg.compare_scenario(net, base, mask, scenario, after, everything(scenario.net), "integration", "n")
+    totals = c["totals"]
+    km = net.seg_len / 1000.0
+    assert totals["before"] == pytest.approx((c["before"] * km).sum())
+    assert totals["old_after"] == pytest.approx((c["after"] * km).sum())
+    new = scenario.is_new
+    assert totals["new"] == pytest.approx((after.integration["n"][new] * scenario.net.seg_len[new] / 1000).sum())
+    assert totals["new"] > 0 and totals["after"] == pytest.approx(totals["old_after"] + totals["new"])
+    assert totals["km_new"] == pytest.approx(0.2, rel=1e-3) and totals["km_old"] == pytest.approx(km.sum())
+    assert totals["mean_after"] == pytest.approx(totals["after"] / (totals["km_old"] + totals["km_new"]))
+    assert totals["change_pct"] == pytest.approx(100 * (totals["after"] / totals["before"] - 1))
+    # split pieces are counted once, by their own length: Σ over the scenario's existing pieces is the same total
+    pieces = ~new
+    assert totals["old_after"] == pytest.approx(
+        (after.integration["n"][pieces] * scenario.net.seg_len[pieces] / 1000).sum())
+
+
+def test_a_road_that_touches_nothing_only_adds_its_own_score_to_the_total():
+    net = rg.build_segment_network(comb())
+    base = analyse(net)
+    scenario = rg.add_new_roads(net, [road((0, 1000), (200, 1000))])
+    after = analyse(scenario.net)
+    totals = rg.compare_scenario(net, base, everything(net), scenario, after, everything(scenario.net),
+                                 "integration", "n")["totals"]
+    assert totals["old_after"] == totals["before"] and totals["old_change_pct"] == 0.0
+    assert totals["after"] == pytest.approx(totals["before"] + totals["new"]) and totals["change_pct"] > 0
+
+
 def test_scenario_summary_has_a_row_per_measure_and_radius():
     net = rg.build_segment_network(comb())
     base = analyse(net, radii=(150.0, None))
@@ -236,6 +270,10 @@ def test_scenario_summary_has_a_row_per_measure_and_radius():
     assert list(zip(table["measure"], table["radius"])) == [
         ("integration", "150"), ("integration", "n"), ("choice", "150"), ("choice", "n")]
     assert (table["segments"] == net.n_segments).all() and table["new_value"].notna().all()
+    assert np.allclose(table["total_after"], table["total_old_after"] + table["total_new"])
+    integration = table[table["measure"] == "integration"]                 # NACH may be 0 everywhere locally
+    assert (table["total_new"] >= 0).all() and (integration["total_new"] > 0).all()
+    assert integration["network_change_pct"].notna().all()
     assert (table.loc[table["measure"] == "integration", "up"] > 0).all()   # the linked teeth
 
 
@@ -357,8 +395,13 @@ def test_page_simulates_a_new_road_from_the_suggestion_and_clears_it(monkeypatch
     next(b for b in at.button if "จำลองคะแนน" in b.label).click().run()
     assert not at.exception and not at.error
     assert at.radio(key="analytics_view").value == "road_scenario"
-    assert [m.label for m in at.metric][-4:] == ["ถนนใหม่", "คะแนนถนนใหม่ (NAIN)", "NAIN เฉลี่ยถนนเดิม",
-                                                 "ช่วงถนนเดิม ขึ้น / ลง ≥ 1%"]
+    assert [m.label for m in at.metric][-8:] == [
+        "ถนนใหม่", "คะแนนถนนใหม่ (NAIN)", "NAIN เฉลี่ยถนนเดิม", "ช่วงถนนเดิม ขึ้น / ลง ≥ 1%",
+        "ก่อนตัดถนน (ถนนเดิม)", "ถนนเดิม หลังตัดถนน", "+ ถนนใหม่", "= รวมหลังตัดถนน"]
+    total = {m.label: m.value for m in at.metric}
+    old_after, new, after = (float(total[k].lstrip("+").replace(",", ""))
+                             for k in ("ถนนเดิม หลังตัดถนน", "+ ถนนใหม่", "= รวมหลังตัดถนน"))
+    assert after == pytest.approx(old_after + new, abs=0.011)          # the page shows old + new = total
     names = [c.layer_name for c in rendered[-1]._children.values() if isinstance(c, Layer) and c.overlay]
     assert "🛣️ ถนนตัดใหม่ (คะแนนเปลี่ยน)" in names
     at.radio(key="ss_measure").set_value("choice").run()
