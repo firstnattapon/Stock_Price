@@ -332,7 +332,7 @@ SESSION_KEYS_TO_SAVE: List[str] = [
     "show_anchor_boundary", "show_evidence_zone", "show_evidence_clusters",
     "show_space_syntax", "ss_kind", "ss_turn", "ss_radii", "ss_choice", "ss_radius_m", "ss_network",
     "ss_palette", "ss_scale", "ss_thick", "ss_topn",
-    "show_road_scenario", "ss_new_roads", "ss_snap_m", "ss_cross",
+    "show_road_scenario", "ss_new_roads", "ss_snap_m", "ss_cross", "ss_scn_color",
     "rent_samples", "rent_unit_label", "show_rent_rings", "show_rent_nodes",
     "anchor_lat", "anchor_lon", "anchor_radius_km",
     "anchor_use_evidence", "rent_use_evidence_anchor",
@@ -457,7 +457,7 @@ SS_SCENARIO = "ss_scenario"
 # Widgets that are drawn only sometimes: Streamlit forgets the state of a widget that was not rendered, so the
 # value is written back on every run (see StateManager.initialize) and survives the widget being hidden.
 KEEP_ALIVE_KEYS = ("ss_turn", "ss_measure", "ss_view_radius", "ss_palette", "ss_scale", "ss_thick", "ss_topn",
-                   "ss_view", "cityplan_opacity", "dol_opacity", "railway_opacity")
+                   "ss_view", "cityplan_opacity", "dol_opacity", "railway_opacity", "ss_scn_color")
 
 # Road scenario (🛣️ ถนนตัดใหม่ → คะแนน Space Syntax ก่อน/หลัง) — engine: SECTION 3c
 ROAD_SCENARIO_CONFIG: Dict[str, Any] = {
@@ -477,6 +477,12 @@ ROAD_SCENARIO_CONFIG: Dict[str, Any] = {
 DELTA_STOPS: List[str] = ["#2166ac", "#4393c3", "#92c5de", "#b0b0b0", "#f4a582", "#d6604d", "#b2182b"]
 
 NEW_ROAD_COLOR = "#ff2bd6"
+
+# how the 🛣️ layer colours the roads
+SCN_COLOR_MODES: Dict[str, str] = {
+    "score": "คะแนนหลังตัดถนน (สีเดียวกับชั้น Space Syntax)",
+    "delta": "ส่วนที่เปลี่ยน Δ (แดง เพิ่ม · น้ำเงิน ลด)",
+}
 
 
 # ============================================================================
@@ -534,6 +540,7 @@ _SETTING_CHECKS: Dict[str, Callable[[Any], bool]] = {
     "ss_topn": lambda v: _is_number(v) and 0 <= v <= 25,
     "ss_snap_m": lambda v: _is_number(v) and 5 <= v <= 100,
     "ss_new_roads": lambda v: isinstance(v, str) and len(v) <= 20_000,
+    "ss_scn_color": lambda v: v in SCN_COLOR_MODES,
 }
 
 
@@ -660,6 +667,7 @@ class StateManager:
         "ss_new_roads": "",
         "ss_snap_m": int(ROAD_SCENARIO_CONFIG["snap_m"]),
         "ss_cross": True,
+        "ss_scn_color": "score",
         "analytics_view": "curve",
     }
 
@@ -5331,6 +5339,25 @@ def scenario_totals(base_net: SegmentNetwork, base_mask: np.ndarray, scenario: R
     }
 
 
+def score_on_scale(scaled: Dict[str, Any], values: Any) -> np.ndarray:
+    """0–100 score of ``values`` on an existing :func:`scale_scores` mapping (NaN stays NaN).
+
+    Linear uses exactly the formula of ``scale_scores`` and is *not* clipped: a road that beats the old best scores
+    above 100, and old score + change = new score. Quantile = the share (%) of the old values below.
+    """
+    x = np.asarray(values, dtype=float)
+    out = np.full(x.shape, np.nan)
+    ok = np.isfinite(x)
+    if not np.isfinite(scaled["vmin"]):
+        return out
+    if scaled["mode"] == "quantile":
+        out[ok] = 100.0 * t_for_values(scaled, x[ok])
+    else:
+        span = scaled["vmax"] - scaled["vmin"]
+        out[ok] = 100.0 * ((x[ok] - scaled["vmin"]) / span) if span > 0 else 50.0
+    return out
+
+
 def compare_scenario(
     base_net: SegmentNetwork, base_result: AnalysisResult, base_mask: np.ndarray, scenario: RoadScenario,
     after: AnalysisResult, after_mask: np.ndarray, measure: str, rkey: str, scale: str = "linear",
@@ -5338,16 +5365,18 @@ def compare_scenario(
     """Before → after of one index (``measure`` at radius ``rkey``) for every existing segment, and the new roads.
 
     ``pct`` is the change of the raw index in percent (NaN where it was 0) — comparable between the two networks.
-    ``score_*`` is the 0–100 map score of each network on its own scale (what the Space Syntax layer would show),
-    so a road can gain index and still lose score when the new road outranks it. ``new_rank`` = share (%) of the
-    shown existing segments whose index is below the new roads' length-weighted mean. ``totals`` = the whole
-    network, existing roads + new roads (:func:`scenario_totals`).
+    ``score_*`` is the 0–100 map score, before *and* after on the scale of the network before the road (the one the
+    Space Syntax layer is coloured with, ``scaled``), so ``score_before + score_change = score_after`` and the
+    after-colours mean the same as the layer's (``score_after_all`` = every scenario segment, new roads included).
+    ``new_rank`` = share (%) of the shown existing segments whose index is below the new roads' length-weighted
+    mean. ``totals`` = the whole network, existing roads + new roads (:func:`scenario_totals`).
     """
     before = measure_values(base_result, measure, rkey)
     after_all = measure_values(after, measure, rkey)
     after_base = scenario_values(scenario, after_all)
     s_before = scale_scores(before, scale, base_mask)
-    s_after = scale_scores(after_all, scale, after_mask)
+    score_before, score_after = score_on_scale(s_before, before), score_on_scale(s_before, after_base)
+    score_after_all = score_on_scale(s_before, after_all)
     delta = after_base - before
     pct = np.full(len(before), np.nan)
     np.divide(100.0 * delta, np.abs(before), out=pct, where=np.isfinite(delta) & (np.abs(before) > 1e-12))
@@ -5359,9 +5388,9 @@ def compare_scenario(
                 else float("nan"))
     return {
         "before": before, "after": after_base, "after_all": after_all, "delta": delta, "pct": pct,
-        "score_before": s_before["score"], "score_after": scenario_values(scenario, s_after["score"]),
-        "score_after_all": s_after["score"], "new_value": new_value,
-        "new_score": _weighted_mean(s_after["score"][new], weights[new]), "new_rank": new_rank,
+        "scaled": s_before, "score_before": score_before, "score_after": score_after,
+        "score_change": score_after - score_before, "score_after_all": score_after_all, "new_value": new_value,
+        "new_score": _weighted_mean(score_after_all[new], weights[new]), "new_rank": new_rank,
         "totals": scenario_totals(base_net, base_mask, scenario, before, after_base, after_all),
     }
 
@@ -6367,8 +6396,9 @@ def _options_space_syntax(ctx: Ctx, locked: bool) -> None:
 
 
 # ------------------------------------------------------------------ Road scenario layer (🛣️ ถนนตัดใหม่)
-SCN_TIP_HEADS: Tuple[str, ...] = ("ถนน:", "ค่าดัชนีเปลี่ยน (%):", "ค่าดัชนี ก่อน → หลัง:", "คะแนน ก่อน → หลัง:")
-NEW_ROAD_TIP_HEADS: Tuple[str, ...] = ("ถนนใหม่:", "ค่าดัชนี:", "คะแนน (0–100):", "ยาวช่วงนี้ (m):")
+SCN_TIP_HEADS: Tuple[str, ...] = ("ถนน:", "คะแนน เดิม + เปลี่ยน = ใหม่:", "ค่าดัชนี ก่อน → หลัง:",
+                                  "ค่าดัชนีเปลี่ยน (%):")
+NEW_ROAD_TIP_HEADS: Tuple[str, ...] = ("ถนนใหม่:", "คะแนน (สเกลเดิม):", "ค่าดัชนี:", "ยาวช่วงนี้ (m):")
 
 
 @dataclass(frozen=True)
@@ -6384,49 +6414,83 @@ def _signed(value: float, digits: int = 1) -> str:
     return "—" if not np.isfinite(value) else f"{value:+.{digits}f}"
 
 
-def scenario_payload(ctx: Ctx) -> Dict[str, Any]:
-    """Comparison, colours and map rows of the road scenario for the current measure / radius / scale.
+def _score_sum(before: float, change: float, after: float) -> str:
+    """Tooltip text "50.0 +5.0 = 55.0" (old score + change = new score)."""
+    if not np.isfinite(before):
+        return "—"
+    return f"{before:.1f} {_signed(change)} = {after:.1f}"
 
-    Kept in the session LRU per (scenario result, options), like :func:`ss_payload`.
+
+def scn_color_mode(ctx: Ctx) -> str:
+    mode = ctx.show.get("ss_scn_color")
+    return mode if mode in SCN_COLOR_MODES else "score"
+
+
+def scenario_payload(ctx: Ctx) -> Dict[str, Any]:
+    """Comparison, colours and map rows of the road scenario for the current measure / radius / scale / colours.
+
+    ``score`` colours (default): every road wears the Space Syntax layer's colour of its score *after* the new road,
+    on the layer's own scale — old score 50, change +5 → the colour of 55; the new roads too, outlined in magenta.
+    ``delta`` colours: the change of the index, blue (down) → gray → red (up). Kept in the session LRU per
+    (scenario result, options), like :func:`ss_payload`.
     """
     view, scn = ctx.ss, ctx.scenario
-    d = view.display
-    key = ("scn", d["measure"], d["rkey"], d["scale"], d["thick"])
+    d, mode = view.display, scn_color_mode(ctx)
+    key = ("scn", d["measure"], d["rkey"], d["scale"], d["thick"], d["palette"], mode)
 
     def build() -> Dict[str, Any]:
         net, scenario = view.net, scn.scenario
         cmp = compare_scenario(net, view.result, view.mask, scenario, scn.result, scn.mask,
                                d["measure"], d["rkey"], d["scale"])
         limit = delta_limit(cmp["pct"], view.mask)
-        colors = delta_hex(cmp["pct"], limit)
+
+        def by_score(score: np.ndarray, floor: float = 0.0) -> Tuple[List[str], np.ndarray]:
+            t = np.clip(score / 100.0, 0.0, 1.0)                      # NaN stays NaN → gray
+            weight = (1.2 + 2.6 * np.nan_to_num(t, nan=0.0)) if d["thick"] else np.full(len(t), 2.0)
+            return gradient_hex(t, d["palette"]), np.maximum(weight, floor)
+
+        if mode == "score":
+            colors, weights = by_score(cmp["score_after"])
+        else:
+            colors = delta_hex(cmp["pct"], limit)
+            pct = np.nan_to_num(np.abs(cmp["pct"]), nan=0.0)
+            weights = 1.6 + 3.0 * np.minimum(pct / limit, 1.0) if d["thick"] else np.full(len(pct), 2.2)
         rows: List[list] = []
         for s in np.flatnonzero(view.mask):
-            pct = cmp["pct"][s]
-            weight = 1.6 + 3.0 * min(abs(pct) / limit, 1.0) if d["thick"] and np.isfinite(pct) else 2.2
             flat = np.round(net.seg_lonlat[s][:, ::-1], COORD_DECIMALS).ravel().tolist()
-            rows.append([colors[s], round(float(weight), 2), [
-                escape(_segment_label(net, s)), _signed(pct),
-                f"{_short(float(cmp['before'][s]))} → {_short(float(cmp['after'][s]))}",
-                f"{_short(round(float(cmp['score_before'][s]), 1))} → {_short(round(float(cmp['score_after'][s]), 1))}",
+            rows.append([colors[s], round(float(weights[s]), 2), [
+                escape(_segment_label(net, s)),
+                _score_sum(float(cmp["score_before"][s]), float(cmp["score_change"][s]), float(cmp["score_after"][s])),
+                f"{_short(float(cmp['before'][s]))} → {_short(float(cmp['after'][s]))}", _signed(cmp["pct"][s]),
             ], flat])
+        new = np.flatnonzero(scenario.is_new)
+        if mode == "score":
+            new_colors, new_weights = by_score(cmp["score_after_all"][new], floor=3.0)
+        else:
+            new_colors, new_weights = [NEW_ROAD_COLOR] * len(new), np.full(len(new), 6.0)
         new_rows: List[list] = []
-        for s in np.flatnonzero(scenario.is_new):
+        casing: List[list] = []                        # magenta outline under the new roads in score colours
+        for i, s in enumerate(new):
             flat = np.round(scenario.net.seg_lonlat[s][:, ::-1], COORD_DECIMALS).ravel().tolist()
-            new_rows.append([NEW_ROAD_COLOR, 6.0, [
-                escape(str(scenario.net.seg_name[s])), _short(float(cmp["after_all"][s])),
-                _short(round(float(cmp["score_after_all"][s]), 1)), round(float(scenario.net.seg_len[s]))], flat])
-        return {"cmp": cmp, "limit": limit, "rows_json": _json_js(rows), "new_json": _json_js(new_rows)}
+            new_rows.append([new_colors[i], round(float(new_weights[i]), 2), [
+                escape(str(scenario.net.seg_name[s])), _short(round(float(cmp["score_after_all"][s]), 1)),
+                _short(float(cmp["after_all"][s])), round(float(scenario.net.seg_len[s]))], flat])
+            if mode == "score":
+                casing.append([NEW_ROAD_COLOR, round(float(new_weights[i]) + 4.0, 2), 0, flat])
+        return {"cmp": cmp, "limit": limit, "mode": mode, "rows_json": _json_js(rows),
+                "new_json": _json_js(new_rows), "casing_json": _json_js(casing)}
 
     return lru_get(ctx.cache, key, scn.result, build)
 
 
 def draw_road_scenario(ctx: Ctx) -> Any:
-    """Existing roads coloured by how much their index changes (red = up … blue = down), the new roads on top in
-    magenta and a white dot at every junction they make."""
+    """Every road after the new road is built, in the Space Syntax layer's colours (old score + change), or by the
+    change itself (Δ, red = up … blue = down); the new roads on top (magenta) and a white dot at every junction."""
     payload = scenario_payload(ctx)
     group = folium.FeatureGroup(name="🛣️ ถนนตัดใหม่ (คะแนนเปลี่ยน)", show=True)
     CompactLines(payload["rows_json"], heads=SCN_TIP_HEADS, opacity=0.95, hover=True).add_to(group)
-    # the hover handler is the group's, so the second set of lines must not add it again (it would stack)
+    # the hover handler is the group's, so the other sets of lines must not add it again (it would stack)
+    CompactLines(payload["casing_json"], opacity=1.0).add_to(group)
     CompactLines(payload["new_json"], heads=NEW_ROAD_TIP_HEADS, opacity=1.0).add_to(group)
     for lon, lat in ctx.scenario.scenario.junctions:
         folium.CircleMarker([float(lat), float(lon)], radius=4, color="#000000", weight=1.5, fill=True,
@@ -6436,6 +6500,21 @@ def draw_road_scenario(ctx: Ctx) -> Any:
 
 def legend_road_scenario(ctx: Ctx) -> str:
     payload, d = scenario_payload(ctx), ctx.ss.display
+    if payload["mode"] == "score":
+        ticks = payload["cmp"]["scaled"]["ticks"]
+        if not ticks:
+            return ""
+        return (
+            f'<div style="font-weight:600; margin-bottom:4px;">ถนนตัดใหม่: {MEASURES[d["measure"]]["title"]} '
+            'หลังตัดถนน</div>'
+            f'<div style="height:12px; border-radius:3px; background:{gradient_css(d["palette"])};"></div>'
+            '<div style="display:flex; justify-content:space-between; margin-top:2px;">'
+            f'<span>🔵 ต่ำ {ticks[0][1]:.2f}</span><span>{ticks[-1][1]:.2f} สูง 🔴</span></div>'
+            '<div class="rg-muted" style="margin-top:3px;">สี = คะแนนเดิม + ส่วนที่เปลี่ยน '
+            '(สเกลเดียวกับชั้น Space Syntax)</div>'
+            + _legend_swatch_row(NEW_ROAD_COLOR, "ขอบม่วง = ถนนใหม่ · ⚪ ทางแยกใหม่")
+            + f'<div class="rg-muted">{SCALE_MODES[d["scale"]]} · {radius_label_for(d["rkey"])}</div>'
+        )
     limit = payload["limit"]
     shown = f"{limit:.0f}" if limit >= 10 else f"{limit:.1f}"
     stops = ", ".join(f"{c} {100 * i / (len(DELTA_STOPS) - 1):.0f}%" for i, c in enumerate(DELTA_STOPS))
@@ -6447,6 +6526,14 @@ def legend_road_scenario(ctx: Ctx) -> str:
         + _legend_swatch_row(NEW_ROAD_COLOR, "ถนนใหม่ · ⚪ ทางแยกใหม่")
         + f'<div class="rg-muted">{radius_label_for(d["rkey"])}</div>'
     )
+
+
+def _options_road_scenario(ctx: Ctx, locked: bool) -> None:
+    """How the 🛣️ layer is coloured (changing it never recomputes the scenario)."""
+    st.radio("สีของชั้นถนนตัดใหม่", list(SCN_COLOR_MODES), key="ss_scn_color", format_func=SCN_COLOR_MODES.get,
+             disabled=locked, help="คะแนนหลังตัดถนน: ถนนช่วงที่คะแนนเดิม 50 เปลี่ยน +5 จะเป็นสีของคะแนน 55 "
+                                   "บนสเกลเดียวกับชั้น Space Syntax")
+    st.caption("ตัวชี้วัด / รัศมี / สเกล / ชุดสี ตามชั้น 🧭 Space Syntax · ปิดชั้น Space Syntax ไว้จะเห็นชั้นนี้ชัดขึ้น")
 
 
 # ------------------------------------------------------------------ the registry (bottom → top)
@@ -6502,10 +6589,10 @@ LAYERS: Tuple[Layer, ...] = (
           legend=legend_space_syntax, legend_rank=30, options=_options_space_syntax, panel_rank=10),
     Layer("road_scenario", "🛣️ ถนนตัดใหม่ (คะแนนเปลี่ยน)", "โครงข่ายถนน", draw_road_scenario,
           lambda c: c.ss is not None and c.scenario is not None, show_key="show_road_scenario",
-          label="🛣️ ถนนตัดใหม่: คะแนนเปลี่ยน (Δ)",
-          hint="🔴 ค่าดัชนีเพิ่ม · เทา = เท่าเดิม · 🔵 ลดลง — ตัวชี้วัด/รัศมีตามชั้น Space Syntax (ปิดชั้นนั้นจะเห็นชัดขึ้น)",
+          label="🛣️ ถนนตัดใหม่ (คะแนนเปลี่ยน)",
+          hint="สีเดียวกับชั้น Space Syntax: คะแนนเดิม + ส่วนที่เปลี่ยน (เช่น 50 + 5 → สีของ 55) · ถนนใหม่ขอบม่วง",
           requires="จำลองที่แผง 🛣️ จำลองถนนตัดใหม่ ก่อน", legend=legend_road_scenario, legend_rank=31,
-          panel_rank=11),
+          options=_options_road_scenario, panel_rank=11),
     Layer("railway", "แนวรถไฟเชียงของ", "บริบท & overlay", draw_railway, _always, show_key="show_railway",
           label="🚂 แนวรถไฟเชียงของ", options=_options_railway),
     Layer("top_node", "Integration Center (จุดตรงกลางที่สุด)", "โครงข่ายถนน", draw_top_node,
@@ -6516,7 +6603,7 @@ LAYERS: Tuple[Layer, ...] = (
 )
 
 SHOW_KEYS: Tuple[str, ...] = tuple(layer.show_key for layer in LAYERS if layer.show_key) + (
-    "cityplan_opacity", "dol_opacity", "railway_opacity", "map_style_name") + SS_DISPLAY_KEYS
+    "cityplan_opacity", "dol_opacity", "railway_opacity", "map_style_name", "ss_scn_color") + SS_DISPLAY_KEYS
 
 
 def build_ctx() -> Ctx:
@@ -7871,8 +7958,9 @@ def _render_scenario_help() -> None:
 
 ##### อ่านผลอย่างไร
 - **ค่าดัชนีเปลี่ยน (%)** = NAIN / NACH หลัง − ก่อน เทียบกับก่อน — ใช้เทียบได้ตรง ๆ (สีบนแผนที่ใช้ค่านี้)
-- **คะแนน 0–100** = ตำแหน่งในโครงข่ายของตัวเอง (เหมือนชั้น Space Syntax) — ถนนเดิมอาจค่าดัชนีขึ้นแต่คะแนนลด
-  เพราะถนนใหม่แซงขึ้นไปอยู่บนสุด
+- **คะแนน** ก่อนและหลังใช้ **สเกลเดียวกับชั้น Space Syntax** (สเกลของโครงข่ายก่อนตัดถนน) จึงบวกกันได้ตรง ๆ:
+  คะแนนเดิม 50 + เปลี่ยน 5 = 55 และชั้น 🛣️ บนแผนที่ระบายสีของ 55 · Linear เกิน 100 ได้
+  (= สูงกว่าถนนที่ดีที่สุดเดิม สีแดงสุด) · เลือกสีแบบ Δ ได้ที่ ชั้นแผนที่ → 🛣️ ถนนตัดใหม่
 - **➕ คะแนนรวม = ถนนเดิม + ถนนใหม่** = Σ (ค่าดัชนี × ความยาว km): ก่อน = ถนนเดิม · หลัง = ถนนเดิมชุดเดียวกัน
   (ค่าหลังมีถนนใหม่) **บวก** ถนนใหม่ — ส่วนที่เพิ่มแยกได้ว่ามาจากถนนเดิมดีขึ้นเท่าไร และถนนใหม่เพิ่มเข้ามาเท่าไร ·
   เฉลี่ยทั้งโครงข่าย = คะแนนรวม ÷ ความยาวรวม (เดิม + ใหม่) บอกว่าโดยเฉลี่ยดีขึ้นจริงหรือแค่ถนนยาวขึ้น
@@ -7913,7 +8001,8 @@ def view_road_scenario(ctx: Ctx) -> None:
     c1.metric("ถนนใหม่", f"{sum(r['length_m'] for r in scenario.roads) / 1000:,.2f} km")
     c2.metric(f"คะแนนถนนใหม่ ({index_name})",
               "—" if not np.isfinite(cmp["new_score"]) else f"{cmp['new_score']:.0f}/100",
-              help="คะแนน 0–100 ในโครงข่ายหลังตัดถนน (ถ่วงความยาวทุกช่วงของถนนใหม่)")
+              help="คะแนนบนสเกลเดียวกับชั้น Space Syntax (ถ่วงความยาวทุกช่วงของถนนใหม่) — "
+                   "เกิน 100 = สูงกว่าถนนที่ดีที่สุดเดิม")
     c3.metric(f"{index_name} เฉลี่ยถนนเดิม",
               "—" if not np.isfinite(totals["old_mean_after"]) else f"{totals['old_mean_after']:.3f}",
               None if not np.isfinite(totals["old_change_pct"]) else f"{totals['old_change_pct']:+.2f}%",
@@ -7977,7 +8066,8 @@ def view_road_scenario(ctx: Ctx) -> None:
             "ถนน": net.seg_name[s] or "(ไม่มีชื่อ)", "ประเภท": net.seg_highway[s] or "—",
             "ยาว (m)": float(net.seg_len[s]), f"{index_name} ก่อน": float(cmp["before"][s]),
             f"{index_name} หลัง": float(cmp["after"][s]), "เปลี่ยน (%)": float(cmp["pct"][s]),
-            "คะแนนก่อน": float(cmp["score_before"][s]), "คะแนนหลัง": float(cmp["score_after"][s]),
+            "คะแนนเดิม": float(cmp["score_before"][s]), "+ เปลี่ยน": float(cmp["score_change"][s]),
+            "= คะแนนใหม่": float(cmp["score_after"][s]),
             "Lat": float(net.seg_mid_lonlat[s, 1]), "Lon": float(net.seg_mid_lonlat[s, 0]),
         } for s in order])
 
@@ -7985,7 +8075,8 @@ def view_road_scenario(ctx: Ctx) -> None:
     ranked = ranked[np.argsort(-cmp["pct"][ranked], kind="stable")]
     n_top = max(int(d["top_n"]), 5)
     number_formats = {"ยาว (m)": "%.0f", f"{index_name} ก่อน": "%.3f", f"{index_name} หลัง": "%.3f",
-                      "เปลี่ยน (%)": "%+.1f", "คะแนนก่อน": "%.0f", "คะแนนหลัง": "%.0f", "Lat": "%.5f", "Lon": "%.5f"}
+                      "เปลี่ยน (%)": "%+.1f", "คะแนนเดิม": "%.1f", "+ เปลี่ยน": "%+.1f", "= คะแนนใหม่": "%.1f",
+                      "Lat": "%.5f", "Lon": "%.5f"}
     config = {name: st.column_config.NumberColumn(format=fmt) for name, fmt in number_formats.items()}
     gained, lost = ranked[cmp["pct"][ranked] > 0][:n_top], ranked[cmp["pct"][ranked] < 0][::-1][:n_top]
     t1, t2 = st.columns(2)
@@ -8005,8 +8096,8 @@ def view_road_scenario(ctx: Ctx) -> None:
         if np.isfinite(cmp["pct"][nearest]):
             st.info(f"📍 ช่วงถนนใกล้จุดยึด CBD ของ Rent Gradient ({anchor['source']}) — {_segment_label(net, nearest)}: "
                     f"{index_name} {cmp['before'][nearest]:.3f} → {cmp['after'][nearest]:.3f} "
-                    f"(**{cmp['pct'][nearest]:+.1f}%**) · คะแนน {cmp['score_before'][nearest]:.0f} → "
-                    f"{cmp['score_after'][nearest]:.0f}")
+                    f"(**{cmp['pct'][nearest]:+.1f}%**) · คะแนน "
+                    f"{_score_sum(cmp['score_before'][nearest], cmp['score_change'][nearest], cmp['score_after'][nearest])}")
 
     frame = segment_table(net, view.result, mask)[["segment", "name", "highway", "length_m", "mid_lat", "mid_lon"]]
     rows = frame["segment"].to_numpy()
@@ -8014,6 +8105,7 @@ def view_road_scenario(ctx: Ctx) -> None:
                             f"{index_name}_after": np.round(cmp["after"][rows], 6),
                             "change_pct": np.round(cmp["pct"][rows], 3),
                             "score_before": np.round(cmp["score_before"][rows], 1),
+                            "score_change": np.round(cmp["score_change"][rows], 1),
                             "score_after": np.round(cmp["score_after"][rows], 1)})
     new = np.flatnonzero(scenario.is_new)                # the new roads' own rows: no "before", only "after"
     frame = pd.concat([frame, pd.DataFrame({
