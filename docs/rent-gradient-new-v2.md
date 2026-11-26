@@ -171,6 +171,15 @@ LAYERS = (...,
 
 selector ของ `MAP_CHROME_CSS` ขึ้นต้นด้วย `html .leaflet-container` เพื่อชนะ CSS ของ Leaflet/ปลั๊กอินที่ folium วางไว้หลังบล็อกนี้ · เพิ่มสีใหม่ = เพิ่มตัวแปร `--rg-*` ในทั้งสองชุด (เทสต์เช็คว่าทุก `var()` มีนิยามและชุดมืดไม่นิยามชื่อที่ชุดขาวไม่มี)
 
+### 6c) ออกแบบ UI/UX ใหม่ (Cartographic Spatial Studio — คงหลักการเดิม 100%)
+
+- **แกนคำนวณ (ENGINE · SECTION 3, 3b, 3c), ค่าคงที่ข้อมูล, คีย์ state และรูปแบบ config JSON คงเดิมทุกตัวอักษร** — เปลี่ยนเฉพาะเปลือก UI/UX ใน SECTION 5 / `PAGE_CONFIG` / `main()`
+- **Design System ที่ตามธีมสว่าง/มืดอัตโนมัติ (`APP_THEME_CSS`)**: ผสมพื้นผิว/เส้นขอบด้วย `color-mix(in srgb, currentColor …)` และใช้สีเน้น architectural teal เดียว (`#1f7a70`) ครอบปุ่มหลัก, multiselect chip, checkbox และแท็บที่เลือก (ไม่ใช้สีตายตัวที่อ่านไม่ออกบนอีกธีม) + ฟอนต์ `IBM Plex Sans Thai` / `IBM Plex Mono` พร้อม `tabular-nums`
+- **Masthead + แถบสถานะ 5 ขั้นตอนแบบสด (`render_header`)**: แสดงความคืบหน้าของขั้นตอนหลัก (① หมุด & Isochrone → ② CBD / Anchor → ③ Network & Golden → ④ Space Syntax → ⑤ Rent Gradient) พร้อมพิกัดศูนย์กลางและโหมดการคำนวณปัจจุบัน
+- **KPI Strip + แถบสถานะชั้นแผนที่ (`render_metrics_row`, `_render_map_bar`)**: การ์ด KPI 5 ช่องพร้อมคำอธิบายบริบทใต้ตัวเลข และแถบสรุปชั้นแผนที่ที่เปิดอยู่เชื่อมต่อกับกรอบแผนที่ + `MAP_CHROME_CSS` แบบ frosted-glass ที่ผ่าน contrast ≥ 4.5:1 ทั้งโหมดขาวและมืด
+- **Sidebar แบบ Progressive Disclosure**: จัดหมวดหมู่ `ขั้นตอนการวิเคราะห์` (①–⑥ เรียงตาม pipeline โดยเปิดเฉพาะขั้น ① เริ่มต้น ลดความยาวเลื่อนหน้าจอ) และ `การแสดงผลแผนที่` (`🗺️ ชั้นแผนที่` แสดงตัวนับชั้นเปิด/ทั้งหมดต่อกลุ่ม + ย้ายคำอธิบายชั้นเป็น tooltip `help=`) พร้อมขยายความกว้าง sidebar ให้ตาราง Calibration (`Lat / Lon / ราคา`) และปุ่มลบหมุด `✕` ไม่ถูกตัด
+- **Analytics Studio ใต้แผนที่ (`render_views`, `_build_bid_rent_figure`)**: แปลงตัวเลือก radio เป็นแถบแท็บแบบ segmented control แถวเดียวพร้อมหัวข้อบริบทต่อมุมมอง, เพิ่มพื้นที่แรเงาใต้เส้นโค้ง Bid-Rent และปรับสไตล์การ์ด `📐 หลักการ` โดยคงข้อความเดิมทั้งหมด
+
 ### ledger: ครบทุกฟังก์ชัน ไม่ตกหล่น
 
 | ไฟล์ต้นทาง | ชื่อระดับบนสุด | คงเดิมตรงตัว | แก้ (มีเหตุผลรายตัว) | แทนด้วยโค้ด SHELL | ตกหล่น |

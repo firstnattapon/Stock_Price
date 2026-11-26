@@ -82,9 +82,10 @@ from scipy.stats import rankdata
 # ============================================================================
 
 PAGE_CONFIG: Dict[str, Any] = {
-    "page_title": "Rent Gradient v2 — ชั้นแผนที่",
+    "page_title": "Rent Gradient — Bid-Rent & Space Syntax Studio",
     "page_icon": "🗺️",
     "layout": "wide",
+    "initial_sidebar_state": "expanded",
 }
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -5606,58 +5607,672 @@ def _parse_kml_to_geojson() -> Optional[Dict[str, Any]]:
 # ----------------------------------------------------------------------------
 
 REMEMBER_VIEW: bool = True        # keep the user's zoom/centre when the map is rebuilt (browser sessionStorage)
-MAP_HEIGHT_PX: int = 900
+MAP_HEIGHT_PX: int = 760
 COORD_DECIMALS: int = 5           # ~1 m: all a screen can show; the stored results keep full precision
-TOOLTIP_STYLE = ("<style>.rgtip th{text-align:left;padding-right:8px;font-weight:600}"
-                 ".rgtip td{text-align:right}</style>")
+TOOLTIP_STYLE = (
+    "<style>"
+    ".rgtip{border-collapse:collapse;font-size:12px;line-height:1.45;"
+    "font-family:'IBM Plex Sans Thai',system-ui,-apple-system,sans-serif}"
+    ".rgtip th{text-align:left;padding:2px 10px 2px 0;font-weight:500;opacity:.75;white-space:nowrap}"
+    ".rgtip td{text-align:right;padding:2px 0;font-weight:600;font-variant-numeric:tabular-nums}"
+    "</style>"
+)
 
 # Colours of the map's own panels (legend, layer control, buttons, scale, popups, tooltips) in white and in black.
-# Neutral surfaces, softened text (no pure black/white), one calm link colour; the data colours drawn on the map
+# Neutral surfaces, softened text (no pure black/white), one calm teal link colour; the data colours drawn on the map
 # are not touched. The map lives in an iframe that cannot see Streamlit's theme, so both palettes are carried here
 # and ``prefers-color-scheme`` picks one (the setting Streamlit's "use system setting" follows).
 # Selectors start with ``html .leaflet-container`` so they outrank Leaflet's and the plugins' own stylesheets,
 # which folium puts after this block.
 MAP_CHROME_CSS = """<style>
-:root{--rg-panel:rgba(255,255,255,.95);--rg-text:#1f2328;--rg-muted:#59636e;--rg-line:rgba(31,35,40,.16);
---rg-hover:rgba(128,128,128,.18);--rg-link:#2a6db0;--rg-shadow:0 1px 6px rgba(0,0,0,.16);--rg-icon:none}
-@media (prefers-color-scheme:dark){:root{--rg-panel:rgba(33,37,43,.95);--rg-text:#e6e8eb;--rg-muted:#a0a9b3;
---rg-line:rgba(255,255,255,.18);--rg-link:#7db3ea;--rg-shadow:0 1px 8px rgba(0,0,0,.6);--rg-icon:invert(.88)}}
+:root{--rg-panel:rgba(255,255,255,.94);--rg-text:#181c20;--rg-muted:#525d68;--rg-line:rgba(24,28,32,.14);
+--rg-hover:rgba(15,118,110,.10);--rg-link:#0f6260;--rg-shadow:0 4px 16px rgba(15,23,42,.12),0 1px 3px rgba(15,23,42,.08);--rg-icon:none}
+@media (prefers-color-scheme:dark){:root{--rg-panel:rgba(22,26,32,.93);--rg-text:#eef1f5;--rg-muted:#9aa5b1;
+--rg-line:rgba(255,255,255,.14);--rg-hover:rgba(45,212,191,.14);--rg-link:#5eead4;--rg-shadow:0 6px 22px rgba(0,0,0,.55),0 1px 4px rgba(0,0,0,.4);--rg-icon:invert(.88)}}
+html .leaflet-container{font-family:'IBM Plex Sans Thai',system-ui,-apple-system,sans-serif}
 html .leaflet-container a{color:var(--rg-link)}
 html .leaflet-container .leaflet-bar,html .leaflet-container .leaflet-control-layers,
 html .leaflet-container .leaflet-control-measure{background:var(--rg-panel);color:var(--rg-text);
-border:1px solid var(--rg-line);box-shadow:var(--rg-shadow);background-clip:padding-box}
+border:1px solid var(--rg-line);box-shadow:var(--rg-shadow);background-clip:padding-box;
+border-radius:10px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow:hidden}
+html .leaflet-container .leaflet-control-layers-expanded{padding:8px 11px 9px}
 html .leaflet-container .leaflet-bar a{background-color:transparent;color:var(--rg-text);
-border-bottom-color:var(--rg-line)}
+border-bottom-color:var(--rg-line);width:32px;height:32px;line-height:32px;transition:background-color .14s ease}
+html .leaflet-container .leaflet-bar a:last-child{border-bottom:none}
 html .leaflet-container .leaflet-bar a:hover,html .leaflet-container .leaflet-bar a:focus{
 background-color:var(--rg-hover)}
 html .leaflet-container .leaflet-bar a.leaflet-disabled{color:var(--rg-muted)}
-html .leaflet-container .leaflet-control-layers-separator{border-top-color:var(--rg-line)}
+html .leaflet-container .leaflet-control-layers-separator{border-top-color:var(--rg-line);margin:6px 0}
+html .leaflet-container .leaflet-control-layers label{display:flex;align-items:center;gap:6px;padding:2px 0;font-size:12.5px}
 html .leaflet-container .leaflet-control-layers-toggle,html .leaflet-container .fullscreen-icon,
 html .leaflet-container .leaflet-control-measure .leaflet-control-measure-toggle{filter:var(--rg-icon)}
 html .leaflet-container .leaflet-control-measure h3,html .leaflet-container .leaflet-control-measure .tasks,
 html .leaflet-container .leaflet-control-measure .results .group{border-color:var(--rg-line)}
 html .leaflet-container .leaflet-control-scale-line,html .leaflet-container .leaflet-control-attribution,
 html .leaflet-container .leaflet-control-mouseposition{background:var(--rg-panel);color:var(--rg-text);
-text-shadow:none;box-shadow:none}
-html .leaflet-container .leaflet-control-scale-line{border-color:var(--rg-muted)}
+text-shadow:none;box-shadow:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+html .leaflet-container .leaflet-control-mouseposition{padding:3px 9px;border-radius:7px;
+border:1px solid var(--rg-line);font-size:11.5px;font-variant-numeric:tabular-nums;margin-bottom:6px;margin-right:6px}
+html .leaflet-container .leaflet-control-scale-line{border-color:var(--rg-muted);border-radius:0 0 4px 4px;font-size:11px}
 html .leaflet-container .leaflet-popup-content-wrapper,html .leaflet-container .leaflet-popup-tip{
 background:var(--rg-panel);color:var(--rg-text);box-shadow:var(--rg-shadow)}
-html .leaflet-container a.leaflet-popup-close-button{color:var(--rg-muted)}
+html .leaflet-container .leaflet-popup-content-wrapper{border-radius:10px;border:1px solid var(--rg-line);
+backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+html .leaflet-container a.leaflet-popup-close-button{color:var(--rg-muted);padding:6px 8px 0 0}
 html .leaflet-container .leaflet-tooltip{background:var(--rg-panel);border-color:var(--rg-line);
-color:var(--rg-text);box-shadow:var(--rg-shadow)}
+color:var(--rg-text);box-shadow:var(--rg-shadow);border-radius:8px;padding:6px 10px;
+backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
 html .leaflet-container .leaflet-tooltip-top:before{border-top-color:var(--rg-panel)}
 html .leaflet-container .leaflet-tooltip-bottom:before{border-bottom-color:var(--rg-panel)}
 html .leaflet-container .leaflet-tooltip-left:before{border-left-color:var(--rg-panel)}
 html .leaflet-container .leaflet-tooltip-right:before{border-right-color:var(--rg-panel)}
 .rg-legend{background:var(--rg-panel);color:var(--rg-text);border:1px solid var(--rg-line);
-box-shadow:var(--rg-shadow)}
+box-shadow:var(--rg-shadow);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.rg-legend-sep{height:1px;background:var(--rg-line);margin:7px 0}
 .rg-muted{color:var(--rg-muted)}
-html .leaflet-container .rg-layer-all{display:flex;gap:4px;margin:0 0 5px;padding-bottom:5px;
+html .leaflet-container .rg-layer-all{display:flex;gap:5px;margin:0 0 7px;padding-bottom:7px;
 border-bottom:1px solid var(--rg-line)}
-html .leaflet-container .rg-layer-all button{flex:1;font:inherit;padding:2px 8px;cursor:pointer;white-space:nowrap;
-color:var(--rg-text);background:transparent;border:1px solid var(--rg-line);border-radius:4px}
+html .leaflet-container .rg-layer-all button{flex:1;font:inherit;font-size:11.5px;font-weight:600;padding:4px 9px;
+cursor:pointer;white-space:nowrap;color:var(--rg-text);background:transparent;border:1px solid var(--rg-line);
+border-radius:6px;transition:background-color .14s ease,border-color .14s ease}
 html .leaflet-container .rg-layer-all button:hover,html .leaflet-container .rg-layer-all button:focus{
-background:var(--rg-hover)}
+background:var(--rg-hover);border-color:var(--rg-link)}
+</style>"""
+
+# Theme-adaptive UI design system for the Streamlit shell (Light & Dark native via currentColor + one calm teal accent).
+APP_THEME_CSS = """<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap');
+
+:root {
+    --rg-accent: #1f7a70;
+    --rg-accent-hover: #17635b;
+    --rg-accent-soft: color-mix(in srgb, #1f7a70 13%, transparent);
+    --rg-accent-border: color-mix(in srgb, #1f7a70 38%, transparent);
+    --rg-surface: color-mix(in srgb, currentColor 3.2%, transparent);
+    --rg-surface-strong: color-mix(in srgb, currentColor 5.5%, transparent);
+    --rg-line: color-mix(in srgb, currentColor 13%, transparent);
+    --rg-line-strong: color-mix(in srgb, currentColor 22%, transparent);
+    --rg-muted: color-mix(in srgb, currentColor 64%, transparent);
+    --rg-font: 'IBM Plex Sans Thai', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    --rg-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+}
+
+html, body, [data-testid="stAppViewContainer"] {
+    font-family: var(--rg-font) !important;
+}
+
+[data-testid="stHeader"] {
+    background: transparent !important;
+}
+
+.block-container {
+    padding-top: 1.4rem !important;
+    padding-bottom: 2.5rem !important;
+    max-width: 1680px !important;
+}
+
+h1, h2, h3, h4 {
+    font-family: var(--rg-font) !important;
+    letter-spacing: -0.015em;
+}
+
+/* ---- Sidebar geometry & calm rhythm ---- */
+@media (min-width: 960px) {
+    section[data-testid="stSidebar"] {
+        min-width: 348px !important;
+        max-width: 392px !important;
+    }
+}
+
+section[data-testid="stSidebar"] > div:first-child {
+    border-right: 1px solid var(--rg-line);
+}
+
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    gap: 0.55rem;
+}
+
+section[data-testid="stSidebar"] [data-testid="stExpander"] {
+    border: 1px solid var(--rg-line) !important;
+    border-radius: 12px !important;
+    background: var(--rg-surface) !important;
+    overflow: hidden;
+    transition: border-color 160ms ease;
+}
+
+section[data-testid="stSidebar"] [data-testid="stExpander"]:hover {
+    border-color: var(--rg-line-strong) !important;
+}
+
+section[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+    padding: 0.65rem 0.85rem !important;
+    font-weight: 600 !important;
+    font-size: 0.89rem !important;
+}
+
+section[data-testid="stSidebar"] [data-testid="stExpanderDetails"] {
+    padding: 0.25rem 0.85rem 0.85rem !important;
+}
+
+.rg-sb-eyebrow {
+    font-size: 0.70rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--rg-muted);
+    margin: 0.55rem 0 0.1rem 0.15rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.rg-sb-eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rg-line);
+}
+
+.rg-sb-brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.15rem 0 0.35rem;
+    border-bottom: 1px solid var(--rg-line);
+    margin-bottom: 0.25rem;
+}
+
+.rg-sb-brand-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.rg-sb-brand-badge {
+    font-size: 0.70rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--rg-accent-border);
+    background: var(--rg-accent-soft);
+    color: inherit;
+}
+
+.rg-layer-group {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0.65rem 0 0.2rem;
+    padding-bottom: 0.22rem;
+    border-bottom: 1px solid var(--rg-line);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: var(--rg-muted);
+}
+
+.rg-layer-count {
+    font-family: var(--rg-mono);
+    font-size: 0.70rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--rg-surface-strong);
+    color: inherit;
+}
+
+/* Tuck "ยังไม่มีข้อมูล" hints right beneath their checkbox */
+section[data-testid="stSidebar"] [data-testid="stCheckbox"] + div [data-testid="stCaptionContainer"],
+section[data-testid="stSidebar"] .rg-layer-req {
+    margin-top: -0.35rem;
+}
+
+[class*="st-key-rg_layer_opts_"] {
+    margin: 0.1rem 0 0.45rem 0.4rem;
+    padding: 0.55rem 0.7rem;
+    border-left: 2px solid var(--rg-accent);
+    border-radius: 0 8px 8px 0;
+    background: var(--rg-surface-strong);
+}
+
+/* ---- Cohesive Architectural Teal Buttons & Controls ---- */
+button[kind="primary"],
+button[data-testid="stBaseButton-primary"] {
+    background: var(--rg-accent) !important;
+    border: 1px solid var(--rg-accent) !important;
+    color: #ffffff !important;
+    border-radius: 9px !important;
+    font-weight: 600 !important;
+    transition: background 150ms ease, transform 120ms ease, box-shadow 150ms ease !important;
+}
+
+button[kind="primary"]:hover:not(:disabled),
+button[data-testid="stBaseButton-primary"]:hover:not(:disabled) {
+    background: var(--rg-accent-hover) !important;
+    border-color: var(--rg-accent-hover) !important;
+    box-shadow: 0 3px 10px color-mix(in srgb, #1f7a70 28%, transparent) !important;
+}
+
+button[kind="secondary"],
+button[data-testid="stBaseButton-secondary"] {
+    border-radius: 9px !important;
+    border: 1px solid var(--rg-line-strong) !important;
+    font-weight: 500 !important;
+    transition: border-color 140ms ease, background 140ms ease !important;
+}
+
+button[kind="secondary"]:hover:not(:disabled),
+button[data-testid="stBaseButton-secondary"]:hover:not(:disabled) {
+    border-color: var(--rg-accent-border) !important;
+    background: var(--rg-accent-soft) !important;
+}
+
+div[data-testid="stHorizontalBlock"] button {
+    padding: 0.25rem 0.55rem !important;
+    min-height: 2.25rem;
+}
+
+/* Multiselect chips & checkboxes: calm architectural teal instead of default red */
+[data-testid="stMultiSelectTagsContainer"] span[data-tag],
+span[data-baseweb="tag"] {
+    background-color: var(--rg-accent) !important;
+    color: #ffffff !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+}
+
+[data-testid="stCheckbox"] label:has(input:checked) > div:first-of-type {
+    background-color: var(--rg-accent) !important;
+    border-color: var(--rg-accent) !important;
+}
+
+[data-testid="stSlider"] [role="slider"] {
+    background-color: var(--rg-accent) !important;
+    border-color: var(--rg-accent) !important;
+}
+
+[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
+    color: var(--rg-accent) !important;
+    font-family: var(--rg-mono) !important;
+    font-weight: 600 !important;
+}
+
+/* Compact requirement hints inside sidebar Layers panel */
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+    font-size: 0.75rem !important;
+    line-height: 1.38 !important;
+}
+
+/* ---- Main Canvas Masthead & Live Pipeline Stepper ---- */
+.rg-masthead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px 20px;
+    padding: 0.15rem 0 0.8rem;
+    border-bottom: 1px solid var(--rg-line);
+    margin-bottom: 0.72rem;
+}
+
+@media (min-width: 1120px) {
+    .rg-masthead {
+        flex-wrap: nowrap;
+    }
+}
+
+.rg-masthead-title {
+    margin: 0;
+    font-size: clamp(1.30rem, 1.9vw, 1.62rem);
+    font-weight: 700;
+    letter-spacing: -0.022em;
+    line-height: 1.2;
+}
+
+.rg-masthead-sub {
+    margin: 0.22rem 0 0;
+    font-size: 0.79rem;
+    color: var(--rg-muted);
+    line-height: 1.42;
+}
+
+.rg-masthead-pills {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.rg-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--rg-line);
+    background: var(--rg-surface);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+.rg-pill-accent {
+    border-color: var(--rg-accent-border);
+    background: var(--rg-accent-soft);
+    font-weight: 600;
+}
+
+.rg-pill-mono {
+    font-family: var(--rg-mono);
+    font-size: 0.72rem;
+}
+
+.rg-stepper {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+    margin: 0 0 0.65rem;
+}
+
+@media (max-width: 960px) {
+    .rg-stepper {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+.rg-step {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--rg-line);
+    background: var(--rg-surface);
+    min-width: 0;
+    transition: border-color 160ms ease, background 160ms ease;
+}
+
+.rg-step.is-done {
+    border-color: var(--rg-accent-border);
+    background: var(--rg-accent-soft);
+}
+
+.rg-step-num {
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    border-radius: 7px;
+    display: grid;
+    place-items: center;
+    font-size: 0.74rem;
+    font-weight: 700;
+    font-family: var(--rg-mono);
+    border: 1px solid var(--rg-line-strong);
+    background: var(--rg-surface-strong);
+    color: var(--rg-muted);
+}
+
+.rg-step.is-done .rg-step-num {
+    background: var(--rg-accent);
+    border-color: var(--rg-accent);
+    color: #ffffff;
+}
+
+.rg-step-body {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.rg-step-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rg-step-meta {
+    font-size: 0.71rem;
+    color: var(--rg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- Elevated KPI Metric Cards ---- */
+[data-testid="stMetric"] {
+    background: var(--rg-surface);
+    border: 1px solid var(--rg-line);
+    border-radius: 12px;
+    padding: 13px 15px 12px;
+    transition: border-color 160ms ease, transform 160ms ease;
+}
+
+[data-testid="stMetric"]:hover {
+    border-color: var(--rg-accent-border);
+}
+
+[data-testid="stMetricLabel"] p {
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    color: var(--rg-muted) !important;
+    letter-spacing: 0.01em;
+}
+
+[data-testid="stMetricValue"] {
+    font-size: 1.42rem !important;
+    font-weight: 700 !important;
+    font-variant-numeric: tabular-nums !important;
+    letter-spacing: -0.02em !important;
+    line-height: 1.25 !important;
+}
+
+[data-testid="stMetricDelta"] {
+    font-size: 0.74rem !important;
+    font-variant-numeric: tabular-nums !important;
+}
+
+/* Hide directional arrow icon on neutral top KPI status subtitles */
+.st-key-rg_kpi_strip [data-testid="stMetricDelta"] svg {
+    display: none !important;
+}
+
+.st-key-rg_kpi_strip [data-testid="stMetricDelta"] {
+    padding-left: 0 !important;
+    gap: 0 !important;
+}
+
+/* ---- Map Context Strip & Precision Map Frame ---- */
+.st-key-rg_map_frame {
+    gap: 0 !important;
+    margin-top: 0.35rem;
+}
+
+.st-key-rg_map_frame > [data-testid="stElementContainer"] {
+    margin-bottom: 0 !important;
+}
+
+.rg-map-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 14px;
+    padding: 8px 13px;
+    border-radius: 12px 12px 0 0;
+    border: 1px solid var(--rg-line-strong);
+    border-bottom: none;
+    background: var(--rg-surface);
+    font-size: 0.77rem;
+}
+
+.rg-map-bar-left {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.rg-map-bar-right {
+    color: var(--rg-muted);
+    font-size: 0.74rem;
+    white-space: nowrap;
+}
+
+.rg-layer-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--rg-line);
+    background: var(--rg-surface-strong);
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+.rg-layer-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.st-key-rg_map_frame iframe {
+    border: 1px solid var(--rg-line-strong) !important;
+    border-radius: 0 0 14px 14px !important;
+    box-shadow: 0 8px 24px color-mix(in srgb, currentColor 6%, transparent);
+    display: block;
+}
+
+/* ---- Segmented Control Navigation for Analytics Views (Streamlit 1.50–1.67+) ---- */
+.st-key-rg_view_nav,
+.st-key-rg_ss_subnav {
+    margin-top: 0.65rem;
+}
+
+.st-key-rg_view_nav [data-testid="stRadio"] div[role="radiogroup"],
+.st-key-rg_ss_subnav [data-testid="stRadio"] div[role="radiogroup"] {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 4px !important;
+    padding: 4px !important;
+    border-radius: 12px !important;
+    border: 1px solid var(--rg-line) !important;
+    background: var(--rg-surface) !important;
+    width: 100% !important;
+}
+
+.st-key-rg_ss_subnav [data-testid="stRadio"] div[role="radiogroup"] {
+    display: inline-flex !important;
+    width: auto !important;
+}
+
+.st-key-rg_view_nav label[data-testid="stRadioOption"],
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"],
+.st-key-rg_view_nav label[data-baseweb="radio"],
+.st-key-rg_ss_subnav label[data-baseweb="radio"] {
+    margin: 0 !important;
+    padding: 6px 11px !important;
+    border-radius: 8px !important;
+    border: 1px solid transparent !important;
+    cursor: pointer !important;
+    gap: 0 !important;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease !important;
+}
+
+/* Hide default circular radio dots inside segmented tab bars */
+.st-key-rg_view_nav label[data-testid="stRadioOption"] > div > div:not([data-testid="stMarkdownContainer"]),
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"] > div > div:not([data-testid="stMarkdownContainer"]),
+.st-key-rg_view_nav label[data-baseweb="radio"] > div:first-child,
+.st-key-rg_ss_subnav label[data-baseweb="radio"] > div:first-child {
+    display: none !important;
+}
+
+.st-key-rg_view_nav label[data-testid="stRadioOption"]:hover,
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"]:hover,
+.st-key-rg_view_nav label[data-baseweb="radio"]:hover,
+.st-key-rg_ss_subnav label[data-baseweb="radio"]:hover {
+    background: var(--rg-surface-strong) !important;
+}
+
+.st-key-rg_view_nav label[data-testid="stRadioOption"][data-selected="true"],
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"][data-selected="true"],
+.st-key-rg_view_nav label[data-testid="stRadioOption"]:has(input:checked),
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"]:has(input:checked),
+.st-key-rg_view_nav label[data-baseweb="radio"]:has(input:checked),
+.st-key-rg_ss_subnav label[data-baseweb="radio"]:has(input:checked) {
+    background: var(--rg-accent-soft) !important;
+    border-color: var(--rg-accent-border) !important;
+}
+
+.st-key-rg_view_nav label[data-testid="stRadioOption"][data-selected="true"] p,
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"][data-selected="true"] p,
+.st-key-rg_view_nav label[data-testid="stRadioOption"]:has(input:checked) p,
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"]:has(input:checked) p,
+.st-key-rg_view_nav label[data-baseweb="radio"]:has(input:checked) p,
+.st-key-rg_ss_subnav label[data-baseweb="radio"]:has(input:checked) p {
+    font-weight: 700 !important;
+}
+
+.st-key-rg_view_nav label[data-testid="stRadioOption"] p,
+.st-key-rg_ss_subnav label[data-testid="stRadioOption"] p,
+.st-key-rg_view_nav label[data-baseweb="radio"] p,
+.st-key-rg_ss_subnav label[data-baseweb="radio"] p {
+    font-size: 0.815rem !important;
+    white-space: nowrap !important;
+    margin: 0 !important;
+}
+
+/* ---- Analytics Studio Container ---- */
+.st-key-rg_analytics_card {
+    border: 1px solid var(--rg-line);
+    border-radius: 14px;
+    padding: 1.05rem 1.25rem 1.2rem;
+    background: var(--rg-surface);
+    margin-top: 0.35rem;
+}
+
+.rg-view-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 16px;
+    padding-bottom: 0.75rem;
+    margin-bottom: 0.85rem;
+    border-bottom: 1px solid var(--rg-line);
+}
+
+.rg-view-title {
+    margin: 0;
+    font-size: 1.02rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.rg-view-desc {
+    margin: 0.14rem 0 0;
+    font-size: 0.80rem;
+    color: var(--rg-muted);
+}
+
+/* Dataframes & Callouts */
+[data-testid="stDataFrame"],
+[data-testid="stDataEditor"] {
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+[data-testid="stAlert"] {
+    border-radius: 10px !important;
+}
 </style>"""
 PANEL_GROUPS: Tuple[str, ...] = ("โครงข่ายถนน", "Rent Gradient", "Automated Anchor", "บริบท & overlay")
 
@@ -5924,10 +6539,10 @@ class LegendBox(MacroElement):
         self._name = "LegendBox"
         # layout here, colours in MAP_CHROME_CSS (.rg-legend) so the box follows white / black
         self.box_html = (
-            '<div class="rg-legend" style="position:fixed; bottom:18px; left:12px; z-index:9999; max-width:250px; '
-            'border-radius:8px; padding:8px 10px; font-size:12px; line-height:1.45; '
-            'font-family:system-ui, -apple-system, sans-serif;">'
-            + '<div style="height:6px;"></div>'.join(sections)
+            '<div class="rg-legend" style="position:fixed; bottom:52px; left:12px; z-index:9999; max-width:268px; '
+            'border-radius:10px; padding:10px 12px; font-size:12px; line-height:1.45; '
+            'font-family:\'IBM Plex Sans Thai\', system-ui, -apple-system, sans-serif;">'
+            + '<div class="rg-legend-sep"></div>'.join(sections)
             + "</div>"
         )
 
@@ -5935,8 +6550,8 @@ class LegendBox(MacroElement):
 def _legend_swatch_row(color_css: str, label: str, extra_style: str = "") -> str:
     """HTML แถวเดียวของ legend: สี่เหลี่ยมสี + ป้ายข้อความ."""
     return (
-        '<div style="display:flex; align-items:center; gap:6px; margin:1px 0;">'
-        f'<span style="display:inline-block; width:14px; height:14px; border-radius:3px; '
+        '<div style="display:flex; align-items:center; gap:7px; margin:2px 0;">'
+        f'<span style="display:inline-block; flex:0 0 13px; width:13px; height:13px; border-radius:3px; '
         f'background:{color_css}; {extra_style}"></span>'
         f'<span>{label}</span></div>'
     )
@@ -6736,6 +7351,55 @@ def build_base_map(ctx: Ctx) -> Any:
     return m
 
 
+_LAYER_CHIP_COLORS: Dict[str, str] = {
+    "travel_areas": "#2A9D8F",
+    "cbd_zone": "#FF8C00",
+    "space_syntax": "#E63946",
+    "road_scenario": "#ff2bd6",
+    "rent_rings": "#256abf",
+    "rent_heat": "#3987e5",
+    "betweenness": "#7b2cbf",
+    "closeness": "#8c96a0",
+    "golden": "#E0A800",
+    "top_node": "#F69730",
+    "cbd_anchor": "#184f95",
+    "railway": "#E63946",
+    "wms_cityplan": "#e07a5f",
+    "wms_dol": "#6c757d",
+    "wms_population": "#457b9d",
+    "traffic": "#2a9d8f",
+    "markers": "#D63E2A",
+}
+
+
+def _render_map_bar(ctx: Ctx, drawn: Sequence[Layer]) -> None:
+    """Compact cartographic toolbar directly above the map frame showing live layers and basemap."""
+    chips = []
+    for layer in drawn:
+        dot = _LAYER_CHIP_COLORS.get(layer.id, "#1f7a70")
+        name = layer.title
+        if layer.id == "space_syntax" and ctx.ss is not None:
+            d = ctx.ss.display
+            name = f"Space Syntax · {'NAIN' if d['measure'] == 'integration' else 'NACH'} · {radius_label_for(d['rkey'])}"
+        elif layer.id == "road_scenario" and ctx.scenario is not None:
+            mode_txt = "คะแนนหลังตัด" if scn_color_mode(ctx) == "score" else "Δ %"
+            name = f"ถนนตัดใหม่ · {mode_txt}"
+        chips.append(
+            f'<span class="rg-layer-chip"><span class="rg-layer-dot" style="background:{dot};"></span>'
+            f'{escape(name)}</span>'
+        )
+    if not chips:
+        chips.append('<span class="rg-layer-chip">ยังไม่มีชั้นข้อมูลที่แสดง — เริ่มที่ขั้นตอน ① หรือ Space Syntax</span>')
+    basemap = ctx.show.get("map_style_name", "")
+    short_base = basemap.split(" (")[0] if basemap else "Esri Light Gray"
+    st.html(
+        '<div class="rg-map-bar">'
+        f'<div class="rg-map-bar-left">{"".join(chips)}</div>'
+        f'<div class="rg-map-bar-right">พื้นหลัง: <b>{escape(short_base)}</b> · มุมขวาบน: ชั้นแผนที่ · ⛶ เต็มจอ</div>'
+        '</div>'
+    )
+
+
 def render_map(ctx: Ctx) -> None:
     """Build and display the Folium map.
 
@@ -6752,13 +7416,15 @@ def render_map(ctx: Ctx) -> None:
     if legend is not None:
         m.get_root().add_child(legend)
     # returned_objects=[] → แผนที่ไม่ส่งอะไรกลับ: คลิก/เลื่อน/ซูมไม่ trigger Streamlit rerun ทั้งหน้า
-    st_folium(
-        m,
-        height=MAP_HEIGHT_PX,
-        use_container_width=True,
-        key="main_map",
-        returned_objects=[],
-    )
+    with st.container(key="rg_map_frame"):
+        _render_map_bar(ctx, drawn)
+        st_folium(
+            m,
+            height=MAP_HEIGHT_PX,
+            use_container_width=True,
+            key="main_map",
+            returned_objects=[],
+        )
     for warning in warnings:
         st.warning(f"⚠️ แสดงชั้นนี้ไม่ได้ — {warning}")
 
@@ -6766,8 +7432,9 @@ def render_map(ctx: Ctx) -> None:
 def _render_sidebar_config_section(locked: bool) -> None:
     """Config Import / Export expander."""
     with st.expander("💾 จัดการ Config (Export/Import)", expanded=False):
+        st.caption("บันทึกหรือนำเข้าโปรเจกต์ทั้งหมด (.zip) รวมหมุด ค่าตั้ง และแคชแผนที่")
         # สร้าง bundle เฉพาะเมื่อผู้ใช้กดปุ่ม — ไม่ zip cache ก้อนใหญ่ทุก rerun
-        if st.button("📦 เตรียม Bundle (.zip)", use_container_width=True, disabled=locked):
+        if st.button("📦 เตรียม Bundle (.zip)", width="stretch", disabled=locked):
             st.session_state["_bundle_bytes"] = export_bundle_zip()
         if st.session_state.get("_bundle_bytes"):
             st.download_button(
@@ -6775,16 +7442,16 @@ def _render_sidebar_config_section(locked: bool) -> None:
                 st.session_state["_bundle_bytes"],
                 "rent_gradient_bundle.zip",
                 "application/zip",
-                use_container_width=True,
+                width="stretch",
                 disabled=locked,
             )
 
         uploaded_bundle = st.file_uploader(
-            "Upload Bundle (.zip)",
+            "อัปโหลดไฟล์ Bundle (.zip)",
             type=["zip"],
             key="bundle_uploader",
         )
-        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", use_container_width=True, disabled=locked):
+        if uploaded_bundle and st.button("ยืนยันการโหลด Bundle", width="stretch", disabled=locked):
             bundle_result = import_bundle_zip(uploaded_bundle.read())
             if bundle_result["success"]:
                 mode = "config + cache" if bundle_result["cache_loaded"] else "config เท่านั้น"
@@ -6797,9 +7464,9 @@ def _render_sidebar_config_section(locked: bool) -> None:
                     st.error(err)
 
         st.markdown("---")
-        st.markdown("##### Import Bundle from GitHub")
+        st.markdown("**📥 ชุดข้อมูลตัวอย่าง (GitHub)**")
         st.caption("แหล่งข้อมูลคงที่: เชียงของ.zip")
-        if st.button("นำเข้า Bundle จาก GitHub", use_container_width=True, disabled=locked):
+        if st.button("นำเข้า Bundle จาก GitHub", width="stretch", disabled=locked):
             bundle_bytes, err = download_github_bundle()
             if err:
                 st.error(err)
@@ -6821,7 +7488,7 @@ def _render_sidebar_config_section(locked: bool) -> None:
 def _render_sidebar_marker_input(locked: bool) -> None:
     """Where an Active Marker is typed in ("Lat, Lng"). The map itself never adds one."""
     st.caption("📍 เพิ่ม Active Marker: กรอก Lat, Lng (ดูพิกัดเมาส์ที่มุมขวาล่างของแผนที่)")
-    c1, c2 = st.columns([0.7, 0.3])
+    c1, c2 = st.columns([0.72, 0.28])
     coords_input = c1.text_input(
         "Coords",
         placeholder="20.21, 100.40",
@@ -6829,7 +7496,7 @@ def _render_sidebar_marker_input(locked: bool) -> None:
         key="manual_coords",
         disabled=locked,
     )
-    if c2.button("เพิ่ม", use_container_width=True, disabled=locked):
+    if c2.button("เพิ่ม", width="stretch", disabled=locked):
         try:
             lat, lng = _parse_anchor_center_input(coords_input)
         except ValueError as exc:
@@ -6848,13 +7515,15 @@ def _marker_label_html(index: int, marker: Dict[str, Any], active: bool) -> str:
     no hue (black, pink …) disappears on either background. A switched-off pin is faded, struck through and hollow.
     """
     ring = "box-shadow:0 0 0 1px rgba(128,128,128,.55);"
-    dot_css = f"display:inline-block;width:.7em;height:.7em;border-radius:50%;margin-right:.4em;{ring}"
+    dot_css = f"display:inline-block;width:.68em;height:.68em;border-radius:50%;margin-right:.42em;vertical-align:middle;{ring}"
     coords = f"({marker['lat']:.4f}, {marker['lng']:.4f})"
     if active:
         dot = f"<span style='{dot_css}background:{HEX_COLORS[index % len(HEX_COLORS)]};'></span>"
-        return f"{dot}<b>จุดที่ {index + 1}</b> <span style='font-size:.8em;opacity:.7'>{coords}</span>"
+        return (f"{dot}<b>จุดที่ {index + 1}</b> "
+                f"<span style='font-size:.78em;opacity:.7;font-variant-numeric:tabular-nums'>{coords}</span>")
     return (f"<span style='opacity:.45;text-decoration:line-through'>"
-            f"<span style='{dot_css}'></span>จุดที่ {index + 1} <span style='font-size:.8em'>{coords}</span></span>")
+            f"<span style='{dot_css}'></span>จุดที่ {index + 1} "
+            f"<span style='font-size:.78em;font-variant-numeric:tabular-nums'>{coords}</span></span>")
 
 
 def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]]:
@@ -6863,20 +7532,19 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
     # Delete last / Reset buttons
     c1, c2 = st.columns(2)
-    if c1.button("❌ ลบจุดล่าสุด", use_container_width=True, disabled=locked) and markers:
+    if c1.button("❌ ลบจุดล่าสุด", width="stretch", disabled=locked) and markers:
         StateManager.pop_last_marker()
         StateManager.clear_results(["isochrone", "intersection", "rent"])
         st.rerun()
-    if c2.button("🔄 รีเซ็ต", use_container_width=True, disabled=locked):
+    if c2.button("🔄 รีเซ็ต", width="stretch", disabled=locked):
         StateManager.reset()
         st.rerun()
 
     count_line = st.empty()                     # filled below, after the toggles of this run were applied
 
     if markers:
-        st.markdown("---")
         for i, m in enumerate(markers):
-            col1, col2, col3 = st.columns([0.15, 0.70, 0.15])
+            col1, col2, col3 = st.columns([0.12, 0.72, 0.16], vertical_alignment="center")
 
             prev_active = m.get("active", True)
             is_active = col1.checkbox(
@@ -6893,7 +7561,7 @@ def _render_sidebar_marker_list(locked: bool) -> List[Tuple[int, Dict[str, Any]]
 
             col2.markdown(_marker_label_html(i, m, is_active), unsafe_allow_html=True)
 
-            if col3.button("✕", key=f"del_btn_{i}", disabled=locked):
+            if col3.button("✕", key=f"del_btn_{i}", width="stretch", disabled=locked):
                 StateManager.remove_marker(i)
                 StateManager.clear_results(["isochrone", "intersection", "rent"])
                 st.rerun()
@@ -6909,8 +7577,8 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
 
     Returns ``True`` if the user clicked **Run Network Analysis**.
     """
-    with st.expander("🕸️ วิเคราะห์โครงข่าย (Network Analysis)", expanded=True):
-        st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx)")
+    with st.expander("🕸️ ② วิเคราะห์โครงข่าย (Network Analysis)", expanded=False):
+        st.caption("วิเคราะห์ความสำคัญของถนน (OSMnx) เพื่อหา Integration Center และ Golden Spots")
 
         can_analyze = StateManager.get_isochrone_data() is not None
         if can_analyze:
@@ -6918,49 +7586,10 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
         else:
             st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone ก่อน", icon="🛑")
 
-        # ---- Cache Management ----
-        cache_stats = get_cache_stats()
-        st.markdown("##### 💾 Cache Management")
-
-        if cache_stats["count"] > 0:
-            st.caption(
-                f"📊 **{cache_stats['count']} ไฟล์** "
-                f"({cache_stats['size_mb']:.1f} MB)"
-            )
-
-            if st.button(
-                "📤 Export Cache (.zip)",
-                use_container_width=True,
-                key="export_cache_btn",
-                disabled=locked,
-            ):
-                st.session_state["_cache_zip_bytes"] = export_cache_as_zip()
-            if st.session_state.get("_cache_zip_bytes"):
-                st.download_button(
-                    "⬇ Download Ready",
-                    data=st.session_state["_cache_zip_bytes"],
-                    file_name="osmnx_cache.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                )
-
-            if st.button(
-                "🗑️ ล้าง Cache",
-                use_container_width=True,
-                type="secondary",
-                disabled=locked,
-            ):
-                clear_disk_cache()
-                st.toast("ล้าง Cache สำเร็จ!", icon="✅")
-                st.rerun()
-        else:
-            st.caption("📊 **Cache ว่างเปล่า**")
-
-
-        st.markdown("---")
         do_network: bool = st.button(
             "🚀 Run Network Analysis",
-            use_container_width=True,
+            type="primary",
+            width="stretch",
             disabled=(not can_analyze) or locked,
         )
 
@@ -6986,7 +7615,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
 
             if st.button(
                 "➕ เพิ่มจุดนี้ลงในรายการ",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -7014,7 +7643,7 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
             best = golden_spots[0]
             if st.button(
                 "➕ เพิ่มจุดทำเลที่ดินทองอันดับ 1",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 disabled=locked,
             ):
@@ -7022,6 +7651,45 @@ def _render_sidebar_network_panel(locked: bool) -> bool:
                 StateManager.clear_results(["isochrone", "intersection", "rent"])
                 st.toast("เพิ่มทำเลที่ดินทองแล้ว! กรุณากดคำนวณใหม่", icon="💎")
                 st.rerun()
+
+        # ---- Cache Management (tucked cleanly below main action) ----
+        cache_stats = get_cache_stats()
+        st.markdown("---")
+        st.markdown("**💾 Cache Management**")
+
+        if cache_stats["count"] > 0:
+            st.caption(
+                f"📊 **{cache_stats['count']} ไฟล์** "
+                f"({cache_stats['size_mb']:.1f} MB)"
+            )
+
+            c_exp, c_clr = st.columns(2)
+            if c_exp.button(
+                "📤 Export Cache",
+                width="stretch",
+                key="export_cache_btn",
+                disabled=locked,
+            ):
+                st.session_state["_cache_zip_bytes"] = export_cache_as_zip()
+            if c_clr.button(
+                "🗑️ ล้าง Cache",
+                width="stretch",
+                type="secondary",
+                disabled=locked,
+            ):
+                clear_disk_cache()
+                st.toast("ล้าง Cache สำเร็จ!", icon="✅")
+                st.rerun()
+            if st.session_state.get("_cache_zip_bytes"):
+                st.download_button(
+                    "⬇ Download Ready",
+                    data=st.session_state["_cache_zip_bytes"],
+                    file_name="osmnx_cache.zip",
+                    mime="application/zip",
+                    width="stretch",
+                )
+        else:
+            st.caption("📊 **Cache ว่างเปล่า**")
 
         st.caption("เปิด/ปิดชั้น Betweenness · Nodes · Golden Spots ที่แผง ชั้นแผนที่")
 
@@ -7227,7 +7895,7 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
 
 def _render_sidebar_anchor_panel(locked: bool) -> bool:
     """One button, one road download, both anchors (Composite + Closeness 100%)."""
-    with st.expander("🎯 Automated CBD Anchor", expanded=True):
+    with st.expander("🎯 ③ Automated CBD Anchor", expanded=False):
         st.caption("กำหนดพื้นที่ศึกษา แล้วค้นหาจุดศูนย์กลางเชิงโครงข่ายถนน (ไม่ใช้ seed — ผลซ้ำได้เสมอ)")
         st.info(
             "ผลลัพธ์คือ **ศูนย์กลางเชิงโครงข่ายถนน** ของพื้นที่ที่เลือก (ขึ้นกับจุดศูนย์กลาง/รัศมี) "
@@ -7301,8 +7969,9 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
 
         run_anchor = st.button(
             "🎯 ค้นหา CBD Anchor อัตโนมัติ",
+            type="primary",
             disabled=locked or not HAS_SCIPY or not center_valid,
-            use_container_width=True,
+            width="stretch",
         )
 
         if result:
@@ -7330,14 +7999,16 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                 + (f" (เตรียม {timings['prep_s']:.2f} · pivot {timings['pivots_s']:.2f} · "
                    f"exact {timings['exact_s']:.2f})" if timings else "")
             )
-            st.download_button(
-                "ดาวน์โหลด Anchor JSON",
+            a1, a2 = st.columns(2)
+            a1.download_button(
+                "⬇ Anchor JSON",
                 json.dumps({"composite": result, "closeness": closeness_result,
                             "evidence": evidence_result}, ensure_ascii=False, indent=2),
                 "automated_cbd_anchors.json",
                 "application/json",
+                width="stretch",
             )
-            if st.button("ล้าง Anchor ที่ค้นหาไว้", disabled=locked):
+            if a2.button("ล้าง Anchor ที่ค้นหาไว้", width="stretch", disabled=locked):
                 StateManager.clear_results(["anchor", "anchor_closeness", "anchor_evidence"])
                 st.rerun()
         return run_anchor
@@ -7349,7 +8020,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
     Returns ``True`` if the user clicked **คำนวณ Rent Gradient**.
     """
-    with st.expander("💰 Rent Gradient (Bid-Rent)", expanded=True):
+    with st.expander("💰 ⑥ Rent Gradient (Bid-Rent)", expanded=False):
         st.caption("หลัก Alonso-Muth-Mills: **R(d) = R₀ · e^(−λ·d)** — ค่าเช่าลดลงตามระยะจาก CBD")
 
         can_run = (StateManager.get_isochrone_data() is not None
@@ -7358,7 +8029,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
             st.warning("⚠️ **Scope:** กรุณาคำนวณ Isochrone หรือค้นหา Automated Anchor ก่อน", icon="🛑")
 
         # ---- Calibration samples ----
-        st.markdown("##### 🧾 ตัวอย่างราคาจริง (Calibration)")
+        st.markdown("**🧾 ตัวอย่างราคาจริง (Calibration)**")
         st.caption(
             "แนะนำ ≥ 5 จุดที่ระยะต่างกันเพื่อ fit λ จากตลาดจริง (2 จุดคำนวณได้ "
             "แต่ R² = 1 เสมอ จึงไม่บอกคุณภาพ) — เว้นว่างไว้ระบบจะใช้ดัชนี 0–100"
@@ -7369,7 +8040,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
             df,
             num_rows="dynamic",
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             disabled=locked,
             column_config={
                 "lat": st.column_config.NumberColumn("Lat", format="%.5f"),
@@ -7382,13 +8053,13 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
         st.text_input("หน่วยราคา", key="rent_unit_label", disabled=locked)
 
-        st.caption("เปิด/ปิด Rent Rings · Rent Heat ที่แผง ชั้นแผนที่ (Rent Heat ต้องรัน Network Analysis ก่อน)")
-
         do_rent: bool = st.button(
             "🧮 คำนวณ Rent Gradient",
-            use_container_width=True,
+            type="primary",
+            width="stretch",
             disabled=(not can_run) or locked,
         )
+        st.caption("เปิด/ปิด Rent Rings · Rent Heat ที่แผง ชั้นแผนที่ (Rent Heat ต้องรัน Network Analysis ก่อน)")
 
         # ---- Model summary ----
         rent_data = StateManager.get_rent_data()
@@ -7434,7 +8105,7 @@ def _render_sidebar_rent_panel(locked: bool) -> bool:
 
 def _render_sidebar_isochrone_settings(locked: bool) -> None:
     """Travel mode + minutes for the Isochrone step (moved here from the old map-settings panel)."""
-    st.markdown("##### 🚗 การเดินทาง (Isochrone)")
+    st.markdown("**🚗 การเดินทาง (Isochrone)**")
     st.selectbox(
         "โหมด",
         list(TRAVEL_MODE_NAMES.keys()),
@@ -7454,6 +8125,7 @@ def _layer_available(layer: Layer, ctx: Ctx) -> bool:
 
 def _render_sidebar_layers_panel(ctx: Ctx, locked: bool) -> None:
     """Every layer checkbox in one place, generated from ``LAYERS`` (same ``show_*`` keys as before)."""
+    st.html('<div class="rg-sb-eyebrow">การแสดงผลแผนที่</div>')
     with st.expander("🗺️ ชั้นแผนที่ (Layers)", expanded=True):
         st.selectbox("สไตล์แผนที่", list(MAP_STYLES.keys()), key="map_style_name", disabled=locked)
         for group in PANEL_GROUPS:
@@ -7461,15 +8133,27 @@ def _render_sidebar_layers_panel(ctx: Ctx, locked: bool) -> None:
                           key=lambda layer: layer.panel_rank)
             if not rows:
                 continue
-            st.markdown(f"**{group}**")
+            active_in_group = sum(
+                1 for layer in rows
+                if st.session_state.get(layer.show_key) and _layer_available(layer, ctx)
+            )
+            st.html(
+                f'<div class="rg-layer-group"><span>{escape(group)}</span>'
+                f'<span class="rg-layer-count">{active_in_group}/{len(rows)}</span></div>'
+            )
             for layer in rows:
-                st.checkbox(layer.label or layer.title, key=layer.show_key, disabled=locked)
-                if layer.hint:
-                    st.caption(layer.hint)
-                if layer.requires and not _layer_available(layer, ctx):
+                avail = _layer_available(layer, ctx)
+                st.checkbox(
+                    layer.label or layer.title,
+                    key=layer.show_key,
+                    disabled=locked,
+                    help=layer.hint or None,
+                )
+                if layer.requires and not avail:
                     st.caption(f"⏳ ยังไม่มีข้อมูล — {layer.requires}")
                 if layer.options is not None and st.session_state.get(layer.show_key):
-                    layer.options(ctx, locked)
+                    with st.container(key=f"rg_layer_opts_{layer.id}"):
+                        layer.options(ctx, locked)
 
 
 def _ss_status(params: Dict[str, Any]) -> None:
@@ -7491,7 +8175,7 @@ def _ss_status(params: Dict[str, Any]) -> None:
 def _render_sidebar_space_syntax_panel(locked: bool) -> Dict[str, Any]:
     """Space Syntax panel — what to analyse. Returns the pressed buttons and the chosen parameters."""
     state = st.session_state
-    with st.expander("🧭 Space Syntax (เข้าถึงง่าย แดง→น้ำเงิน)", expanded=True):
+    with st.expander("🧭 ④ Space Syntax (เข้าถึงง่าย แดง→น้ำเงิน)", expanded=False):
         st.caption("ไล่สีทุกช่วงถนนตามคะแนนการเข้าถึง — Integration (NAIN) / Choice (NACH) แบบ Segment Analysis · "
                    "ผลขึ้นเป็นชั้นบนแผนที่ และเป็นมุมมอง 🧭 ใต้แผนที่")
         st.caption(f"ศูนย์พื้นที่ศึกษา: **{float(state['anchor_lat']):.5f}, {float(state['anchor_lon']):.5f}** "
@@ -7580,7 +8264,7 @@ def _fill_shortcut_example() -> None:
 def _render_sidebar_road_scenario_panel(locked: bool) -> Dict[str, bool]:
     """🛣️ Road scenario panel — where the new roads are typed. Returns the pressed buttons."""
     state = st.session_state
-    with st.expander("🛣️ จำลองถนนตัดใหม่ (คะแนน Space Syntax เปลี่ยนอย่างไร)", expanded=False):
+    with st.expander("🛣️ ⑤ จำลองถนนตัดใหม่ (Space Syntax)", expanded=False):
         st.caption("ใส่แนวถนนใหม่ → วิเคราะห์ Space Syntax ซ้ำด้วยค่าตั้งเดิม → ดูว่าถนนเดิมช่วงไหนคะแนนขึ้น/ลง "
                    "และถนนใหม่ได้คะแนนเท่าไร · ต้องกด 🧮 วิเคราะห์ Space Syntax ก่อน")
         note = state.pop("_ss_scn_note", None)
@@ -7606,7 +8290,7 @@ def _render_sidebar_road_scenario_panel(locked: bool) -> Dict[str, bool]:
 def render_sidebar() -> Dict[str, Any]:
     """
     Orchestrate the sidebar in pipeline order:
-    markers + Isochrone → Network → Automated Anchor (sets the study area) → Space Syntax → Rent Gradient.
+    markers + Isochrone → Network → Automated Anchor (sets the study area) → Space Syntax → Road Scenario → Rent Gradient.
     (The layers panel is drawn by ``main`` after the stages ran, so it can show what has data.)
 
     Returns the user's intents: ``calc / network / anchor / rent / space_syntax / road_scenario`` are True for the
@@ -7614,38 +8298,37 @@ def render_sidebar() -> Dict[str, Any]:
     scenario), plus ``ss_params`` / ``ss_status`` (a placeholder for the status line) / ``active`` / ``locked``.
     """
     with st.sidebar:
-        st.header("⚙️ การตั้งค่า")
-
+        badge_slot = st.empty()
         ui_locked = st.toggle("🔒 Lock Active Markers + เมนูทั้งหมด", key=StateManager.K_UI_LOCKED)
-        _render_sidebar_config_section(ui_locked)
-        st.markdown("---")
-        _render_sidebar_marker_input(ui_locked)
-
-        st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
-
-        active_list = _render_sidebar_marker_list(ui_locked)
-        _render_sidebar_isochrone_settings(ui_locked)
-
-        do_calc: bool = st.button(
-            "🧩 ① คำนวณหา Isochrone CBD",
-            type="primary",
-            use_container_width=True,
-            disabled=ui_locked,
+        badge_txt = "🔒 ล็อกเมนู" if ui_locked else "Spatial Studio"
+        badge_slot.html(
+            '<div class="rg-sb-brand">'
+            '<span class="rg-sb-brand-title">⚙️ การตั้งค่า</span>'
+            f'<span class="rg-sb-brand-badge">{badge_txt}</span>'
+            '</div>'
         )
-        st.markdown("---")
+        _render_sidebar_config_section(ui_locked)
+
+        st.html('<div class="rg-sb-eyebrow">ขั้นตอนการวิเคราะห์</div>')
+        with st.expander("📍 ① หมุด & Isochrone CBD", expanded=True):
+            _render_sidebar_marker_input(ui_locked)
+            active_list = _render_sidebar_marker_list(ui_locked)
+            st.markdown("---")
+            _render_sidebar_isochrone_settings(ui_locked)
+            do_calc: bool = st.button(
+                "🧩 ① คำนวณหา Isochrone CBD",
+                type="primary",
+                width="stretch",
+                disabled=ui_locked,
+            )
+            st.markdown("---")
+            st.text_input("Geoapify API Key", key="api_key", type="password", disabled=ui_locked)
 
         do_network = _render_sidebar_network_panel(ui_locked)
-        st.markdown("---")
-
         do_anchor = _render_sidebar_anchor_panel(ui_locked)
-        st.markdown("---")
-
         space_syntax = _render_sidebar_space_syntax_panel(ui_locked)
         road_scenario = _render_sidebar_road_scenario_panel(ui_locked)
-        st.markdown("---")
-
         do_rent = _render_sidebar_rent_panel(ui_locked)
-        st.markdown("---")
 
     return {"calc": do_calc, "network": do_network, "anchor": do_anchor, "rent": do_rent,
             "space_syntax": space_syntax["run"] or space_syntax["demo"], "demo": space_syntax["demo"],
@@ -7662,12 +8345,88 @@ def _stability_popup(result: Dict[str, Any]) -> str:
             f"(max drift {stability['max_drift_m']:.0f} m, indicative)")
 
 
-def render_header() -> None:
-    """หัวเรื่อง + สรุปหลักการของหน้าแบบย่อ."""
-    st.markdown("#### 💹 Rent Gradient — Bid-Rent CBD Analysis")
-    st.caption(
-        "① เริ่มใกล้ศูนย์กลางประชากร → ② Isochrone 20 นาทีหา C20 → "
-        "③ Isochrone 5 นาทีหา C5 → ④ Golden Spots → ⑤ Rent Gradient"
+def render_header(ctx: Optional[Ctx] = None) -> None:
+    """หัวเรื่อง + แถบสถานะขั้นตอนหลัก 5 ขั้นตามหลักการ Bid-Rent & Space Syntax."""
+    active_n = len(StateManager.get_active_markers())
+    iso_data = StateManager.get_isochrone_data()
+    inter_data = StateManager.get_intersection_data()
+    net_data = StateManager.get_network_data()
+    rent_data = StateManager.get_rent_data()
+    auto_anchor = st.session_state.get(StateManager.K_AUTO_ANCHOR)
+    ss_result = st.session_state.get(SS_RESULT)
+    ss_scn = st.session_state.get(SS_SCENARIO)
+    locked = bool(st.session_state.get(StateManager.K_UI_LOCKED, False))
+
+    has_net = bool(net_data and "error" not in net_data)
+    has_rent = bool(rent_data and "error" not in rent_data)
+    has_cbd = bool(inter_data or auto_anchor)
+
+    # Top-right live status pills
+    pills = []
+    if locked:
+        pills.append('<span class="rg-pill rg-pill-accent">🔒 ล็อกเมนู</span>')
+    if ctx is not None:
+        pills.append(
+            f'<span class="rg-pill rg-pill-mono">{ctx.center[0]:.4f}, {ctx.center[1]:.4f}</span>'
+        )
+    if has_rent:
+        model = rent_data["model"]
+        mode_txt = "ดัชนี 0–100" if model.get("is_index") else f"Calibrated (n={model.get('n_samples', 0)})"
+        pills.append(f'<span class="rg-pill rg-pill-accent">Bid-Rent · {escape(mode_txt)}</span>')
+    if ss_result is not None:
+        scn_tag = " + จำลองถนนใหม่" if ss_scn else ""
+        pills.append(f'<span class="rg-pill rg-pill-accent">Space Syntax{scn_tag}</span>')
+
+    # Live 5-step pipeline stepper (exact core workflow principles)
+    cbd_meta = "รอ Isochrone / Anchor"
+    if inter_data:
+        feats = inter_data.get("features") or []
+        area = approx_geom_area_km2(feats[0]["geometry"]) if feats else None
+        cbd_meta = f"CBD {area:.2f} km²" if area is not None else "พบ CBD Zone"
+    elif auto_anchor:
+        cbd_meta = "Automated Anchor"
+
+    net_meta = (
+        f"{net_data.get('stats', {}).get('nodes_count', 0):,} โหนด"
+        if has_net else "รอวิเคราะห์ถนน"
+    )
+    ss_meta = (
+        f"{ss_result.meta['n_segments']:,} segment"
+        if ss_result is not None else "พร้อมวิเคราะห์"
+    )
+    rent_meta = (
+        f"λ = {rent_data['model']['lam']:.4f}/km"
+        if has_rent else "R(d) = R₀·e^(−λd)"
+    )
+    steps = [
+        ("1", "หมุด & Isochrone", f"{active_n} หมุด · {'พร้อม' if iso_data else 'รอคำนวณ'}", bool(iso_data)),
+        ("2", "CBD / Anchor", cbd_meta, has_cbd),
+        ("3", "Network & Golden", net_meta, has_net),
+        ("4", "Space Syntax", ss_meta, ss_result is not None),
+        ("5", "Rent Gradient", rent_meta, has_rent),
+    ]
+    step_html = "".join(
+        f'<div class="rg-step{" is-done" if done else ""}">'
+        f'<div class="rg-step-num">{"✓" if done else num}</div>'
+        f'<div class="rg-step-body">'
+        f'<div class="rg-step-title">{escape(title)}</div>'
+        f'<div class="rg-step-meta">{escape(meta)}</div>'
+        f'</div></div>'
+        for num, title, meta, done in steps
+    )
+
+    st.html(
+        '<div class="rg-masthead">'
+        '<div>'
+        '<h2 class="rg-masthead-title">Rent Gradient — Bid-Rent CBD Analysis</h2>'
+        '<p class="rg-masthead-sub">'
+        '① จุดกึ่งกลางประชากร → ② Isochrone 20 นาทีหา C20 → ③ Isochrone 5 นาทีหา C5 → '
+        '④ Golden Spots &amp; Space Syntax → ⑤ Rent Gradient'
+        '</p>'
+        '</div>'
+        f'<div class="rg-masthead-pills">{"".join(pills)}</div>'
+        '</div>'
+        f'<div class="rg-stepper">{step_html}</div>'
     )
     st.caption("🧭 ชั้น Space Syntax: ไล่สีทุกช่วงถนนตามการเข้าถึง 🔴 ง่ายที่สุด → 🔵 ยากที่สุด "
                "— วิเคราะห์ที่แผง Space Syntax แล้วเปิด/ปิดที่แผง ชั้นแผนที่")
@@ -7675,35 +8434,53 @@ def render_header() -> None:
 
 def render_metrics_row() -> None:
     """แถวตัวชี้วัดสรุปเหนือแผนที่."""
+    total_n = len(StateManager.get_markers())
     active_n = len(StateManager.get_active_markers())
     inter_data = StateManager.get_intersection_data()
     net_data = StateManager.get_network_data()
     rent_data = StateManager.get_rent_data()
+    auto_anchor = st.session_state.get(StateManager.K_AUTO_ANCHOR)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📍 หมุด Active", active_n)
+    with st.container(key="rg_kpi_strip"):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        marker_delta = f"จากทั้งหมด {total_n} หมุด" if total_n != active_n else ("พร้อมคำนวณ" if active_n else "ยังไม่ปักหมุด")
+        c1.metric("📍 หมุด Active", active_n, delta=marker_delta, delta_color="off")
 
-    cbd_txt = "—"
-    if inter_data:
-        feats = inter_data.get("features") or []
-        area = approx_geom_area_km2(feats[0]["geometry"]) if feats else None
-        cbd_txt = f"{area:.2f} km²" if area is not None else "พบแล้ว"
-    c2.metric("🎯 CBD Zone", cbd_txt)
+        cbd_txt, cbd_delta = "—", "ยังไม่คำนวณ"
+        if inter_data:
+            feats = inter_data.get("features") or []
+            area = approx_geom_area_km2(feats[0]["geometry"]) if feats else None
+            cbd_txt = f"{area:.2f} km²" if area is not None else "พบแล้ว"
+            cbd_delta = "พื้นที่ทับซ้อน CBD"
+        elif auto_anchor:
+            cbd_delta = "มี Automated Anchor"
+        c2.metric("🎯 CBD Zone", cbd_txt, delta=cbd_delta, delta_color="off")
 
-    net_txt = "—"
-    if net_data and "error" not in net_data:
-        stats = net_data.get("stats", {})
-        net_txt = f"{stats.get('nodes_count', 0):,} โหนด"
-    c3.metric("🕸️ Network", net_txt)
+        net_txt, net_delta = "—", "รันขั้นตอน ②"
+        if net_data and "error" not in net_data:
+            stats = net_data.get("stats", {})
+            net_txt = f"{stats.get('nodes_count', 0):,} โหนด"
+            n_gold = len(net_data.get("golden_spots") or [])
+            net_delta = f"💎 {n_gold} Golden Spots" if n_gold else f"{stats.get('edges_count', 0):,} ถนน"
+        c3.metric("🕸️ Network", net_txt, delta=net_delta, delta_color="off")
 
-    lam_txt, half_txt = "—", "—"
-    if rent_data and "error" not in rent_data:
-        model = rent_data["model"]
-        lam_txt = f"{model['lam']:.4f}/km"
-        half = model.get("half_dist_km")
-        half_txt = f"{half:.2f} km" if half else "∞"
-    c4.metric("📉 λ (Rent Gradient)", lam_txt)
-    c5.metric("½ ราคา ที่ระยะ", half_txt)
+        lam_txt, lam_delta = "—", "รันขั้นตอน ⑥"
+        half_txt, half_delta = "—", "ระยะลดลงครึ่งหนึ่ง"
+        if rent_data and "error" not in rent_data:
+            model = rent_data["model"]
+            lam_txt = f"{model['lam']:.4f}/km"
+            if model.get("is_index"):
+                lam_delta = "โหมดดัชนี (0–100)"
+            elif model.get("r2") is not None and _fit_dof(model) > 0:
+                lam_delta = f"Calibrated · R² {model['r2']:.3f}"
+            else:
+                lam_delta = f"Calibrated · n={model.get('n_samples', 0)}"
+            half = model.get("half_dist_km")
+            half_txt = f"{half:.2f} km" if half else "∞"
+            r0_str = f"{model['r0']:,.0f}" if not model["is_index"] else f"{model['r0']:.0f} ดัชนี"
+            half_delta = f"R₀ = {r0_str}"
+        c4.metric("📉 λ (Rent Gradient)", lam_txt, delta=lam_delta, delta_color="off")
+        c5.metric("½ ราคา ที่ระยะ", half_txt, delta=half_delta, delta_color="off")
 
 
 def _build_bid_rent_figure(rent_data: Dict[str, Any]):
@@ -7721,7 +8498,9 @@ def _build_bid_rent_figure(rent_data: Dict[str, Any]):
             y=curve["r"],
             mode="lines",
             name="Bid-Rent Curve (โมเดล)",
-            line=dict(color=CHART_COLOR_CURVE, width=2.5),
+            line=dict(color=CHART_COLOR_CURVE, width=2.8),
+            fill="tozeroy",
+            fillcolor="rgba(42, 120, 214, 0.10)",
             hovertemplate="ระยะ %{x:.2f} km<br>ค่าเช่า %{y:,.1f}<extra></extra>",
         )
     )
@@ -7736,8 +8515,8 @@ def _build_bid_rent_figure(rent_data: Dict[str, Any]):
                 name="ตัวอย่างราคาจริง",
                 marker=dict(
                     color=CHART_COLOR_SAMPLES,
-                    size=10,
-                    line=dict(color="#ffffff", width=1.5),
+                    size=10.5,
+                    line=dict(color="#ffffff", width=1.8),
                 ),
                 hovertemplate="ระยะ %{x:.2f} km<br>ราคาจริง %{y:,.1f}<extra></extra>",
             )
@@ -7747,31 +8526,37 @@ def _build_bid_rent_figure(rent_data: Dict[str, Any]):
     if half and half <= model["d_max_km"]:
         fig.add_vline(
             x=half,
-            line_dash="dash",
+            line_dash="dot",
+            line_width=1.6,
             line_color=CHART_COLOR_MUTED,
-            annotation_text=f"d½ = {half:.2f} km",
+            annotation_text=f"  d½ = {half:.2f} km  ",
+            annotation_position="top right",
+            annotation_font_size=12,
             annotation_font_color=CHART_COLOR_MUTED,
         )
 
     fig.update_layout(
-        height=380,
-        margin=dict(l=10, r=10, t=30, b=10),
+        height=400,
+        margin=dict(l=12, r=16, t=34, b=14),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, x=0, font=dict(size=12.5)),
         xaxis=dict(
             title="ระยะทางจาก CBD (km)",
-            gridcolor="rgba(137,135,129,0.25)",
+            gridcolor="rgba(137,135,129,0.18)",
             zeroline=False,
+            showline=True,
+            linecolor="rgba(137,135,129,0.28)",
         ),
         yaxis=dict(
             title=unit_text,
-            gridcolor="rgba(137,135,129,0.25)",
+            gridcolor="rgba(137,135,129,0.18)",
             zeroline=False,
             rangemode="tozero",
+            showline=False,
         ),
-        font=dict(size=13),
+        font=dict(family="IBM Plex Sans Thai, system-ui, -apple-system, sans-serif", size=13),
     )
     return fig
 
@@ -7873,8 +8658,9 @@ def view_space_syntax(ctx: Ctx) -> None:
         notes.append(f"⚡ Global ประมาณด้วย pivot {result.meta['pivots']:,} จุด (segment เกิน "
                      f"{result.meta['max_exact_segments']:,})")
     st.caption(" · ".join(notes))
-    sub = st.radio("มุมมอง Space Syntax", list(SS_VIEW_LABELS), horizontal=True, key="ss_view",
-                   format_func=SS_VIEW_LABELS.get, label_visibility="collapsed")
+    with st.container(key="rg_ss_subnav"):
+        sub = st.radio("มุมมอง Space Syntax", list(SS_VIEW_LABELS), horizontal=True, key="ss_view",
+                       format_func=SS_VIEW_LABELS.get, label_visibility="collapsed")
     measure, rkey, palette = d["measure"], d["rkey"], d["palette"]
     st.caption(f"แสดง: {MEASURES[measure]['title']} · รัศมี {radius_label_for(rkey)} · {SCALE_MODES[d['scale']]} "
                "— เปลี่ยนได้ที่แผง ชั้นแผนที่")
@@ -8283,108 +9069,121 @@ def view_theory(_ctx: Ctx) -> None:
    Tints are mixes of currentColor, so no hex needs to know which theme is active; one calm teal accent. */
 .rg-guide {
     --rg-accent: #1f7a70;
-    --rg-line: color-mix(in srgb, currentColor 22%, transparent);
-    --rg-soft: color-mix(in srgb, currentColor 6%, transparent);
-    --rg-muted: color-mix(in srgb, currentColor 75%, transparent);
-    max-width: 920px;
+    --rg-line: color-mix(in srgb, currentColor 16%, transparent);
+    --rg-soft: color-mix(in srgb, currentColor 3.5%, transparent);
+    --rg-muted: color-mix(in srgb, currentColor 70%, transparent);
+    max-width: 960px;
     margin: 0 auto;
     color: inherit;
     font-family: inherit;
 }
 .rg-guide * { box-sizing: border-box; }
 .rg-guide .principle {
-    padding: 20px 22px;
+    padding: 20px 24px;
     border: 1px solid var(--rg-line);
     border-left: 4px solid var(--rg-accent);
     border-radius: 14px;
     background: var(--rg-soft);
 }
 .rg-guide .label {
-    margin-bottom: 5px;
+    margin-bottom: 6px;
     color: var(--rg-muted);
-    font-size: .76rem;
+    font-size: .74rem;
     font-weight: 800;
-    letter-spacing: .08em;
+    letter-spacing: .09em;
+    text-transform: uppercase;
 }
 .rg-guide h3 {
-    margin: 0 0 7px;
+    margin: 0 0 8px;
     color: inherit;
-    font-size: clamp(1.15rem, 2.6vw, 1.55rem);
+    font-size: clamp(1.12rem, 2.3vw, 1.45rem);
+    letter-spacing: -0.015em;
 }
-.rg-guide p { margin: 0; color: var(--rg-muted); line-height: 1.65; }
+.rg-guide p { margin: 0; color: var(--rg-muted); line-height: 1.68; }
 .rg-guide code {
-    padding: 2px 6px;
+    padding: 2px 7px;
     border-radius: 6px;
     color: inherit;
     background: color-mix(in srgb, currentColor 10%, transparent);
+    font-size: .88em;
 }
 .rg-guide .flow-title {
     margin: 22px 0 11px;
     color: inherit;
-    font-size: 1.05rem;
+    font-size: 1.02rem;
     font-weight: 700;
 }
 .rg-guide .flow {
     display: grid;
-    gap: 9px;
+    gap: 8px;
 }
 .rg-guide .step {
     display: grid;
-    grid-template-columns: 38px 1fr;
-    gap: 12px;
+    grid-template-columns: 36px 1fr;
+    gap: 13px;
     align-items: start;
-    padding: 13px 15px;
+    padding: 13px 16px;
     border: 1px solid var(--rg-line);
-    border-radius: 13px;
+    border-radius: 12px;
     background: var(--rg-soft);
+    transition: border-color 150ms ease, background 150ms ease;
+}
+.rg-guide .step:hover {
+    border-color: color-mix(in srgb, #1f7a70 45%, transparent);
+    background: color-mix(in srgb, currentColor 5.5%, transparent);
 }
 .rg-guide .number {
     display: grid;
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
     place-items: center;
-    border-radius: 10px;
+    border-radius: 9px;
     color: #fff;
     background: var(--rg-accent);
     font-weight: 800;
+    font-size: .86rem;
 }
 .rg-guide .step b {
     display: block;
     margin-bottom: 2px;
     color: inherit;
+    font-size: .94rem;
 }
 .rg-guide .step span {
     color: var(--rg-muted);
-    font-size: .88rem;
-    line-height: 1.55;
+    font-size: .86rem;
+    line-height: 1.58;
 }
 .rg-guide .notes {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 9px;
-    margin-top: 12px;
+    gap: 10px;
+    margin-top: 14px;
 }
 .rg-guide .note {
-    padding: 13px 14px;
+    padding: 13px 15px;
     border: 1px solid var(--rg-line);
     border-radius: 12px;
     color: var(--rg-muted);
     background: var(--rg-soft);
-    font-size: .84rem;
+    font-size: .83rem;
+    line-height: 1.55;
 }
 .rg-guide .note b {
     display: block;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
     color: inherit;
 }
 .rg-guide .formula {
     margin-top: 12px;
-    padding: 14px 16px;
+    padding: 14px 18px;
+    border: 1px solid var(--rg-line);
     border-left: 4px solid var(--rg-accent);
     border-radius: 0 12px 12px 0;
     color: var(--rg-muted);
     background: var(--rg-soft);
-    font-size: .88rem;
+    font-size: .86rem;
+    line-height: 1.6;
 }
 .rg-guide .formula b { color: inherit; }
 @media (max-width: 680px) {
@@ -8497,17 +9296,60 @@ VIEWS: Tuple[Tuple[str, str, Callable[[Ctx], None]], ...] = (
     ("theory", "📐 หลักการ", view_theory),
 )
 
+_VIEW_META: Dict[str, Tuple[str, str]] = {
+    "curve": ("📈 Bid-Rent Curve", "เส้นโค้งค่าเช่า/มูลค่าที่ดินตามระยะทางจาก CBD — Alonso-Muth-Mills R(d) = R₀·e^(−λd)"),
+    "rings": ("🧾 Ring Report", "สรุปรายวงแหวนระยะทางจาก CBD พร้อมความหนาแน่นโครงข่ายถนนและ Value Gap"),
+    "gold": ("💎 Golden Land Spots", "จุดทำเลศักยภาพสูงรอบ CBD — ผสาน Closeness · Degree · Low-Traffic Bonus"),
+    "marks": ("📍 หมุด & ราคาประเมิน", "พิกัดหมุดที่ปักไว้ ระยะจาก CBD และค่าเช่าคาดการณ์รายจุด"),
+    "space_syntax": ("🧭 Space Syntax Analytics", "วิเคราะห์ Segment Analysis (Integration NAIN / Choice NACH) พร้อมกราฟและอันดับถนน"),
+    "road_scenario": ("🛣️ จำลองถนนตัดใหม่", "เปรียบเทียบคะแนน Space Syntax ก่อนและหลังตัดถนนใหม่ ทั้งรายช่วงถนนและทั้งโครงข่าย"),
+    "theory": ("📐 หลักการและขั้นตอนการวิเคราะห์", "กรอบแนวคิด Alonso-Muth-Mills และลำดับ Flow การหา C20 → C5 → Golden Spots → Rent Gradient"),
+}
+
+
+def _render_view_header(choice: str, ctx: Ctx) -> None:
+    """Contextual section header inside the Analytics Studio card."""
+    title, desc = _VIEW_META.get(choice, (choice, ""))
+    badge = ""
+    if choice in ("curve", "rings") and ctx.rent:
+        model = ctx.rent["model"]
+        tag = "โหมดดัชนี 0–100" if model.get("is_index") else f"Calibrated · n={model.get('n_samples', 0)}"
+        badge = f'<span class="rg-pill rg-pill-accent">{escape(tag)}</span>'
+    elif choice == "gold" and ctx.net and ctx.net.get("golden_spots"):
+        badge = f'<span class="rg-pill rg-pill-accent">{len(ctx.net["golden_spots"])} จุดทำเลทอง</span>'
+    elif choice == "marks":
+        active_n = sum(1 for m in ctx.markers if m.get("active", True))
+        badge = f'<span class="rg-pill">Active {active_n}/{len(ctx.markers)} หมุด</span>'
+    elif choice == "space_syntax" and ctx.ss is not None:
+        d = ctx.ss.display
+        tag = f"{MEASURES[d['measure']]['title']} · {radius_label_for(d['rkey'])}"
+        badge = f'<span class="rg-pill rg-pill-accent">{escape(tag)}</span>'
+    elif choice == "road_scenario" and ctx.scenario is not None and ctx.ss is not None:
+        d = ctx.ss.display
+        tag = f"{len(ctx.scenario.scenario.roads)} ถนนใหม่ · {MEASURES[d['measure']]['title']}"
+        badge = f'<span class="rg-pill rg-pill-accent">{escape(tag)}</span>'
+    st.html(
+        '<div class="rg-view-head">'
+        f'<div><div class="rg-view-title">{escape(title)}</div>'
+        f'<div class="rg-view-desc">{escape(desc)}</div></div>'
+        f'<div>{badge}</div>'
+        '</div>'
+    )
+
 
 def render_views(ctx: Ctx) -> None:
     """Analytics under the map. Only the chosen view runs — ``st.tabs`` would run every tab on every rerun."""
     labels = {key: label for key, label, _ in VIEWS}
     if st.session_state.get("analytics_view") not in labels:
         st.session_state["analytics_view"] = next(iter(labels))
-    choice = st.radio("มุมมองวิเคราะห์", list(labels), horizontal=True, key="analytics_view",
-                      format_func=labels.get, label_visibility="collapsed")
-    for key, _label, view in VIEWS:
-        if key == choice:
-            view(ctx)
+    with st.container(key="rg_view_nav"):
+        choice = st.radio("มุมมองวิเคราะห์", list(labels), horizontal=True, key="analytics_view",
+                          format_func=labels.get, label_visibility="collapsed")
+    with st.container(key="rg_analytics_card"):
+        _render_view_header(choice, ctx)
+        for key, _label, view in VIEWS:
+            if key == choice:
+                view(ctx)
 
 
 # ============================================================================
@@ -9002,17 +9844,7 @@ def run_stages(intents: Dict[str, Any]) -> None:
 
 def main() -> None:
     st.set_page_config(**PAGE_CONFIG)
-
-    # Inject minimal CSS to fix spacing
-    st.markdown(
-        "<style>"
-        ".block-container { padding-top: 2rem; padding-bottom: 0rem; } "
-        "h1 { margin-bottom: 0px; } "
-        "div[data-testid=\"stHorizontalBlock\"] button "
-        "{ padding: 0rem 0.5rem; }"
-        "</style>",
-        unsafe_allow_html=True,
-    )
+    st.html(APP_THEME_CSS)
 
     StateManager.initialize()
     skipped = st.session_state.pop("_import_skipped", None)
@@ -9026,7 +9858,7 @@ def main() -> None:
     ctx = build_ctx()                           # 3. one read-only snapshot for the layers
     with st.sidebar:
         _render_sidebar_layers_panel(ctx, intents["locked"])
-    render_header()
+    render_header(ctx)
     render_metrics_row()
     render_map(ctx)
     render_views(ctx)
