@@ -6745,6 +6745,51 @@ class _RawElement(Element):
         return self._raw
 
 
+class _FastTemplateModule:
+    """Drop-in replacement for Jinja2 ``Template.module`` exposing ``script`` / ``html`` / ``header`` callables."""
+
+    __slots__ = ("script", "html", "header")
+
+    def __init__(
+        self,
+        script: Optional[Callable[..., str]] = None,
+        html: Optional[Callable[..., str]] = None,
+        header: Optional[Callable[..., str]] = None,
+    ):
+        if script is not None:
+            self.script = script
+        if html is not None:
+            self.html = html
+        if header is not None:
+            self.header = header
+
+
+class _FastTemplate:
+    """Zero-Jinja2 template adapter compatible with both ``folium`` and ``streamlit-folium``.
+
+    ``streamlit_folium._generate_leaflet_string()`` bypasses ``Element.render()`` and invokes
+    ``element._template.module.script(element)`` directly on every child of the map; providing
+    this lightweight Python callable keeps all custom layers working inside ``st_folium`` with
+    zero Jinja2 parsing overhead and full immunity to ``{{`` / ``{%`` in OSM road names.
+    """
+
+    __slots__ = ("module",)
+
+    def __init__(
+        self,
+        script: Optional[Callable[..., str]] = None,
+        html: Optional[Callable[..., str]] = None,
+        header: Optional[Callable[..., str]] = None,
+    ):
+        self.module = _FastTemplateModule(script=script, html=html, header=header)
+
+    def render(self, this: Any = None, kwargs: Optional[Dict[str, Any]] = None) -> str:
+        fn = getattr(self.module, "script", None) or getattr(self.module, "html", None)
+        if fn is None:
+            return ""
+        return fn(this, kwargs) if kwargs is not None else fn(this)
+
+
 def _tooltip_js_block(heads_json: str) -> str:
     return (
         f"\n            var heads = {heads_json};\n"
@@ -6767,6 +6812,8 @@ class CompactLines(MacroElement):
     Leaflet builds the lines. Add it to a ``FeatureGroup`` — the group owns the LayerControl entry.
     """
 
+    _template = _FastTemplate(script=lambda this, _kwargs=None: this._build_script())
+
     def __init__(self, rows_json: str, heads: Sequence[str] = (), opacity: float = 0.8, hover: bool = False):
         super().__init__()
         self._name = "CompactLines"
@@ -6774,10 +6821,10 @@ class CompactLines(MacroElement):
         self.heads_json = _json_js(list(heads))
         self.opacity = float(opacity)
         self.hover_js = "true" if hover else "false"
+        self._template = CompactLines._template
 
-    def render(self, **kwargs: Any) -> None:
-        figure = self.get_root()
-        js = (
+    def _build_script(self) -> str:
+        return (
             "(function (group, rows, opacity, hover) {"
             + _tooltip_js_block(self.heads_json)
             + '            for (var i = 0; i < rows.length; i++) {\n'
@@ -6793,13 +6840,18 @@ class CompactLines(MacroElement):
             '            }\n'
             f'        }})({self._parent.get_name()}, {self.rows_json}, {self.opacity}, {self.hover_js});'
         )
-        figure.script.add_child(_RawElement(js), name=self.get_name())
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        figure.script.add_child(_RawElement(self._build_script()), name=self.get_name())
         for element in self._children.values():
             element.render(**kwargs)
 
 
 class CompactPoints(MacroElement):
     """Circle markers from one compact JSON array (see :class:`CompactLines`)."""
+
+    _template = _FastTemplate(script=lambda this, _kwargs=None: this._build_script())
 
     def __init__(self, rows_json: str, heads: Sequence[str] = (), weight: float = 1.0, fill_opacity: float = 0.9,
                  radius_scale: float = 1.0, fill: Optional[str] = None, stroke: Optional[str] = None):
@@ -6813,10 +6865,10 @@ class CompactPoints(MacroElement):
         # one colour for every dot instead of each row's own (None = the row's colour)
         self.fill_json = _json_js(fill)
         self.stroke_json = _json_js(stroke)
+        self._template = CompactPoints._template
 
-    def render(self, **kwargs: Any) -> None:
-        figure = self.get_root()
-        js = (
+    def _build_script(self) -> str:
+        return (
             "(function (group, rows, weight, fillOpacity, radiusScale, fill, stroke) {"
             + _tooltip_js_block(self.heads_json)
             + '            for (var i = 0; i < rows.length; i++) {\n'
@@ -6827,13 +6879,18 @@ class CompactPoints(MacroElement):
             '            }\n'
             f'        }})({self._parent.get_name()}, {self.rows_json}, {self.weight}, {self.fill_opacity}, {self.radius_scale}, {self.fill_json}, {self.stroke_json});'
         )
-        figure.script.add_child(_RawElement(js), name=self.get_name())
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        figure.script.add_child(_RawElement(self._build_script()), name=self.get_name())
         for element in self._children.values():
             element.render(**kwargs)
 
 
 class _CompactRailway(MacroElement):
     """Render thousands of railway KML features as 2 Canvas multi-geometries without Jinja2 parsing."""
+
+    _template = _FastTemplate(script=lambda this, _kwargs=None: this._build_script())
 
     def __init__(self, lines_json: str, polys_json: str, opacity: float, tooltip: str):
         super().__init__()
@@ -6842,10 +6899,10 @@ class _CompactRailway(MacroElement):
         self.polys_json = polys_json
         self.opacity = float(opacity)
         self.tooltip_json = _json_js(tooltip)
+        self._template = _CompactRailway._template
 
-    def render(self, **kwargs: Any) -> None:
-        figure = self.get_root()
-        js = (
+    def _build_script(self) -> str:
+        return (
             "(function (group, lines, polys, opacity, tipText) {\n"
             "            var unpack = function (arr) {\n"
             "                var out = new Array(arr.length);\n"
@@ -6870,7 +6927,10 @@ class _CompactRailway(MacroElement):
             "            }\n"
             f"        }})({self._parent.get_name()}, {self.lines_json}, {self.polys_json}, {self.opacity}, {self.tooltip_json});"
         )
-        figure.script.add_child(_RawElement(js), name=self.get_name())
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        figure.script.add_child(_RawElement(self._build_script()), name=self.get_name())
         for element in self._children.values():
             element.render(**kwargs)
 
@@ -6882,14 +6942,16 @@ class ViewMemory(MacroElement):
     view is ignored, so adding a pin or finding an anchor still re-centres exactly as before.
     """
 
+    _template = _FastTemplate(script=lambda this, _kwargs=None: this._build_script())
+
     def __init__(self, token: str):
         super().__init__()
         self._name = "ViewMemory"
         self.token_json = _json_js(token)
+        self._template = ViewMemory._template
 
-    def render(self, **kwargs: Any) -> None:
-        figure = self.get_root()
-        js = (
+    def _build_script(self) -> str:
+        return (
             "(function (map) {\n"
             "            try {\n"
             f'                var key = "rgv2_view", token = {self.token_json};\n'
@@ -6904,7 +6966,10 @@ class ViewMemory(MacroElement):
             "            } catch (e) {}\n"
             f"        }})({self._parent.get_name()});"
         )
-        figure.script.add_child(_RawElement(js), name=self.get_name())
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        figure.script.add_child(_RawElement(self._build_script()), name=self.get_name())
         for element in self._children.values():
             element.render(**kwargs)
 
@@ -6917,13 +6982,15 @@ class LayerToggleAll(MacroElement):
     what the map shows — the sidebar checkboxes stay as they are.
     """
 
+    _template = _FastTemplate(script=lambda this, _kwargs=None: this._build_script())
+
     def __init__(self):
         super().__init__()
         self._name = "LayerToggleAll"
+        self._template = LayerToggleAll._template
 
-    def render(self, **kwargs: Any) -> None:
-        figure = self.get_root()
-        js = (
+    def _build_script(self) -> str:
+        return (
             "(function (map) {\n"
             "            setTimeout(function () {            // after the whole map script: the layer control exists by then\n"
             '                var list = map.getContainer().querySelector(".leaflet-control-layers-list");\n'
@@ -6946,13 +7013,18 @@ class LayerToggleAll(MacroElement):
             "            }, 0);\n"
             f"        }})({self._parent.get_name()});"
         )
-        figure.script.add_child(_RawElement(js), name=self.get_name())
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        figure.script.add_child(_RawElement(self._build_script()), name=self.get_name())
         for element in self._children.values():
             element.render(**kwargs)
 
 
 class LegendBox(MacroElement):
     """One fixed box (bottom-left) holding the legend sections of every layer that is on."""
+
+    _template = _FastTemplate(html=lambda this, _kwargs=None: this.box_html)
 
     def __init__(self, sections: Sequence[str]):
         super().__init__()
@@ -6965,6 +7037,7 @@ class LegendBox(MacroElement):
             + '<div class="rg-legend-sep"></div>'.join(sections)
             + "</div>"
         )
+        self._template = LegendBox._template
 
     def render(self, **kwargs: Any) -> None:
         figure = self.get_root()

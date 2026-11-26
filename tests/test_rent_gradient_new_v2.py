@@ -1722,3 +1722,47 @@ def test_fast_kernels_are_thread_safe_under_concurrent_calls():
             assert bc == expected_bc
 
 
+def test_streamlit_folium_renders_all_compact_layers_and_controls():
+    import streamlit_folium as sf
+
+    graph = helpers.grid_graph(4)
+    for _, _, data in graph.edges(data=True):
+        data["name"] = "ถนน {{ 7*7 }} {% endfor %}"
+    ctx = ss_ctx(graph, ss_topn=2)
+    base = rich_ctx()
+    merged = v2.Ctx(**{
+        **base.__dict__,
+        "ss": ctx.ss,
+        "show": {**base.show, **ctx.show, "show_space_syntax": True,
+                 "show_betweenness": True, "show_closeness": True, "show_rent_nodes": True,
+                 "map_style_name": "พื้นดำ (เหมือน depthmap)"},
+    })
+    m = v2.build_base_map(merged)
+    v2.ViewMemory("tok").add_to(m)
+    drawn, warns = v2.render_layers(merged, m)
+    assert warns == []
+    folium.LayerControl().add_to(m)
+    v2.LayerToggleAll().add_to(m)
+    leg = v2.legend_stack(merged, drawn)
+    assert leg is not None
+    m.get_root().add_child(leg)
+
+    # Exact pipeline executed by st_folium()
+    m.get_root().render()
+    m.render()
+    html = sf._get_html(m)
+    header = sf._get_header(m)
+    leaflet = sf._get_map_string(m)
+
+    assert "คะแนน (0–100):" in leaflet and 'lineCap: "round"' in leaflet
+    assert "Betweenness Score:" in leaflet
+    assert "Integration Score:" in leaflet and "L.circleMarker([r[4], r[5]]" in leaflet
+    assert "ค่าเช่าคาดการณ์:" in leaflet
+    assert "rgv2_view" in leaflet and "rg-layer-all" in leaflet
+    assert ")(feature_group_div_" in leaflet and ")(map_div);" in leaflet
+    assert "{{ 7*7 }}" in leaflet
+    assert "Integration (NAIN)" in html
+    assert ".rg-legend" in header and ".leaflet-container" in header
+
+
+
