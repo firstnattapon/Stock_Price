@@ -81,6 +81,25 @@ MODIFIED = {
     "_legend_swatch_row": "UI/UX redesign: adds flex-shrink guard and tighter swatch alignment in map legend",
     "render_map": "draws the registry layers from a Ctx instead of one 350-line function, with active-layer context bar and framed map",
     "main": "stage table + Ctx + layers panel + theme-adaptive APP_THEME_CSS",
+    "anchor_study_polygon": "uses vectorized shapely.transform (removes Shapely deprecation warning, identical polygon)",
+    "find_cbd_anchors": "dispatches shortest-path passes to rent_gradient_fast.anchor_dijkstra_fast when csgraph_dijkstra is unpatched (exact same scores & winners)",
+    "_component_axes": "delegates connected-component pixel stats to rent_gradient_fast.parcel_label_stats_fast when HAS_FAST (identical axes/areas)",
+    "_parcel_cells": "single-pass Numba/vectorized label stats via rent_gradient_fast.parcel_label_stats_fast (identical cell counts & geometry)",
+    "_classify_colors": "delegates HSV/RGB pixel classification to rent_gradient_fast.classify_colors_fast (identical class labels)",
+    "_WEB_MERCATOR": "reuses shared cached pyproj Transformer from rent_gradient_fast",
+    "_WEB_MERCATOR_INV": "reuses shared cached inverse pyproj Transformer from rent_gradient_fast",
+    "fetch_wms_image": "reuses keep-alive HTTP session via rent_gradient_fast.http_get while respecting monkeypatched requests.get",
+    "_legend_lut": "caches compiled 2D LUT per legend via rent_gradient_fast.cached_legend_lut (identical LUT)",
+    "_plan_tile_shares": "single-pass Numba/vectorized tile classifier & share counter via rent_gradient_fast.plan_tile_shares_fast (identical shares & classes)",
+    "build_rent_nodes_geojson": "vectorizes haversine distance calculation via rent_gradient_fast.haversine_km_batch (identical GeoJSON)",
+    "ring_coverage_areas_km2": "uses vectorized shapely.transform and reuses previous outer buffer (removes deprecation warning, identical areas)",
+    "count_nodes_per_ring": "vectorizes haversine distance calculation via rent_gradient_fast.haversine_km_batch (identical ring counts)",
+    "safe_fetch_isochrone": "reuses keep-alive HTTP session via rent_gradient_fast.http_get while respecting monkeypatched requests.get",
+    "download_github_bundle": "reuses keep-alive HTTP session via rent_gradient_fast.http_get while respecting monkeypatched requests.get",
+    "compute_weighted_closeness": "dispatches exact & pivot Dijkstra to rent_gradient_fast when csgraph_dijkstra is unpatched (identical closeness values)",
+    "_compute_centrality_impl": "uses Numba Brandes edge betweenness with 1-core peeling, cached plasma LUT, and direct geom coords (identical scores/colors/spots)",
+    "_evidence_summary": "caches JSON download export string via lru_get to avoid re-serializing on every rerun",
+    "perform_calculation": "copies feature dicts/properties instead of mutating @st.cache_data cached objects in-place",
 }
 # Replaced by new SHELL code (the behaviour moved into the layer registry / panels / views).
 REPLACED = {
@@ -97,7 +116,13 @@ NEW_MODIFIED = {
     "fetch_graph": "calls this page's own _fetch_osm_graph (no cross-page import, no plain-osmnx fallback)",
     "load_bundled_graph": "reads the zip through this page's _load_graph_bytes / MAX_CACHE_ENTRY_BYTES",
     "build_segment_network": "its last step (legal moves + components) is _assemble_segment_network(), which the "
-                             "road scenario (add_new_roads) reuses — same arrays, same numbers",
+                             "road scenario (add_new_roads) reuses, and polyline geometry stats are batched via rent_gradient_fast — same arrays, same numbers",
+    "_subtree_sums": "dispatches to rent_gradient_fast.subtree_sums_fast (Numba compiled, bit-exact)",
+    "_local_pass": "dispatches to rent_gradient_fast.ss_local_pass_fast (parallel Numba binary-heap Dijkstra with iterative pairwise sum, bit-exact)",
+    "_global_pass": "dispatches to rent_gradient_fast.ss_global_component_fast (parallel Numba binary-heap Dijkstra + Brandes accumulation, bit-exact)",
+    "gradient_hex": "vectorized RGB-to-hex formatting via rent_gradient_fast.rgb_float_to_hex_list (identical hex strings)",
+    "segments_geojson": "batched coordinate rounding and pre-converted column access (identical GeoJSON features)",
+    "add_basemap": "injects depthmap dark canvas CSS via _RawElement instead of Jinja2 folium.Element (zero Jinja2 overhead, identical HTML)",
 }
 NEW_REPLACED = {
     "PAGE_CONFIG": "the merged page has its own (Rent_Gradient.py's, retitled)",
@@ -1507,4 +1532,193 @@ def test_masthead_stepper_and_map_bar_reflect_live_progress_and_escape_html(monk
     bar = html_calls[-1]
     assert "<img src=x" not in bar and "<b>style</b>" not in bar
     assert "&lt;img src=x onerror=1&gt;" in bar and "&lt;b&gt;style&lt;/b&gt;" in bar
+
+
+# ----------------------------------------------------------------------------- fast-kernel equivalence & stability
+def test_fast_kernels_match_pure_python_reference_for_space_syntax_and_shortcut(monkeypatch):
+    graph = helpers.random_street_graph(6)
+    fast_net = v2.build_segment_network(graph)
+    fast_res = {k: v2.analyse_network(fast_net, kind=k, radii=(400.0, None), with_choice=True)
+                for k in ("angular", "topological", "metric")}
+    fast_sc = v2.suggest_shortcut(fast_net, fast_res["angular"], np.ones(fast_net.n_segments, dtype=bool))
+    fast_hex = v2.gradient_hex(np.array([np.nan, 0.0, 0.25, 0.5, 0.75, 1.0]))
+    fast_dhex = v2.delta_hex(np.array([np.nan, -10.0, 0.0, 5.0, 10.0]), 10.0)
+    fast_geo = v2.segments_geojson(fast_net, {"v": fast_res["angular"].integration["n"], "color": fast_hex[:1] * fast_net.n_segments})
+
+    monkeypatch.setattr(v2, "HAS_FAST", False)
+    ref_net = v2.build_segment_network(graph)
+    ref_res = {k: v2.analyse_network(ref_net, kind=k, radii=(400.0, None), with_choice=True)
+               for k in ("angular", "topological", "metric")}
+    ref_sc = v2.suggest_shortcut(ref_net, ref_res["angular"], np.ones(ref_net.n_segments, dtype=bool))
+    ref_hex = v2.gradient_hex(np.array([np.nan, 0.0, 0.25, 0.5, 0.75, 1.0]))
+    ref_dhex = v2.delta_hex(np.array([np.nan, -10.0, 0.0, 5.0, 10.0]), 10.0)
+    ref_geo = v2.segments_geojson(ref_net, {"v": ref_res["angular"].integration["n"], "color": ref_hex[:1] * ref_net.n_segments})
+
+    assert np.array_equal(fast_net.seg_len, ref_net.seg_len)
+    assert np.array_equal(fast_net.seg_bend_deg, ref_net.seg_bend_deg)
+    assert np.array_equal(fast_net.seg_mid_xy, ref_net.seg_mid_xy)
+    assert np.array_equal(fast_net.tr_from, ref_net.tr_from)
+    assert np.array_equal(fast_net.tr_to, ref_net.tr_to)
+    assert np.array_equal(fast_net.tr_deflection_deg, ref_net.tr_deflection_deg)
+    for k in ("angular", "topological", "metric"):
+        for rkey in ("400", "n"):
+            assert np.array_equal(fast_res[k].nc[rkey], ref_res[k].nc[rkey])
+            assert np.array_equal(fast_res[k].td[rkey], ref_res[k].td[rkey])
+            assert np.array_equal(fast_res[k].choice[rkey], ref_res[k].choice[rkey])
+            assert np.array_equal(fast_res[k].integration[rkey], ref_res[k].integration[rkey], equal_nan=True)
+            assert np.array_equal(fast_res[k].choice_norm[rkey], ref_res[k].choice_norm[rkey], equal_nan=True)
+    assert fast_sc == ref_sc and fast_hex == ref_hex and fast_dhex == ref_dhex and fast_geo == ref_geo
+
+
+def test_fast_kernels_match_reference_for_anchor_centrality_closeness_and_evidence(monkeypatch):
+    graph = helpers.random_street_graph(6)
+    center = (helpers.LAT0, helpers.LON0)
+    monkeypatch.setattr(v2, "_fetch_osm_graph", lambda wkt, nt="drive": (graph, True, None))
+
+    legend, _ = v2.load_cityplan_legend()
+    lut = v2._legend_lut(legend, v2.ZONING_COLOR_TOLERANCE)
+    rng = np.random.default_rng(7)
+    rgba = rng.integers(0, 256, size=(64, 64, 4), dtype=np.uint8)
+    rgba[..., 3] = 255
+    # Synthetic parcel grid with crisp dark boundary lines so _parcel_cells finds lots
+    parcel_rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+    parcel_rgba[::16, :, :] = [0, 0, 0, 255]
+    parcel_rgba[:, ::16, :] = [0, 0, 0, 255]
+
+    fast_anchors = v2.find_cbd_anchors(graph, center, 1500.0)
+    fast_close_exact, m_fe = v2.compute_weighted_closeness(graph.to_undirected())
+    with monkeypatch.context() as mp:
+        mp.setitem(v2.NETWORK_CONFIG, "closeness_exact_threshold", 5)
+        mp.setitem(v2.NETWORK_CONFIG, "closeness_k_pivots", 10)
+        fast_close_pivot, m_fp = v2.compute_weighted_closeness(graph.to_undirected())
+    fast_cent = v2._compute_centrality_impl("POLYGON ((0 0, 1 0, 1 1, 0 0))", "drive")
+    fast_cls = v2._classify_colors(rgba, legend, v2.ZONING_COLOR_TOLERANCE)
+    fast_shares = v2._plan_tile_shares(rgba, lut, len(legend), cells=4)
+    fast_parcels = v2._parcel_cells(parcel_rgba, m_per_px=1.0)
+
+    monkeypatch.setattr(v2, "HAS_FAST", False)
+    ref_anchors = v2.find_cbd_anchors(graph, center, 1500.0)
+    ref_close_exact, m_re = v2.compute_weighted_closeness(graph.to_undirected())
+    with monkeypatch.context() as mp:
+        mp.setitem(v2.NETWORK_CONFIG, "closeness_exact_threshold", 5)
+        mp.setitem(v2.NETWORK_CONFIG, "closeness_k_pivots", 10)
+        ref_close_pivot, m_rp = v2.compute_weighted_closeness(graph.to_undirected())
+    ref_cent = v2._compute_centrality_impl("POLYGON ((0 0, 1 0, 1 1, 0 0))", "drive")
+    ref_cls = v2._classify_colors(rgba, legend, v2.ZONING_COLOR_TOLERANCE)
+    ref_shares = v2._plan_tile_shares(rgba, lut, len(legend), cells=4)
+    ref_parcels = v2._parcel_cells(parcel_rgba, m_per_px=1.0)
+
+    assert m_fe == m_re == "exact-scipy" and m_fp == m_rp == "pivot-approx"
+    for obj in ("composite", "closeness"):
+        assert fast_anchors[obj]["anchor"]["node_id"] == ref_anchors[obj]["anchor"]["node_id"]
+        assert fast_anchors[obj]["anchor"]["score"] == pytest.approx(ref_anchors[obj]["anchor"]["score"], abs=1e-12)
+    for k in ref_close_exact:
+        assert fast_close_exact[k] == pytest.approx(ref_close_exact[k], abs=1e-12)
+        assert fast_close_pivot[k] == pytest.approx(ref_close_pivot[k], abs=1e-12)
+    assert len(fast_cent["edges"]["features"]) == len(ref_cent["edges"]["features"])
+    for f1, f2 in zip(fast_cent["edges"]["features"], ref_cent["edges"]["features"]):
+        assert f1["properties"]["color"] == f2["properties"]["color"]
+        assert f1["properties"]["betweenness"] == pytest.approx(f2["properties"]["betweenness"], abs=1e-12)
+        assert f1["properties"]["stroke_weight"] == pytest.approx(f2["properties"]["stroke_weight"], abs=1e-12)
+        assert f1["geometry"] == f2["geometry"]
+    assert len(fast_cent["golden_spots"]) == len(ref_cent["golden_spots"])
+    for g1, g2 in zip(fast_cent["golden_spots"], ref_cent["golden_spots"]):
+        assert g1["node_id"] == g2["node_id"]
+        for k in ("lat", "lon", "score", "closeness_norm", "degree_norm", "low_traffic_bonus"):
+            assert g1[k] == pytest.approx(g2[k], abs=1e-12)
+    assert np.array_equal(fast_cls, ref_cls)
+    assert np.array_equal(fast_shares["shares"], ref_shares["shares"])
+    assert fast_shares["painted"] == ref_shares["painted"]
+    assert fast_shares["explained"] == ref_shares["explained"]
+    assert fast_shares["red_pixels"] == ref_shares["red_pixels"]
+    assert np.array_equal(fast_shares["red_sum"], ref_shares["red_sum"])
+    assert fast_shares["colours"] == ref_shares["colours"]
+    assert fast_parcels["data"] is True and ref_parcels["data"] is True
+    assert fast_parcels["cell_count"] == ref_parcels["cell_count"]
+    assert np.allclose(fast_parcels["area_m2"], ref_parcels["area_m2"], rtol=0, atol=1e-11)
+    assert np.allclose(fast_parcels["aspect"], ref_parcels["aspect"], rtol=0, atol=1e-11)
+    assert np.allclose(fast_parcels["cx"], ref_parcels["cx"], rtol=0, atol=1e-11)
+    assert np.allclose(fast_parcels["cy"], ref_parcels["cy"], rtol=0, atol=1e-11)
+
+
+def test_monkeypatched_csgraph_dijkstra_bypasses_fast_path(monkeypatch):
+    graph = helpers.grid_graph(4)
+    called = []
+    real_dijkstra = v2.csgraph_dijkstra
+
+    def spy(*args, **kwargs):
+        called.append(True)
+        return real_dijkstra(*args, **kwargs)
+
+    monkeypatch.setattr(v2, "csgraph_dijkstra", spy)
+    v2.compute_weighted_closeness(graph.to_undirected())
+    assert len(called) >= 1
+    called.clear()
+    v2.find_cbd_anchors(graph, (helpers.LAT0, helpers.LON0), 1500.0)
+    assert len(called) >= 1
+
+
+def test_jinja2_special_tokens_in_road_names_render_without_error():
+    graph = helpers.chain(3)
+    for _, _, data in graph.edges(data=True):
+        data["name"] = "ซอย {{ 7*7 }} {% endfor %} {# comment #} <script>x</script>"
+    ctx = ss_ctx(graph, ss_topn=2)
+    m = folium.Map()
+    v2.draw_space_syntax(ctx).add_to(m)
+    v2.CompactPoints(v2._json_js([[helpers.LAT0, helpers.LON0, "#000", 5, 0.8, ["{{ 7*7 }} {% end %}"]]]),
+                     heads=("ชื่อ:",)).add_to(m)
+    v2.LegendBox("<div>{{ 7*7 }} {% raw %}</div>").add_to(m)
+    html = m.get_root().render()
+    assert "{{ 7*7 }}" in html and "49" not in html.split("{{ 7*7 }}", 1)[0][-5:]
+    assert "<script>x</script>" not in html
+
+
+def test_module_loads_via_spec_from_file_location_without_sys_modules():
+    spec = importlib.util.spec_from_file_location("rg_isolated_load_test", PAGE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert hasattr(mod, "SegmentNetwork") and hasattr(mod, "Ctx")
+
+
+def test_perform_calculation_does_not_mutate_cached_isochrone_features(monkeypatch):
+    state = make_state(monkeypatch)
+    state["api_key"] = "test-key"
+    state["time_intervals"] = [5]
+    state["travel_mode"] = "drive"
+    cached_feature = {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": [[[100.0, 20.0], [100.1, 20.0], [100.1, 20.1], [100.0, 20.0]]]},
+        "properties": {"value": 300},
+    }
+    monkeypatch.setattr(v2, "fetch_api_data_cached", lambda *a: ([cached_feature], None))
+    monkeypatch.setattr(v2, "perform_rent_gradient", lambda quiet=True: None)
+    monkeypatch.setattr(v2.st, "toast", lambda *a, **k: None)
+    v2.perform_calculation([(0, {"lat": 20.0, "lng": 100.0, "active": True})])
+    assert cached_feature["properties"] == {"value": 300}
+    stored = state["isochrone_data"]["features"][0]["properties"]
+    assert stored["travel_time_minutes"] == 5.0 and stored["original_index"] == 0 and stored["active_index"] == 0
+
+
+def test_fast_kernels_are_thread_safe_under_concurrent_calls():
+    from concurrent.futures import ThreadPoolExecutor
+
+    graph = helpers.random_street_graph(5)
+    net = v2.build_segment_network(graph)
+    expected_ss = v2.analyse_network(net, kind="angular", radii=(400.0, None), with_choice=True)
+    expected_bc = v2._fast.edge_betweenness_for_multigraph(graph.to_undirected()) if v2.HAS_FAST else None
+
+    def worker(_):
+        res = v2.analyse_network(net, kind="angular", radii=(400.0, None), with_choice=True)
+        bc = v2._fast.edge_betweenness_for_multigraph(graph.to_undirected()) if v2.HAS_FAST else None
+        return res, bc
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(worker, range(12)))
+    for res, bc in results:
+        for rkey in ("400", "n"):
+            assert np.array_equal(res.integration[rkey], expected_ss.integration[rkey], equal_nan=True)
+            assert np.array_equal(res.choice_norm[rkey], expected_ss.choice_norm[rkey], equal_nan=True)
+        if expected_bc is not None:
+            assert bc == expected_bc
+
 
