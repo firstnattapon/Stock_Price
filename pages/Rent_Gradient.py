@@ -24,14 +24,13 @@ Rent Gradient v2 — ชั้นแผนที่ (Layers): Isochrone · CBD �
 เพิ่ม view ใหม่ใต้แผนที่ = 1 ฟังก์ชัน + 1 แถวใน ``VIEWS``
 """
 
-from __future__ import annotations
-
 import streamlit as st
 import folium
 from folium.plugins import Fullscreen, MeasureControl, MousePosition
-from branca.element import MacroElement, Template
+from branca.element import Element, MacroElement, Template
 from streamlit_folium import st_folium
 import requests
+import shapely
 from shapely.geometry import LineString, shape, mapping, box
 from shapely.ops import unary_union
 from shapely import wkt
@@ -50,6 +49,7 @@ import hashlib
 import pickle
 import os
 import re
+import sys
 import threading
 from pathlib import Path
 import zipfile
@@ -69,12 +69,25 @@ try:
     from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
     from scipy import ndimage as ndi
     HAS_SCIPY: bool = True
+    _ORIG_CSGRAPH_DIJKSTRA = csgraph_dijkstra
 except Exception:
     HAS_SCIPY = False
+    _ORIG_CSGRAPH_DIJKSTRA = None
 
 # Space Syntax cannot run without scipy (graph search, ranks) — unlike the optional accelerators above
 from scipy.sparse.csgraph import connected_components, dijkstra
 from scipy.stats import rankdata
+
+# Optional compiled / vectorized fast-path kernels (falls back transparently if unavailable)
+try:
+    _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+    import rent_gradient_fast as _fast
+    HAS_FAST: bool = bool(HAS_SCIPY and getattr(_fast, "HAS_NUMBA", False))
+except Exception:
+    _fast = None
+    HAS_FAST = False
 
 
 # ============================================================================
@@ -494,7 +507,10 @@ SCN_COLOR_MODES: Dict[str, str] = {
 def _remote_payload() -> Optional[Dict[str, Any]]:
     """Saved defaults from the project JSON — fetched once per server process (not once per session)."""
     try:
-        resp = requests.get(DEFAULT_CONFIG["JSON_URL"], timeout=TIMEOUT_INIT)
+        resp = (
+            _fast.http_get(requests, DEFAULT_CONFIG["JSON_URL"], timeout=TIMEOUT_INIT)
+            if _fast is not None else requests.get(DEFAULT_CONFIG["JSON_URL"], timeout=TIMEOUT_INIT)
+        )
         if resp.status_code == 200:
             data = resp.json()
             return data if isinstance(data, dict) else None
@@ -976,15 +992,17 @@ def _anchor_projection(lat: float, lon: float) -> Transformer:
 def anchor_study_polygon(lat: float, lon: float, radius_m: float):
     """Download footprint with 20% buffer, independent of seed and isochrones."""
     from shapely.geometry import Point
-    from shapely.ops import transform
     from pyproj.enums import TransformDirection
 
     if not 1000 <= radius_m <= 20000:
         raise ValueError("Study radius must be between 1 and 20 km.")
     projection = _anchor_projection(lat, lon)
-    polygon = transform(
-        lambda x, y: projection.transform(x, y, direction=TransformDirection.INVERSE),
-        Point(0, 0).buffer(radius_m * (1 + ANCHOR_CONFIG["buffer_ratio"]), quad_segs=64),
+    circle = Point(0, 0).buffer(radius_m * (1 + ANCHOR_CONFIG["buffer_ratio"]), quad_segs=64)
+    polygon = shapely.transform(
+        circle,
+        lambda xy: np.column_stack(
+            projection.transform(xy[:, 0], xy[:, 1], direction=TransformDirection.INVERSE)
+        ),
     )
     if not polygon.is_valid or polygon.bounds[2] - polygon.bounds[0] > 180:
         raise ValueError("Study areas crossing the antimeridian are not supported.")
@@ -1226,22 +1244,40 @@ def find_cbd_anchors(
     # Distances from each exact row to every case's destinations: a by-product of
     # the base pass, so the probe re-runs Dijkstra only for rows it has not seen.
     case_sums: Dict[int, np.ndarray] = {}
-    filled = 0
-    for part, rows_d in _dijkstra_batches(matrix, sources):
-        position = np.arange(filled, filled + len(part))
-        is_base = position < n_ref
-        if is_base.any():
-            ref_c[position[is_base]] = (n_destinations - 1) / rows_d[is_base][:, eligible].sum(axis=1)
-            pivot_sum += rows_d[is_base].sum(axis=0)
-        if cases:  # per-case sums over the pivots that fall inside each perturbed circle
+    use_fast_dijkstra = bool(HAS_FAST and csgraph_dijkstra is _ORIG_CSGRAPH_DIJKSTRA)
+    eligible_mask = np.zeros(n, dtype=bool)
+    eligible_mask[eligible] = True
+    if use_fast_dijkstra:
+        source_is_base = np.arange(len(sources)) < n_ref
+        elig_sums, cr_all, p_sum, cp_sum, co_sum = _fast.anchor_dijkstra_fast(
+            matrix.indptr, matrix.indices, matrix.data,
+            sources, source_is_base, eligible_mask, case_inside, n, True,
+        )
+        if n_ref > 0:
+            ref_c[:] = (n_destinations - 1) / elig_sums[:n_ref]
+        pivot_sum = p_sum
+        if cases:
+            case_pivot_sum = cp_sum
+            case_outer_sum = co_sum
+            case_ref_sum[:] = cr_all
+            case_sums.update((int(i), row) for i, row in zip(sources, cr_all))
+    else:
+        filled = 0
+        for part, rows_d in _dijkstra_batches(matrix, sources):
+            position = np.arange(filled, filled + len(part))
+            is_base = position < n_ref
             if is_base.any():
-                case_pivot_sum += rows_d[is_base].T @ case_float[part[is_base]]
-            if (~is_base).any():
-                case_outer_sum += rows_d[~is_base].T @ case_float[part[~is_base]]
-            chunk = rows_d @ case_float
-            case_ref_sum[position] = chunk
-            case_sums.update((int(i), row) for i, row in zip(part, chunk))
-        filled += len(part)
+                ref_c[position[is_base]] = (n_destinations - 1) / rows_d[is_base][:, eligible].sum(axis=1)
+                pivot_sum += rows_d[is_base].sum(axis=0)
+            if cases:  # per-case sums over the pivots that fall inside each perturbed circle
+                if is_base.any():
+                    case_pivot_sum += rows_d[is_base].T @ case_float[part[is_base]]
+                if (~is_base).any():
+                    case_outer_sum += rows_d[~is_base].T @ case_float[part[~is_base]]
+                chunk = rows_d @ case_float
+                case_ref_sum[position] = chunk
+                case_sums.update((int(i), row) for i, row in zip(part, chunk))
+            filled += len(part)
     ref_mean, ref_std = float(ref_c.mean()), float(ref_c.std())
 
     # Stratified (Horvitz-Thompson) estimate of the summed distance to each case's
@@ -1283,6 +1319,18 @@ def find_cbd_anchors(
     def ensure_exact(candidates):
         """Exact closeness for every candidate lacking it (one shared row each)."""
         missing = [int(i) for i in candidates if int(i) not in exact_c]
+        if use_fast_dijkstra and missing:
+            miss_arr = np.asarray(missing, dtype=np.int32)
+            es, cr, _, _, _ = _fast.anchor_dijkstra_fast(
+                matrix.indptr, matrix.indices, matrix.data,
+                miss_arr, np.zeros(len(miss_arr), dtype=np.uint8),
+                eligible_mask, case_inside, n, False,
+            )
+            for i, s_val in zip(missing, es):
+                exact_c[i] = float((n_destinations - 1) / s_val)
+            if cases:
+                case_sums.update((i, row) for i, row in zip(missing, cr))
+            return len(missing)
         for part, rows_d in _dijkstra_batches(matrix, missing):
             for i, c in zip(part, (n_destinations - 1) / rows_d[:, eligible].sum(axis=1)):
                 exact_c[int(i)] = float(c)
@@ -1350,8 +1398,17 @@ def find_cbd_anchors(
             order = np.lexsort((cand, -approx))
             picks.append(cand[order[:int(ANCHOR_CONFIG["stability_top_m"])]])
         needed = sorted({int(i) for pick in picks for i in pick} - case_sums.keys())
-        for part, rows_d in _dijkstra_batches(matrix, needed):
-            case_sums.update((int(i), row) for i, row in zip(part, rows_d @ case_float))
+        if use_fast_dijkstra and needed:
+            need_arr = np.asarray(needed, dtype=np.int32)
+            _, cr, _, _, _ = _fast.anchor_dijkstra_fast(
+                matrix.indptr, matrix.indices, matrix.data,
+                need_arr, np.zeros(len(need_arr), dtype=np.uint8),
+                eligible_mask, case_inside, n, False,
+            )
+            case_sums.update((i, row) for i, row in zip(needed, cr))
+        else:
+            for part, rows_d in _dijkstra_batches(matrix, needed):
+                case_sums.update((int(i), row) for i, row in zip(part, rows_d @ case_float))
         reach_limit = float(radial_distance.max())
         out = []
         for k, case in enumerate(cases):
@@ -1632,17 +1689,25 @@ def _component_axes(labels: np.ndarray, n: int, centroids: bool = False) -> Tupl
     (a rectangle with sides a >= b has variances a²/12 and b²/12). With ``centroids`` the
     centre ``(x, y)`` of every cell (pixels) follows as the third and fourth arrays.
     """
-    flat = labels.ravel()
-    yy, xx = np.indices(labels.shape)
-    count = np.maximum(np.bincount(flat, minlength=n + 1)[1:].astype(float), 1.0)
+    if HAS_FAST and n > 0:
+        area, _perim, _touches, sx, sy, sxx, syy, sxy = _fast.parcel_label_stats_fast(labels, n)
+        count = np.maximum(area.astype(float), 1.0)
+        mx, my = sx / count, sy / count
+        cxx = sxx / count - mx ** 2 + 1 / 12
+        cyy = syy / count - my ** 2 + 1 / 12
+        cxy = sxy / count - mx * my
+    else:
+        flat = labels.ravel()
+        yy, xx = np.indices(labels.shape)
+        count = np.maximum(np.bincount(flat, minlength=n + 1)[1:].astype(float), 1.0)
 
-    def moment(values: np.ndarray) -> np.ndarray:
-        return np.bincount(flat, weights=values.ravel().astype(float), minlength=n + 1)[1:] / count
+        def moment(values: np.ndarray) -> np.ndarray:
+            return np.bincount(flat, weights=values.ravel().astype(float), minlength=n + 1)[1:] / count
 
-    mx, my = moment(xx), moment(yy)
-    cxx = moment(xx * xx) - mx ** 2 + 1 / 12  # +1/12: variance of a pixel's own footprint
-    cyy = moment(yy * yy) - my ** 2 + 1 / 12
-    cxy = moment(xx * yy) - mx * my
+        mx, my = moment(xx), moment(yy)
+        cxx = moment(xx * xx) - mx ** 2 + 1 / 12  # +1/12: variance of a pixel's own footprint
+        cyy = moment(yy * yy) - my ** 2 + 1 / 12
+        cxy = moment(xx * yy) - mx * my
     half_trace = (cxx + cyy) / 2
     spread = np.sqrt(np.maximum(half_trace ** 2 - (cxx * cyy - cxy ** 2), 0.0))
     major = np.sqrt(12.0 * (half_trace + spread))
@@ -1677,6 +1742,28 @@ def _parcel_cells(rgba: np.ndarray, m_per_px: float) -> Dict[str, Any]:
               if cfg["closing_size"] > 1 else ink)
     labels, n = ndi.label(~closed)  # 4-connected free cells; 8-connected lines already separate them
     if n == 0:
+        return out
+    if HAS_FAST:
+        area_px, perimeter_px, touches_u8, sx, sy, sxx, syy, sxy = _fast.parcel_label_stats_fast(labels, n)
+        touches_edge = touches_u8.astype(bool)
+        giant = area_px > cfg["giant_cell_ratio"] * labels.size
+        keep = ~touches_edge & ~giant & (area_px >= cfg["speck_px"])
+        out.update(coverage=float(1.0 - area_px[giant].sum() / labels.size), cell_count=int(keep.sum()))
+        if int(keep.sum()) < cfg["min_cells"]:
+            return out
+        line_px = float(np.clip(ink.sum() / max(perimeter_px[keep].sum() / 2.0, 1.0), 0.5, 8.0))
+        parcel_px = area_px[keep] + perimeter_px[keep] * line_px / 2.0 + line_px ** 2
+        count_k = np.maximum(area_px[keep].astype(float), 1.0)
+        cx_k, cy_k = sx[keep] / count_k, sy[keep] / count_k
+        cxx = sxx[keep] / count_k - cx_k ** 2 + 1 / 12
+        cyy = syy[keep] / count_k - cy_k ** 2 + 1 / 12
+        cxy = sxy[keep] / count_k - cx_k * cy_k
+        half_trace = (cxx + cyy) / 2
+        spread = np.sqrt(np.maximum(half_trace ** 2 - (cxx * cyy - cxy ** 2), 0.0))
+        major_k = np.sqrt(12.0 * (half_trace + spread))
+        minor_k = np.sqrt(12.0 * np.maximum(half_trace - spread, 1e-9))
+        out.update(data=True, area_m2=parcel_px * m_per_px ** 2,
+                   aspect=(major_k + line_px) / (minor_k + line_px), cx=cx_k, cy=cy_k)
         return out
     area_px = np.bincount(labels.ravel(), minlength=n + 1)[1:]
     edge = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
@@ -1734,6 +1821,9 @@ def parcel_features(rgba: np.ndarray, m_per_px: float) -> Dict[str, Any]:
 def _classify_colors(rgba: np.ndarray, legend: List[Dict[str, Any]], tolerance: float) -> np.ndarray:
     """Nearest-legend-colour class per pixel (-1 = transparent / no colour within tolerance),
     then a 3x3 majority vote so thin outlines and text do not count as a class."""
+    if HAS_FAST and len(legend) > 0:
+        legend_rgb = np.asarray([entry["rgb"][:3] for entry in legend], dtype=np.float64)
+        return _fast.classify_colors_fast(rgba, legend_rgb, tolerance, PARCEL_CONFIG["alpha_threshold"])
     h, w = rgba.shape[:2]
     rgb = rgba[..., :3].astype(np.float32)
     best = np.full((h, w), np.inf, dtype=np.float32)
@@ -1785,8 +1875,8 @@ EVIDENCE_CONFIG: Dict[str, Any] = {
     "confidence": {"parcel_ok": 0.50, "coverage_min": 0.60, "coverage_medium": 0.40},
     "stability": {"shrink": 0.8, "grow": 1.2, "shift": 0.2, "shift_max_m": 1000.0, "stable": 0.05, "check": 0.15},
 }
-_WEB_MERCATOR = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-_WEB_MERCATOR_INV = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+_WEB_MERCATOR = _fast.WEB_MERCATOR if _fast is not None else Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+_WEB_MERCATOR_INV = _fast.WEB_MERCATOR_INV if _fast is not None else Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
 
 def _wms_window(lat: float, lon: float, window_m: float) -> Tuple[float, float, float, float]:
@@ -1843,7 +1933,8 @@ def fetch_wms_image(
     except Exception:
         pass  # unreadable cache entry: fetch again
     try:
-        response = requests.get(
+        http_get = (lambda url, **kw: _fast.http_get(requests, url, **kw)) if _fast is not None else requests.get
+        response = http_get(
             LONGDO_WMS_URL, params=params, timeout=EVIDENCE_CONFIG["timeout_s"],
             headers={"User-Agent": "Rent_Gradient-evidence/1.0"},
         )
@@ -1944,6 +2035,8 @@ def estimate_evidence_requests(center: Tuple[float, float], radius_m: float) -> 
 # -------------------------------------------------------------- plan: colours → peak zone
 def _legend_lut(legend: List[Dict[str, Any]], tolerance: float) -> np.ndarray:
     """Class (or -1) for every 5-bit-per-channel RGB value: one table look-up per pixel."""
+    if _fast is not None:
+        return _fast.cached_legend_lut(legend, tolerance)
     idx = np.arange(32768)
     rgb = np.stack([((idx >> 10) & 31) * 8 + 4, ((idx >> 5) & 31) * 8 + 4, (idx & 31) * 8 + 4],
                    axis=1).astype(np.float32)
@@ -1975,6 +2068,22 @@ def _plan_tile_shares(rgba: np.ndarray, lut: np.ndarray, n_classes: int, cells: 
     """
     if rgba.ndim != 3 or rgba.shape[2] != 4 or rgba.shape[0] != rgba.shape[1] or rgba.shape[0] % cells:
         raise ValueError(f"unexpected plan image shape {rgba.shape}")
+    if HAS_FAST:
+        shares_u32, painted_n, explained_n, red_n, red_sum, hist4 = _fast.plan_tile_shares_fast(
+            rgba, lut, n_classes, cells, PARCEL_CONFIG["alpha_threshold"],
+        )
+        px = rgba.shape[0] // cells
+        shares = shares_u32.astype(np.uint16) if (px * px) <= 65535 else shares_u32
+        nz = np.flatnonzero(hist4)
+        return {
+            "shares": shares,
+            "painted": int(painted_n),
+            "explained": int(explained_n),
+            "pixels": int(rgba.shape[0] * rgba.shape[1]),
+            "red_pixels": int(red_n),
+            "red_sum": red_sum,
+            "colours": {int(v): int(hist4[v]) for v in nz},
+        }
     painted = rgba[..., 3] > PARCEL_CONFIG["alpha_threshold"]
     key = ((rgba[..., 0] >> 3).astype(np.int32) << 10) | ((rgba[..., 1] >> 3).astype(np.int32) << 5) \
         | (rgba[..., 2] >> 3).astype(np.int32)
@@ -3052,12 +3161,42 @@ def build_rent_nodes_geojson(
     r_lo, r_hi = min(r_at_0, r_at_max), max(r_at_0, r_at_max)
     r_span = (r_hi - r_lo) or 1.0
 
-    out_features: List[Dict[str, Any]] = []
+    lons: List[float] = []
+    lats: List[float] = []
     for f in feats:
         try:
             lon, lat = f["geometry"]["coordinates"]
         except (KeyError, ValueError, TypeError):
             continue
+        lons.append(lon)
+        lats.append(lat)
+    if not lons:
+        return {"type": "FeatureCollection", "features": []}
+
+    if _fast is not None and HAS_SCIPY:
+        dists = _fast.haversine_km_batch(
+            anchor_lat, anchor_lon,
+            np.asarray(lats, dtype=np.float64),
+            np.asarray(lons, dtype=np.float64),
+        )
+        rents = float(r0) * np.exp(-float(lam) * np.maximum(dists, 0.0))
+        norms = (rents - r_lo) / r_span
+        out_features: List[Dict[str, Any]] = [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {
+                    "type": "rent_node",
+                    "rent": round(rent, 2),
+                    "color": rent_color_for_norm(norm),
+                },
+            }
+            for lon, lat, rent, norm in zip(lons, lats, rents.tolist(), norms.tolist())
+        ]
+        return {"type": "FeatureCollection", "features": out_features}
+
+    out_features = []
+    for lon, lat in zip(lons, lats):
         rent = predict_rent(haversine_km(anchor_lat, anchor_lon, lat, lon), r0, lam)
         norm = (rent - r_lo) / r_span
         out_features.append(
@@ -3106,11 +3245,11 @@ def ring_coverage_areas_km2(
         return None
     try:
         from shapely.geometry import Point
-        from shapely.ops import transform
 
         projection = _anchor_projection(anchor_lat, anchor_lon)
-        geom = transform(
-            lambda x, y, z=None: projection.transform(x, y), shape(coverage_geojson)
+        geom = shapely.transform(
+            shape(coverage_geojson),
+            lambda xy: np.column_stack(projection.transform(xy[:, 0], xy[:, 1])),
         )
         if geom.is_empty:
             return None
@@ -3118,11 +3257,12 @@ def ring_coverage_areas_km2(
             geom = geom.buffer(0)
         origin = Point(0.0, 0.0)
         areas: List[float] = []
+        prev_outer = None
         for i in range(n_rings):
             outer = origin.buffer(step_km * (i + 1) * 1000.0, quad_segs=64)
-            inner = origin.buffer(step_km * i * 1000.0, quad_segs=64) if i else None
-            band = outer.difference(inner) if inner is not None else outer
+            band = outer.difference(prev_outer) if prev_outer is not None else outer
             areas.append(float(band.intersection(geom).area) / 1e6)
+            prev_outer = outer
         return areas
     except Exception:
         return None
@@ -3145,21 +3285,40 @@ def count_nodes_per_ring(
     counts: List[int] = [0] * n_rings
     closeness_per_ring: List[List[float]] = [[] for _ in range(n_rings)]
     outside = 0
-    for f in ((nodes_geojson or {}).get("features") or []):
+    feats = (nodes_geojson or {}).get("features") or []
+    if not feats:
+        return counts, closeness_per_ring, outside
+
+    lons: List[float] = []
+    lats: List[float] = []
+    cvals: List[float] = []
+    for f in feats:
         try:
             lon, lat = f["geometry"]["coordinates"]
         except (KeyError, ValueError, TypeError):
             continue
-        idx = _ring_index_for_distance(
-            haversine_km(anchor_lat, anchor_lon, lat, lon), step_km, n_rings
-        )
+        lons.append(lon)
+        lats.append(lat)
+        cvals.append(float((f.get("properties") or {}).get("closeness", 0.0)))
+    if not lons:
+        return counts, closeness_per_ring, outside
+
+    if _fast is not None and HAS_SCIPY:
+        dists = _fast.haversine_km_batch(
+            anchor_lat, anchor_lon,
+            np.asarray(lats, dtype=np.float64),
+            np.asarray(lons, dtype=np.float64),
+        ).tolist()
+    else:
+        dists = [haversine_km(anchor_lat, anchor_lon, lat, lon) for lat, lon in zip(lats, lons)]
+
+    for d_km, cv in zip(dists, cvals):
+        idx = _ring_index_for_distance(d_km, step_km, n_rings)
         if idx is None:
             outside += 1
             continue
         counts[idx] += 1
-        closeness_per_ring[idx].append(
-            float((f.get("properties") or {}).get("closeness", 0.0))
-        )
+        closeness_per_ring[idx].append(cv)
     return counts, closeness_per_ring, outside
 
 
@@ -3486,7 +3645,10 @@ def safe_fetch_isochrone(
     }
 
     try:
-        response = requests.get(url, params=params, timeout=TIMEOUT_API)
+        response = (
+            _fast.http_get(requests, url, params=params, timeout=TIMEOUT_API)
+            if _fast is not None else requests.get(url, params=params, timeout=TIMEOUT_API)
+        )
 
         if response.status_code == 200:
             data = response.json()
@@ -3910,7 +4072,10 @@ def import_bundle_zip(bundle_bytes: bytes) -> Dict[str, Any]:
 def download_github_bundle() -> Tuple[Optional[bytes], Optional[str]]:
     """Download fixed-source bundle ZIP from GitHub."""
     try:
-        response = requests.get(GITHUB_BUNDLE_URL, timeout=TIMEOUT_GITHUB_DOWNLOAD)
+        response = (
+            _fast.http_get(requests, GITHUB_BUNDLE_URL, timeout=TIMEOUT_GITHUB_DOWNLOAD)
+            if _fast is not None else requests.get(GITHUB_BUNDLE_URL, timeout=TIMEOUT_GITHUB_DOWNLOAD)
+        )
         response.raise_for_status()
         return response.content, None
     except requests.RequestException as e:
@@ -4066,20 +4231,27 @@ def compute_weighted_closeness(
     nodelist = list(G_lcc.nodes)
     csr = _collapsed_csr(G_lcc, nodelist, default_length=1.0)
 
+    use_fast_dijkstra = bool(HAS_FAST and csgraph_dijkstra is _ORIG_CSGRAPH_DIJKSTRA)
     if n <= NETWORK_CONFIG["closeness_exact_threshold"]:
         # all-pairs ที่ n <= 3000 (<= ~72 MB); แถวต่อแถวผ่านตัวช่วยเดียวกับ anchor search
-        sums = np.empty(n)
-        for part, rows_d in _dijkstra_batches(csr, np.arange(n)):
-            sums[part] = rows_d.sum(axis=1)
+        if use_fast_dijkstra:
+            sums = _fast.closeness_exact_fast(csr.indptr, csr.indices, csr.data, n)
+        else:
+            sums = np.empty(n)
+            for part, rows_d in _dijkstra_batches(csr, np.arange(n)):
+                sums[part] = rows_d.sum(axis=1)
         k_eff = n - 1
         method = "exact-scipy"
     else:
         k = min(NETWORK_CONFIG["closeness_k_pivots"], n)
         rng = np.random.default_rng(42)
         pivots = rng.choice(n, size=k, replace=False)
-        sums = np.zeros(n)
-        for _part, rows_d in _dijkstra_batches(csr, pivots):
-            sums += rows_d.sum(axis=0)
+        if use_fast_dijkstra:
+            sums = _fast.closeness_pivot_fast(csr.indptr, csr.indices, csr.data, pivots, n)
+        else:
+            sums = np.zeros(n)
+            for _part, rows_d in _dijkstra_batches(csr, pivots):
+                sums += rows_d.sum(axis=0)
         k_eff = k
         method = "pivot-approx"
 
@@ -4123,37 +4295,56 @@ def _compute_centrality_impl(
     # Betweenness centrality (on undirected projection)
     # กราฟใหญ่: ประมาณค่าด้วย k-source sampling (เร็วขึ้นหลายสิบเท่า,
     # อันดับความสำคัญของถนนแทบไม่เปลี่ยน) — seed คงที่เพื่อผลซ้ำได้
-    if is_large_graph:
-        k_samples = min(NETWORK_CONFIG["betweenness_k_samples"], node_count)
-        betweenness_cent: Dict[Any, float] = nx.edge_betweenness_centrality(
-            G_undir, k=k_samples, weight="length", seed=42
-        )
-    else:
-        betweenness_cent = nx.edge_betweenness_centrality(G_undir, weight="length")
-    # MultiGraph results are keyed (u, v, key); the lookups below use (u, v).
-    betweenness_cent = edge_scores_by_pair(betweenness_cent)
+    k_samples = min(NETWORK_CONFIG["betweenness_k_samples"], node_count) if is_large_graph else None
+    betweenness_cent: Optional[Dict[Any, float]] = (
+        _fast.edge_betweenness_for_multigraph(G_undir, k_samples=k_samples, seed=42)
+        if HAS_FAST else None
+    )
+    if betweenness_cent is None:
+        if is_large_graph:
+            raw_bet: Dict[Any, float] = nx.edge_betweenness_centrality(
+                G_undir, k=k_samples, weight="length", seed=42
+            )
+        else:
+            raw_bet = nx.edge_betweenness_centrality(G_undir, weight="length")
+        # MultiGraph results are keyed (u, v, key); the lookups below use (u, v).
+        betweenness_cent = edge_scores_by_pair(raw_bet)
     max_bet = max(betweenness_cent.values()) if betweenness_cent else 1.0
 
     # Public colormap registry (Matplotlib >= 3.5).
     # matplotlib.cm.get_cmap was removed in newer Matplotlib releases.
-    cmap_bet = matplotlib.colormaps["plasma"]
+    plasma_lut = _fast.plasma_hex_lut() if _fast is not None else None
+    cmap_bet = None if plasma_lut is not None else matplotlib.colormaps["plasma"]
+    w_base = NETWORK_CONFIG["edge_weight_base"]
+    w_mult = NETWORK_CONFIG["edge_weight_multiplier"]
+    nodes_dict = G.nodes
 
     # ---- Build edge GeoJSON features ----
     edges_geojson: List[Dict[str, Any]] = []
     for u, v, _k, data in G.edges(keys=True, data=True):
-        score = betweenness_cent.get(tuple(sorted((u, v))), 0.0)
+        score = betweenness_cent.get((u, v) if u <= v else (v, u), 0.0)
         norm_score = score / max_bet if max_bet > 0 else 0.0
 
-        if "geometry" in data:
-            geom = mapping(data["geometry"])
+        geom_obj = data.get("geometry")
+        if geom_obj is not None:
+            if getattr(geom_obj, "geom_type", None) == "LineString":
+                geom: Dict[str, Any] = {"type": "LineString", "coordinates": list(geom_obj.coords)}
+            else:
+                geom = mapping(geom_obj)
         else:
+            nu, nv = nodes_dict[u], nodes_dict[v]
             geom = {
                 "type": "LineString",
                 "coordinates": [
-                    [G.nodes[u]["x"], G.nodes[u]["y"]],
-                    [G.nodes[v]["x"], G.nodes[v]["y"]],
+                    [nu["x"], nu["y"]],
+                    [nv["x"], nv["y"]],
                 ],
             }
+
+        if plasma_lut is not None:
+            hex_color = plasma_lut[255 if norm_score >= 1.0 else (0 if norm_score <= 0.0 else int(norm_score * 256))]
+        else:
+            hex_color = colors.to_hex(cmap_bet(norm_score))
 
         edges_geojson.append(
             {
@@ -4162,11 +4353,8 @@ def _compute_centrality_impl(
                 "properties": {
                     "type": "road",
                     "betweenness": norm_score,
-                    "color": colors.to_hex(cmap_bet(norm_score)),
-                    "stroke_weight": (
-                        NETWORK_CONFIG["edge_weight_base"]
-                        + norm_score * NETWORK_CONFIG["edge_weight_multiplier"]
-                    ),
+                    "color": hex_color,
+                    "stroke_weight": w_base + norm_score * w_mult,
                 },
             }
         )
@@ -4389,17 +4577,64 @@ def build_segment_network(graph: Any) -> SegmentNetwork:
     lat0, lon0 = float(node_lonlat[:, 1].mean()), float(node_lonlat[:, 0].mean())
     node_xy = _to_xy(node_lonlat[:, 0], node_lonlat[:, 1], lon0, lat0)
 
+    edge_list = list(graph.edges(data=True))
+    geom_coords: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+    if HAS_SCIPY and edge_list:
+        geoms = []
+        geom_eidx: List[int] = []
+        for ei, (_u, _v, data) in enumerate(edge_list):
+            g = data.get("geometry")
+            if isinstance(g, shapely.Geometry) and getattr(g, "coords", None) is not None:
+                geoms.append(g)
+                geom_eidx.append(ei)
+        if geoms:
+            all_c, g_idx = shapely.get_coordinates(geoms, return_index=True)
+            all_c_r = np.round(all_c, 6)
+            counts = np.bincount(g_idx, minlength=len(geoms))
+            starts = np.empty(len(geoms) + 1, dtype=np.int64)
+            starts[0] = 0
+            np.cumsum(counts, out=starts[1:])
+            for gi, ei in enumerate(geom_eidx):
+                s0, s1 = int(starts[gi]), int(starts[gi + 1])
+                if s1 - s0 >= 2:
+                    geom_coords[ei] = (all_c[s0:s1], all_c_r[s0:s1])
+
+    node_ll_r = np.round(node_lonlat, 6).tolist()
     found: Dict[Tuple[Any, ...], Tuple[np.ndarray, Dict[str, Any]]] = {}
-    for u, v, data in graph.edges(data=True):
+    for ei, (u, v, data) in enumerate(edge_list):
         iu, iv = index[u], index[v]
-        pts = _edge_lonlat(data, node_lonlat[iu], node_lonlat[iv])
-        if iu > iv:
-            iu, iv, pts = iv, iu, pts[::-1]
-        forward = tuple(np.round(pts, 6).ravel().tolist())
-        if iu == iv:                                 # a loop starts and ends at the same node: compare the
-            backward = tuple(np.round(pts[::-1], 6).ravel().tolist())   # whole outline to pick one direction
-            if backward < forward:
-                pts, forward = pts[::-1], backward
+        cached_pts = geom_coords.get(ei)
+        if cached_pts is not None:
+            pts, pts_r = cached_pts
+            pu, pv = node_lonlat[iu], node_lonlat[iv]
+            d0u = (pts[0, 0] - pu[0]) ** 2 + (pts[0, 1] - pu[1]) ** 2
+            d0v = (pts[0, 0] - pv[0]) ** 2 + (pts[0, 1] - pv[1]) ** 2
+            if d0u > d0v:
+                pts, pts_r = pts[::-1], pts_r[::-1]
+            if iu > iv:
+                iu, iv, pts, pts_r = iv, iu, pts[::-1], pts_r[::-1]
+            forward = tuple(pts_r.ravel().tolist())
+            if iu == iv:
+                backward = tuple(pts_r[::-1].ravel().tolist())
+                if backward < forward:
+                    pts, forward = pts[::-1], backward
+        else:
+            pts = _edge_lonlat(data, node_lonlat[iu], node_lonlat[iv])
+            if iu > iv:
+                iu, iv, pts = iv, iu, pts[::-1]
+            if len(pts) == 2 and data.get("geometry") is None:
+                ru, rv = node_ll_r[iu], node_ll_r[iv]
+                forward = (ru[0], ru[1], rv[0], rv[1])
+                if iu == iv:
+                    backward = (rv[0], rv[1], ru[0], ru[1])
+                    if backward < forward:
+                        pts, forward = pts[::-1], backward
+            else:
+                forward = tuple(np.round(pts, 6).ravel().tolist())
+                if iu == iv:
+                    backward = tuple(np.round(pts[::-1], 6).ravel().tolist())
+                    if backward < forward:
+                        pts, forward = pts[::-1], backward
         key = (iu, iv, forward)
         if key not in found:                         # the reverse twin of a two-way street
             found[key] = (pts, data)
@@ -4410,34 +4645,61 @@ def build_segment_network(graph: Any) -> SegmentNetwork:
     n_seg = len(keys)
     seg_a = np.array([k[0] for k in keys], dtype=np.int64)
     seg_b = np.array([k[1] for k in keys], dtype=np.int64)
-    seg_len = np.empty(n_seg)
-    seg_bend = np.empty(n_seg)
-    seg_dir_a = np.empty((n_seg, 2))
-    seg_dir_b = np.empty((n_seg, 2))
-    seg_mid_xy = np.empty((n_seg, 2))
-    seg_mid_lonlat = np.empty((n_seg, 2))
-    seg_lonlat: List[np.ndarray] = []
-    seg_xy: List[np.ndarray] = []
-    seg_name: List[Optional[str]] = []
-    seg_highway: List[Optional[str]] = []
     tol = float(ANALYSIS_CONFIG["simplify_tolerance_m"])
-    for s, key in enumerate(keys):
-        pts, data = found[key]
-        xy = _to_xy(pts[:, 0], pts[:, 1], lon0, lat0)
-        chord = node_xy[seg_b[s]] - node_xy[seg_a[s]]
-        seg_dir_a[s], seg_dir_b[s], seg_bend[s] = _polyline_stats(xy, chord, tol)
-        try:
-            length = float(data.get("length"))
-        except (TypeError, ValueError):
-            length = float("nan")
-        if not np.isfinite(length) or length <= 0:
-            length = float(np.hypot(*np.diff(xy, axis=0).T).sum())
-        seg_len[s] = max(length, 0.1)
-        seg_mid_xy[s], seg_mid_lonlat[s] = _polyline_midpoints(xy, pts)
-        seg_lonlat.append(pts)
-        seg_xy.append(xy)
-        seg_name.append(_first_text(data.get("name")))
-        seg_highway.append(_first_text(data.get("highway")))
+
+    if HAS_FAST:
+        seg_lonlat: List[np.ndarray] = []
+        seg_name: List[Optional[str]] = []
+        seg_highway: List[Optional[str]] = []
+        raw_len = np.empty(n_seg, dtype=np.float64)
+        pts_counts = np.empty(n_seg, dtype=np.int64)
+        for s, key in enumerate(keys):
+            pts, data = found[key]
+            seg_lonlat.append(pts)
+            pts_counts[s] = len(pts)
+            try:
+                raw_len[s] = float(data.get("length"))
+            except (TypeError, ValueError):
+                raw_len[s] = np.nan
+            seg_name.append(_first_text(data.get("name")))
+            seg_highway.append(_first_text(data.get("highway")))
+        offsets = np.empty(n_seg + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(pts_counts, out=offsets[1:])
+        all_ll = np.vstack(seg_lonlat)
+        all_xy = _to_xy(all_ll[:, 0], all_ll[:, 1], lon0, lat0)
+        seg_xy = [all_xy[offsets[s]:offsets[s + 1]] for s in range(n_seg)]
+        seg_len, seg_bend, seg_dir_a, seg_dir_b, seg_mid_xy, seg_mid_lonlat = _fast.polyline_batch_stats_fast(
+            all_xy, all_ll, offsets, node_xy, seg_a, seg_b, raw_len, tol
+        )
+    else:
+        seg_len = np.empty(n_seg)
+        seg_bend = np.empty(n_seg)
+        seg_dir_a = np.empty((n_seg, 2))
+        seg_dir_b = np.empty((n_seg, 2))
+        seg_mid_xy = np.empty((n_seg, 2))
+        seg_mid_lonlat = np.empty((n_seg, 2))
+        seg_lonlat = []
+        seg_xy = []
+        seg_name = []
+        seg_highway = []
+        for s, key in enumerate(keys):
+            pts, data = found[key]
+            xy = _to_xy(pts[:, 0], pts[:, 1], lon0, lat0)
+            chord = node_xy[seg_b[s]] - node_xy[seg_a[s]]
+            seg_dir_a[s], seg_dir_b[s], seg_bend[s] = _polyline_stats(xy, chord, tol)
+            try:
+                length = float(data.get("length"))
+            except (TypeError, ValueError):
+                length = float("nan")
+            if not np.isfinite(length) or length <= 0:
+                length = float(np.hypot(*np.diff(xy, axis=0).T).sum())
+            seg_len[s] = max(length, 0.1)
+            seg_mid_xy[s], seg_mid_lonlat[s] = _polyline_midpoints(xy, pts)
+            seg_lonlat.append(pts)
+            seg_xy.append(xy)
+            seg_name.append(_first_text(data.get("name")))
+            seg_highway.append(_first_text(data.get("highway")))
     return _assemble_segment_network(
         (lat0, lon0), node_xy, seg_a, seg_b, seg_len, seg_bend, seg_dir_a, seg_dir_b, seg_mid_xy, seg_mid_lonlat,
         seg_lonlat, seg_xy, seg_name, seg_highway)
@@ -4456,31 +4718,34 @@ def _assemble_segment_network(
     """
     n_nodes, n_seg = len(node_xy), len(seg_a)
     # Legal moves: arrive at a node on one segment end, leave on a *different* segment's end.
-    incident: List[List[Tuple[int, int]]] = [[] for _ in range(n_nodes)]
-    for s in range(n_seg):
-        incident[seg_a[s]].append((s, 0))
-        incident[seg_b[s]].append((s, 1))
-    moves_from: List[np.ndarray] = []
-    moves_to: List[np.ndarray] = []
-    moves_defl: List[np.ndarray] = []
-    for ends in incident:
-        k = len(ends)
-        if k < 2:
-            continue
-        segs = np.fromiter((e[0] for e in ends), dtype=np.int64, count=k)
-        side = np.fromiter((e[1] for e in ends), dtype=np.int64, count=k)
-        out = np.where(side[:, None] == 0, seg_dir_a[segs], seg_dir_b[segs])  # headings away from the node
-        deflection = 180.0 - np.degrees(np.arccos(np.clip(out @ out.T, -1.0, 1.0)))
-        arrive = np.where(side == 1, 2 * segs, 2 * segs + 1)
-        depart = np.where(side == 0, 2 * segs, 2 * segs + 1)
-        i_idx, j_idx = np.nonzero(segs[:, None] != segs[None, :])
-        moves_from.append(arrive[i_idx])
-        moves_to.append(depart[j_idx])
-        moves_defl.append(deflection[i_idx, j_idx])
-    empty_i, empty_f = np.empty(0, dtype=np.int64), np.empty(0)
-    tr_from = np.concatenate(moves_from) if moves_from else empty_i
-    tr_to = np.concatenate(moves_to) if moves_to else empty_i
-    tr_defl = np.concatenate(moves_defl) if moves_defl else empty_f
+    if HAS_FAST:
+        tr_from, tr_to, tr_defl = _fast.assemble_transitions_fast(n_nodes, seg_a, seg_b, seg_dir_a, seg_dir_b)
+    else:
+        incident: List[List[Tuple[int, int]]] = [[] for _ in range(n_nodes)]
+        for s in range(n_seg):
+            incident[seg_a[s]].append((s, 0))
+            incident[seg_b[s]].append((s, 1))
+        moves_from: List[np.ndarray] = []
+        moves_to: List[np.ndarray] = []
+        moves_defl: List[np.ndarray] = []
+        for ends in incident:
+            k = len(ends)
+            if k < 2:
+                continue
+            segs = np.fromiter((e[0] for e in ends), dtype=np.int64, count=k)
+            side = np.fromiter((e[1] for e in ends), dtype=np.int64, count=k)
+            out = np.where(side[:, None] == 0, seg_dir_a[segs], seg_dir_b[segs])  # headings away from the node
+            deflection = 180.0 - np.degrees(np.arccos(np.clip(out @ out.T, -1.0, 1.0)))
+            arrive = np.where(side == 1, 2 * segs, 2 * segs + 1)
+            depart = np.where(side == 0, 2 * segs, 2 * segs + 1)
+            i_idx, j_idx = np.nonzero(segs[:, None] != segs[None, :])
+            moves_from.append(arrive[i_idx])
+            moves_to.append(depart[j_idx])
+            moves_defl.append(deflection[i_idx, j_idx])
+        empty_i, empty_f = np.empty(0, dtype=np.int64), np.empty(0)
+        tr_from = np.concatenate(moves_from) if moves_from else empty_i
+        tr_to = np.concatenate(moves_to) if moves_to else empty_i
+        tr_defl = np.concatenate(moves_defl) if moves_defl else empty_f
 
     adjacency = csr_matrix((np.ones(n_seg), (seg_a, seg_b)), shape=(n_nodes, n_nodes))
     _, labels = connected_components(adjacency, directed=False)
@@ -4556,6 +4821,8 @@ def _subtree_sums(pred: np.ndarray, weights: np.ndarray) -> np.ndarray:
     pointer jumping, then children are folded into parents one depth level at a time (deepest
     first), so the work stays inside numpy instead of a per-node Python loop.
     """
+    if HAS_FAST:
+        return _fast.subtree_sums_fast(pred, weights)
     n = len(pred)
     has_parent = pred >= 0
     total = np.asarray(weights, dtype=float).copy()
@@ -4615,6 +4882,13 @@ def _local_pass(
 ) -> Dict[float, Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
     """Exact NC / TD (/ CH) for finite metric radii: one origin at a time, neighbourhood first."""
     n_seg = net.n_segments
+    if HAS_FAST:
+        def _tick_batch(count: int) -> None:
+            for _ in range(count):
+                tick()
+
+        raw = _fast.ss_local_pass_fast(depth_matrix, metric_matrix, n_seg, radii, with_choice, tick_batch=_tick_batch)
+        return {r: raw[float(r)] for r in radii}
     out = {r: _empty_counters(n_seg, with_choice) for r in radii}
     r_max = max(radii)
     for origin in range(n_seg):
@@ -4653,6 +4927,31 @@ def _global_pass(
     nc, td, ch = _empty_counters(n_seg, with_choice)
     rng = np.random.default_rng(seed)
     info: Dict[str, Any] = {"approximate": False, "pivots": 0, "sampled_components": 0}
+    if HAS_FAST:
+        def _tick_batch(count: int) -> None:
+            for _ in range(count):
+                tick()
+
+        for comp in np.unique(net.seg_component):
+            members = np.flatnonzero(net.seg_component == comp)
+            size = len(members)
+            nc[members] = size
+            exact = size <= max_exact
+            origins = members if exact else np.sort(rng.choice(members, size=min(n_pivots, size), replace=False))
+            scale = 1.0 if exact else size / len(origins)
+            if not exact:
+                info.update(approximate=True, pivots=int(len(origins)),
+                            sampled_components=info["sampled_components"] + 1)
+            td_part, ch_part = _fast.ss_global_component_fast(
+                depth_matrix, n_seg, members, origins, exact, scale, with_choice, tick_batch=_tick_batch
+            )
+            if exact:
+                td[origins] = td_part
+            else:
+                td[members] += td_part[members]
+            if with_choice and ch is not None and ch_part is not None:
+                ch += ch_part
+        return nc, td, ch, info
     for comp in np.unique(net.seg_component):
         members = np.flatnonzero(net.seg_component == comp)
         size = len(members)
@@ -4789,7 +5088,10 @@ def gradient_rgb(t: Any, palette: str = DEFAULT_PALETTE) -> np.ndarray:
 
 
 def gradient_hex(t: Any, palette: str = DEFAULT_PALETTE) -> List[str]:
-    return ["#%02x%02x%02x" % tuple(int(round(c * 255)) for c in row) for row in gradient_rgb(t, palette)]
+    rgb = gradient_rgb(t, palette)
+    if _fast is not None:
+        return _fast.rgb_float_to_hex_list(rgb)
+    return ["#%02x%02x%02x" % tuple(int(round(c * 255)) for c in row) for row in rgb]
 
 
 def gradient_css(palette: str = DEFAULT_PALETTE, direction: str = "90deg") -> str:
@@ -4911,15 +5213,43 @@ def segments_geojson(
 ) -> Dict[str, Any]:
     """FeatureCollection of the masked segments; ``columns`` become feature properties."""
     rows = np.arange(net.n_segments) if mask is None else np.flatnonzero(mask)
-    features = [
-        {
+    n_rows = len(rows)
+    if n_rows == 0:
+        return {"type": "FeatureCollection", "features": []}
+    row_list = rows.tolist()
+    seg_ll = net.seg_lonlat
+    parts = [seg_ll[s] for s in row_list]
+    all_coords = np.round(np.vstack(parts), precision).tolist()
+    col_names = list(columns.keys())
+    col_lists: List[List[Any]] = []
+    for name in col_names:
+        col = columns[name]
+        if isinstance(col, np.ndarray):
+            sub = col[rows]
+            if np.issubdtype(sub.dtype, np.floating):
+                vals = sub.tolist()
+                if not np.isfinite(sub).all():
+                    inf_p, inf_n = float("inf"), float("-inf")
+                    vals = [None if (v != v or v == inf_p or v == inf_n) else v for v in vals]
+                col_lists.append(vals)
+            else:
+                col_lists.append(sub.tolist())
+        else:
+            col_lists.append([_plain(col[s]) for s in row_list])
+    features: List[Dict[str, Any]] = []
+    pos = 0
+    for idx, s in enumerate(row_list):
+        cnt = len(parts[idx])
+        coords = all_coords[pos:pos + cnt]
+        pos += cnt
+        props: Dict[str, Any] = {"segment": s}
+        for ci, name in enumerate(col_names):
+            props[name] = col_lists[ci][idx]
+        features.append({
             "type": "Feature",
-            "geometry": {"type": "LineString",
-                         "coordinates": np.round(net.seg_lonlat[s], precision).tolist()},
-            "properties": {"segment": int(s), **{name: _plain(col[s]) for name, col in columns.items()}},
-        }
-        for s in rows
-    ]
+            "geometry": {"type": "LineString", "coordinates": coords},
+            "properties": props,
+        })
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -5436,6 +5766,8 @@ def delta_hex(pct: Any, limit: float) -> List[str]:
     x = np.clip(np.nan_to_num(np.atleast_1d(np.asarray(pct, dtype=float)) / limit, nan=0.0), -1.0, 1.0)
     xs = np.linspace(-1.0, 1.0, len(stops))
     rgb = np.stack([np.interp(x, xs, stops[:, c]) for c in range(3)], axis=-1)
+    if _fast is not None:
+        return _fast.rgb_float_to_hex_list(rgb)
     return ["#%02x%02x%02x" % tuple(int(round(c * 255)) for c in row) for row in rgb]
 
 
@@ -5456,6 +5788,15 @@ def suggest_shortcut(net: SegmentNetwork, mask: np.ndarray, seed: int = 0) -> Op
     rng = np.random.default_rng(seed)
     origins = np.sort(rng.choice(shown, size=min(int(cfg["shortcut_origins"]), len(shown)), replace=False))
     matrix = state_matrix(net, "metric")
+    if HAS_FAST:
+        found_any, ratio, a, b, straight_m, road_m = _fast.suggest_shortcut_fast(
+            matrix, net.seg_mid_xy, shown, origins, float(lo), float(hi), float(cfg["shortcut_min_detour"])
+        )
+        if not found_any:
+            return None
+        points = [(float(net.seg_mid_lonlat[s, 1]), float(net.seg_mid_lonlat[s, 0])) for s in (int(a), int(b))]
+        return {"points": points, "detour": float(ratio), "straight_m": float(straight_m),
+                "road_m": float(road_m), "segments": (int(a), int(b))}
     best: Optional[Tuple[float, int, int, float, float]] = None
     for o in origins:
         straight = np.hypot(*(net.seg_mid_xy[shown] - net.seg_mid_xy[o]).T)
@@ -6315,7 +6656,7 @@ class Layer:
     panel_rank: int = 50                             # lower = higher inside its group in the layers panel
 
 
-def lru_get(store: Any, key: Any, source: Any, build: Callable[[], Any], limit: int = 8) -> Any:
+def lru_get(store: Any, key: Any, source: Any, build: Callable[[], Any], limit: int = 16) -> Any:
     """Per-session LRU for display payloads. An entry is reused only for the *same* ``source`` object.
 
     The entry keeps a reference to ``source`` so its ``id()`` cannot be recycled while the entry lives.
@@ -6351,16 +6692,21 @@ def line_rows(features: Sequence[Dict[str, Any]], color_key: str, weight_key: st
               value_keys: Sequence[str] = ()) -> List[list]:
     """GeoJSON LineString features → ``[color, weight, tooltip values | 0, [lat, lon, lat, lon, …]]`` rows."""
     rows: List[list] = []
+    dec = COORD_DECIMALS
+    has_vals = bool(value_keys)
     for feature in features:
         geometry, props = feature["geometry"], feature["properties"]
-        parts = geometry["coordinates"] if geometry["type"] == "MultiLineString" else [geometry["coordinates"]]
-        values: Any = [_short(props.get(k)) for k in value_keys] if value_keys else 0
+        parts = geometry["coordinates"] if geometry["type"] == "MultiLineString" else (geometry["coordinates"],)
+        values: Any = [_short(props.get(k)) for k in value_keys] if has_vals else 0
+        color = props[color_key]
+        weight = round(float(props[weight_key]), 2)
         for part in parts:
             flat: List[float] = []
+            append = flat.append
             for lon, lat in part:
-                flat.append(round(lat, COORD_DECIMALS))
-                flat.append(round(lon, COORD_DECIMALS))
-            rows.append([props[color_key], round(float(props[weight_key]), 2), values, flat])
+                append(round(lat, dec))
+                append(round(lon, dec))
+            rows.append([color, weight, values, flat])
     return rows
 
 
@@ -6368,30 +6714,49 @@ def point_rows(features: Sequence[Dict[str, Any]], fill_key: str, radius: Any, v
                stroke_key: Optional[str] = None, stroke: str = "#000000") -> List[list]:
     """GeoJSON Point features → ``[fill, stroke, radius, tooltip values | 0, lat, lon]`` rows."""
     rows: List[list] = []
+    dec = COORD_DECIMALS
+    has_vals = bool(value_keys)
+    rad_is_key = isinstance(radius, str)
     for feature in features:
         props = feature["properties"]
         try:
             lon, lat = feature["geometry"]["coordinates"]
         except (KeyError, TypeError, ValueError):
             continue
-        r = props[radius] if isinstance(radius, str) else radius
-        values: Any = [_short(props.get(k)) for k in value_keys] if value_keys else 0
+        r = props[radius] if rad_is_key else radius
+        values: Any = [_short(props.get(k)) for k in value_keys] if has_vals else 0
         rows.append([props[fill_key], props[stroke_key] if stroke_key else stroke, round(float(r), 2), values,
-                     round(lat, COORD_DECIMALS), round(lon, COORD_DECIMALS)])
+                     round(lat, dec), round(lon, dec)])
     return rows
 
 
-_TOOLTIP_JS = """
-            var heads = {{ this.heads_json }};
-            var tip = {sticky: true, opacity: 0.95};
-            var tipHtml = function (layer) {
-                var h = '<table class="rgtip">';
-                for (var k = 0; k < heads.length; k++) {
-                    h += '<tr><th>' + heads[k] + '</th><td>' + layer._vals[k] + '</td></tr>';
-                }
-                return h + '</table>';
-            };
-"""
+class _RawElement(Element):
+    """Branca Element that emits raw HTML/JS verbatim without Jinja2 Template parsing.
+
+    Avoids compiling megabyte-scale JSON payloads through Jinja2 on every map render
+    and prevents TemplateSyntaxError if OSM road names contain ``{{`` or ``{%``.
+    """
+
+    def __init__(self, content: str):
+        super().__init__(template=None)
+        self._raw = content
+
+    def render(self, **kwargs: Any) -> str:
+        return self._raw
+
+
+def _tooltip_js_block(heads_json: str) -> str:
+    return (
+        f"\n            var heads = {heads_json};\n"
+        "            var tip = {sticky: true, opacity: 0.95};\n"
+        "            var tipHtml = function (layer) {\n"
+        "                var h = '<table class=\"rgtip\">';\n"
+        "                for (var k = 0; k < heads.length; k++) {\n"
+        "                    h += '<tr><th>' + heads[k] + '</th><td>' + layer._vals[k] + '</td></tr>';\n"
+        "                }\n"
+        "                return h + '</table>';\n"
+        "            };\n"
+    )
 
 
 class CompactLines(MacroElement):
@@ -6402,24 +6767,6 @@ class CompactLines(MacroElement):
     Leaflet builds the lines. Add it to a ``FeatureGroup`` — the group owns the LayerControl entry.
     """
 
-    _template = Template("""
-        {% macro script(this, kwargs) %}
-        (function (group, rows, opacity, hover) {""" + _TOOLTIP_JS + """
-            for (var i = 0; i < rows.length; i++) {
-                var r = rows[i], flat = r[3], pts = new Array(flat.length >> 1);
-                for (var j = 0; j < pts.length; j++) { pts[j] = [flat[2 * j], flat[2 * j + 1]]; }
-                var line = L.polyline(pts, {color: r[0], weight: r[1], opacity: opacity, lineCap: "round", lineJoin: "round"});
-                if (r[2]) { line._vals = r[2]; line.bindTooltip(tipHtml, tip); }
-                group.addLayer(line);
-            }
-            if (hover) {
-                group.on("mouseover", function (e) { var l = e.layer; l._w0 = l.options.weight; l.setStyle({weight: l._w0 + 3, opacity: 1}); });
-                group.on("mouseout", function (e) { var l = e.layer; l.setStyle({weight: l._w0, opacity: opacity}); });
-            }
-        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.opacity }}, {{ this.hover_js }});
-        {% endmacro %}
-        """)
-
     def __init__(self, rows_json: str, heads: Sequence[str] = (), opacity: float = 0.8, hover: bool = False):
         super().__init__()
         self._name = "CompactLines"
@@ -6428,22 +6775,31 @@ class CompactLines(MacroElement):
         self.opacity = float(opacity)
         self.hover_js = "true" if hover else "false"
 
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        js = (
+            "(function (group, rows, opacity, hover) {"
+            + _tooltip_js_block(self.heads_json)
+            + '            for (var i = 0; i < rows.length; i++) {\n'
+            '                var r = rows[i], flat = r[3], pts = new Array(flat.length >> 1);\n'
+            '                for (var j = 0; j < pts.length; j++) { pts[j] = [flat[2 * j], flat[2 * j + 1]]; }\n'
+            '                var line = L.polyline(pts, {color: r[0], weight: r[1], opacity: opacity, lineCap: "round", lineJoin: "round"});\n'
+            '                if (r[2]) { line._vals = r[2]; line.bindTooltip(tipHtml, tip); }\n'
+            '                group.addLayer(line);\n'
+            '            }\n'
+            '            if (hover) {\n'
+            '                group.on("mouseover", function (e) { var l = e.layer; l._w0 = l.options.weight; l.setStyle({weight: l._w0 + 3, opacity: 1}); });\n'
+            '                group.on("mouseout", function (e) { var l = e.layer; l.setStyle({weight: l._w0, opacity: opacity}); });\n'
+            '            }\n'
+            f'        }})({self._parent.get_name()}, {self.rows_json}, {self.opacity}, {self.hover_js});'
+        )
+        figure.script.add_child(_RawElement(js), name=self.get_name())
+        for element in self._children.values():
+            element.render(**kwargs)
+
 
 class CompactPoints(MacroElement):
     """Circle markers from one compact JSON array (see :class:`CompactLines`)."""
-
-    _template = Template("""
-        {% macro script(this, kwargs) %}
-        (function (group, rows, weight, fillOpacity, radiusScale, fill, stroke) {""" + _TOOLTIP_JS + """
-            for (var i = 0; i < rows.length; i++) {
-                var r = rows[i];
-                var dot = L.circleMarker([r[4], r[5]], {radius: r[2] * radiusScale, fillColor: fill || r[0], color: stroke || r[1], weight: weight, fillOpacity: fillOpacity});
-                if (r[3]) { dot._vals = r[3]; dot.bindTooltip(tipHtml, tip); }
-                group.addLayer(dot);
-            }
-        })({{ this._parent.get_name() }}, {{ this.rows_json }}, {{ this.weight }}, {{ this.fill_opacity }}, {{ this.radius_scale }}, {{ this.fill_json }}, {{ this.stroke_json }});
-        {% endmacro %}
-        """)
 
     def __init__(self, rows_json: str, heads: Sequence[str] = (), weight: float = 1.0, fill_opacity: float = 0.9,
                  radius_scale: float = 1.0, fill: Optional[str] = None, stroke: Optional[str] = None):
@@ -6458,6 +6814,66 @@ class CompactPoints(MacroElement):
         self.fill_json = _json_js(fill)
         self.stroke_json = _json_js(stroke)
 
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        js = (
+            "(function (group, rows, weight, fillOpacity, radiusScale, fill, stroke) {"
+            + _tooltip_js_block(self.heads_json)
+            + '            for (var i = 0; i < rows.length; i++) {\n'
+            '                var r = rows[i];\n'
+            '                var dot = L.circleMarker([r[4], r[5]], {radius: r[2] * radiusScale, fillColor: fill || r[0], color: stroke || r[1], weight: weight, fillOpacity: fillOpacity});\n'
+            '                if (r[3]) { dot._vals = r[3]; dot.bindTooltip(tipHtml, tip); }\n'
+            '                group.addLayer(dot);\n'
+            '            }\n'
+            f'        }})({self._parent.get_name()}, {self.rows_json}, {self.weight}, {self.fill_opacity}, {self.radius_scale}, {self.fill_json}, {self.stroke_json});'
+        )
+        figure.script.add_child(_RawElement(js), name=self.get_name())
+        for element in self._children.values():
+            element.render(**kwargs)
+
+
+class _CompactRailway(MacroElement):
+    """Render thousands of railway KML features as 2 Canvas multi-geometries without Jinja2 parsing."""
+
+    def __init__(self, lines_json: str, polys_json: str, opacity: float, tooltip: str):
+        super().__init__()
+        self._name = "CompactRailway"
+        self.lines_json = lines_json
+        self.polys_json = polys_json
+        self.opacity = float(opacity)
+        self.tooltip_json = _json_js(tooltip)
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        js = (
+            "(function (group, lines, polys, opacity, tipText) {\n"
+            "            var unpack = function (arr) {\n"
+            "                var out = new Array(arr.length);\n"
+            "                for (var i = 0; i < arr.length; i++) {\n"
+            "                    var f = arr[i], pts = new Array(f.length >> 1);\n"
+            "                    for (var j = 0; j < pts.length; j++) { pts[j] = [f[2 * j], f[2 * j + 1]]; }\n"
+            "                    out[i] = pts;\n"
+            "                }\n"
+            "                return out;\n"
+            "            };\n"
+            '            var opts = {color: "#E63946", weight: 4, opacity: opacity, dashArray: "8, 4", fillOpacity: 0};\n'
+            "            var tip = {sticky: true};\n"
+            "            if (lines.length) {\n"
+            "                var l = L.polyline(unpack(lines), opts);\n"
+            "                l.bindTooltip(tipText, tip);\n"
+            "                group.addLayer(l);\n"
+            "            }\n"
+            "            if (polys.length) {\n"
+            "                var p = L.polygon(unpack(polys), opts);\n"
+            "                p.bindTooltip(tipText, tip);\n"
+            "                group.addLayer(p);\n"
+            "            }\n"
+            f"        }})({self._parent.get_name()}, {self.lines_json}, {self.polys_json}, {self.opacity}, {self.tooltip_json});"
+        )
+        figure.script.add_child(_RawElement(js), name=self.get_name())
+        for element in self._children.values():
+            element.render(**kwargs)
+
 
 class ViewMemory(MacroElement):
     """Remember the user's zoom/centre in the browser so rebuilding the map does not reset the view.
@@ -6466,28 +6882,31 @@ class ViewMemory(MacroElement):
     view is ignored, so adding a pin or finding an anchor still re-centres exactly as before.
     """
 
-    _template = Template("""
-        {% macro script(this, kwargs) %}
-        (function (map) {
-            try {
-                var key = "rgv2_view", token = {{ this.token_json }};
-                var saved = JSON.parse(window.sessionStorage.getItem(key) || "null");
-                if (saved && saved.token === token) { map.setView(saved.center, saved.zoom, {animate: false}); }
-                map.on("moveend", function () {
-                    try {
-                        var c = map.getCenter();
-                        window.sessionStorage.setItem(key, JSON.stringify({token: token, center: [c.lat, c.lng], zoom: map.getZoom()}));
-                    } catch (e) {}
-                });
-            } catch (e) {}
-        })({{ this._parent.get_name() }});
-        {% endmacro %}
-        """)
-
     def __init__(self, token: str):
         super().__init__()
         self._name = "ViewMemory"
         self.token_json = _json_js(token)
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        js = (
+            "(function (map) {\n"
+            "            try {\n"
+            f'                var key = "rgv2_view", token = {self.token_json};\n'
+            '                var saved = JSON.parse(window.sessionStorage.getItem(key) || "null");\n'
+            "                if (saved && saved.token === token) { map.setView(saved.center, saved.zoom, {animate: false}); }\n"
+            '                map.on("moveend", function () {\n'
+            "                    try {\n"
+            "                        var c = map.getCenter();\n"
+            "                        window.sessionStorage.setItem(key, JSON.stringify({token: token, center: [c.lat, c.lng], zoom: map.getZoom()}));\n"
+            "                    } catch (e) {}\n"
+            "                });\n"
+            "            } catch (e) {}\n"
+            f"        }})({self._parent.get_name()});"
+        )
+        figure.script.add_child(_RawElement(js), name=self.get_name())
+        for element in self._children.values():
+            element.render(**kwargs)
 
 
 class LayerToggleAll(MacroElement):
@@ -6498,41 +6917,42 @@ class LayerToggleAll(MacroElement):
     what the map shows — the sidebar checkboxes stay as they are.
     """
 
-    _template = Template("""
-        {% macro script(this, kwargs) %}
-        (function (map) {
-            setTimeout(function () {            // after the whole map script: the layer control exists by then
-                var list = map.getContainer().querySelector(".leaflet-control-layers-list");
-                var boxes = function () {
-                    return list.querySelectorAll(".leaflet-control-layers-overlays input[type=checkbox]");
-                };
-                if (!list || list.querySelector(".rg-layer-all") || !boxes().length) { return; }
-                var row = document.createElement("div");
-                row.className = "rg-layer-all";
-                [["ปิดทั้งหมด", false], ["เปิดทั้งหมด", true]].forEach(function (b) {
-                    var button = document.createElement("button");
-                    button.type = "button";
-                    button.textContent = b[0];
-                    button.addEventListener("click", function () {
-                        boxes().forEach(function (box) { if (box.checked !== b[1]) { box.click(); } });
-                    });
-                    row.appendChild(button);
-                });
-                list.insertBefore(row, list.firstChild);
-            }, 0);
-        })({{ this._parent.get_name() }});
-        {% endmacro %}
-        """)
-
     def __init__(self):
         super().__init__()
         self._name = "LayerToggleAll"
 
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        js = (
+            "(function (map) {\n"
+            "            setTimeout(function () {            // after the whole map script: the layer control exists by then\n"
+            '                var list = map.getContainer().querySelector(".leaflet-control-layers-list");\n'
+            "                var boxes = function () {\n"
+            '                    return list.querySelectorAll(".leaflet-control-layers-overlays input[type=checkbox]");\n'
+            "                };\n"
+            '                if (!list || list.querySelector(".rg-layer-all") || !boxes().length) { return; }\n'
+            '                var row = document.createElement("div");\n'
+            '                row.className = "rg-layer-all";\n'
+            '                [["ปิดทั้งหมด", false], ["เปิดทั้งหมด", true]].forEach(function (b) {\n'
+            '                    var button = document.createElement("button");\n'
+            '                    button.type = "button";\n'
+            "                    button.textContent = b[0];\n"
+            '                    button.addEventListener("click", function () {\n'
+            "                        boxes().forEach(function (box) { if (box.checked !== b[1]) { box.click(); } });\n"
+            "                    });\n"
+            "                    row.appendChild(button);\n"
+            "                });\n"
+            "                list.insertBefore(row, list.firstChild);\n"
+            "            }, 0);\n"
+            f"        }})({self._parent.get_name()});"
+        )
+        figure.script.add_child(_RawElement(js), name=self.get_name())
+        for element in self._children.values():
+            element.render(**kwargs)
+
 
 class LegendBox(MacroElement):
     """One fixed box (bottom-left) holding the legend sections of every layer that is on."""
-
-    _template = Template("{% macro html(this, kwargs) %}{{ this.box_html }}{% endmacro %}")
 
     def __init__(self, sections: Sequence[str]):
         super().__init__()
@@ -6545,6 +6965,12 @@ class LegendBox(MacroElement):
             + '<div class="rg-legend-sep"></div>'.join(sections)
             + "</div>"
         )
+
+    def render(self, **kwargs: Any) -> None:
+        figure = self.get_root()
+        figure.html.add_child(_RawElement(self.box_html), name=self.get_name())
+        for element in self._children.values():
+            element.render(**kwargs)
 
 
 def _legend_swatch_row(color_css: str, label: str, extra_style: str = "") -> str:
@@ -6732,23 +7158,74 @@ def draw_cbd_zone(ctx: Ctx) -> Any:
     )
 
 
-def draw_railway(ctx: Ctx) -> Any:
-    railway_geojson = _parse_kml_to_geojson()
+def _build_railway_compact(railway_geojson: Dict[str, Any]) -> Tuple[str, str]:
+    """Pack railway LineString/Polygon features into 5-dp flat lat/lon JSON arrays."""
+    lines: List[List[float]] = []
+    polys: List[List[float]] = []
+    dec = COORD_DECIMALS
+    for feat in railway_geojson.get("features") or ():
+        geom = feat.get("geometry") or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates")
+        if not coords:
+            continue
+        if gtype == "LineString":
+            flat: List[float] = []
+            append = flat.append
+            for lon, lat in coords:
+                append(round(lat, dec))
+                append(round(lon, dec))
+            if len(flat) >= 4:
+                lines.append(flat)
+        elif gtype == "Polygon":
+            ring = coords[0] if coords else ()
+            flat = []
+            append = flat.append
+            for lon, lat in ring:
+                append(round(lat, dec))
+                append(round(lon, dec))
+            if len(flat) >= 6:
+                polys.append(flat)
+    return _json_js(lines), _json_js(polys)
+
+
+_ORIG_PARSE_KML = _parse_kml_to_geojson
+
+
+@st.cache_resource(show_spinner=False)
+def _railway_cached_bundle() -> Optional[Tuple[Dict[str, Any], str, str]]:
+    """Process-wide read-only cache of the bundled railway GeoJSON + compact Canvas payload."""
+    railway_geojson = _ORIG_PARSE_KML()
     if not (railway_geojson and railway_geojson.get("features")):
         return None
+    lines_json, polys_json = _build_railway_compact(railway_geojson)
+    return railway_geojson, lines_json, polys_json
+
+
+def draw_railway(ctx: Ctx) -> Any:
+    if _parse_kml_to_geojson is _ORIG_PARSE_KML:
+        bundle = _railway_cached_bundle()
+        if bundle is None:
+            return None
+        railway_geojson, lines_json, polys_json = bundle
+    else:
+        railway_geojson = _parse_kml_to_geojson()
+        if not (railway_geojson and railway_geojson.get("features")):
+            return None
+        lines_json, polys_json = _build_railway_compact(railway_geojson)
     opacity = float(ctx.show.get("railway_opacity", StateManager._DEFAULTS[StateManager.K_RAILWAY_OPACITY]))
-    return folium.GeoJson(
-        railway_geojson,
-        name="แนวรถไฟเชียงของ",
-        style_function=lambda _x: {
-            "color": "#E63946",
-            "weight": 4,
-            "opacity": opacity,
-            "dashArray": "8, 4",
-            "fillOpacity": 0,
-        },
-        tooltip="แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ",
-    )
+    style_fn = lambda _x, op=opacity: {
+        "color": "#E63946",
+        "weight": 4,
+        "opacity": op,
+        "dashArray": "8, 4",
+        "fillOpacity": 0,
+    }
+    group = folium.FeatureGroup(name="แนวรถไฟเชียงของ", show=True)
+    group.data = railway_geojson
+    group.style_function = style_fn
+    _CompactRailway(lines_json, polys_json, opacity, "แนวเวนคืนรถไฟเด่นชัย-เชียงราย-เชียงของ").add_to(group)
+    return group
 
 
 def draw_cbd_anchor(ctx: Ctx) -> Any:
@@ -6912,12 +7389,33 @@ def ss_display(show: Dict[str, Any], result: Any) -> Dict[str, Any]:
 
 def ss_line_rows(net: Any, columns: Dict[str, Any], mask: Any) -> List[list]:
     """Compact map rows of the masked segments (colour, weight, escaped tooltip values, flat lat/lon)."""
+    idx = np.flatnonzero(mask)
+    if len(idx) == 0:
+        return []
+    idx_list = idx.tolist()
+    seg_ll = net.seg_lonlat
+    parts = [seg_ll[s] for s in idx_list]
+    stacked = np.round(np.vstack(parts)[:, ::-1], COORD_DECIMALS).ravel().tolist()      # lon,lat → lat,lon
+    colors_col = columns["color"]
+    weights_col = columns["weight"]
+    labels_col = columns["label"]
+    scores_col = columns["score"]
+    values_col = columns["value"]
+    nc_col = columns["nc"]
+    c_list = colors_col[idx].tolist() if isinstance(colors_col, np.ndarray) else [colors_col[s] for s in idx_list]
+    w_list = weights_col[idx].tolist() if isinstance(weights_col, np.ndarray) else [float(weights_col[s]) for s in idx_list]
+    sc_list = scores_col[idx].tolist() if isinstance(scores_col, np.ndarray) else [float(scores_col[s]) for s in idx_list]
+    va_list = values_col[idx].tolist() if isinstance(values_col, np.ndarray) else [float(values_col[s]) for s in idx_list]
+    nc_list = nc_col[idx].tolist() if isinstance(nc_col, np.ndarray) else [int(nc_col[s]) for s in idx_list]
     rows: List[list] = []
-    for s in np.flatnonzero(mask):
-        flat = np.round(net.seg_lonlat[s][:, ::-1], COORD_DECIMALS).ravel().tolist()      # lon,lat → lat,lon
-        rows.append([columns["color"][s], float(columns["weight"][s]),
-                     [escape(str(columns["label"][s])), _short(float(columns["score"][s])),
-                      _short(float(columns["value"][s])), int(columns["nc"][s])], flat])
+    pos = 0
+    for i, s in enumerate(idx_list):
+        n_vals = len(parts[i]) * 2
+        flat = stacked[pos:pos + n_vals]
+        pos += n_vals
+        rows.append([c_list[i], float(w_list[i]),
+                     [escape(str(labels_col[s])), _short(sc_list[i]),
+                      _short(va_list[i]), int(nc_list[i])], flat])
     return rows
 
 
@@ -6955,9 +7453,10 @@ def draw_space_syntax(ctx: Ctx) -> Any:
         folium.Circle([meta["lat"], meta["lon"]], radius=meta["radius_m"], color="#8a8a8a", weight=1.5,
                       dash_array="6", fill=False, tooltip="ขอบเขตที่แสดงผล").add_to(group)
     for row in payload["top"]:
+        safe_label = escape(str(row["label"])).replace("{", "&#123;")
         folium.Marker(
             [row["lat"], row["lon"]],
-            tooltip=f"#{row['rank']} · คะแนน {row['score']:.1f} · {escape(str(row['label']))}",
+            tooltip=f"#{row['rank']} · คะแนน {row['score']:.1f} · {safe_label}",
             icon=folium.DivIcon(html=(
                 '<div style="width:22px;height:22px;line-height:20px;border-radius:50%;text-align:center;'
                 'background:#fff;color:#b00020;border:2px solid #b00020;font:700 11px system-ui;">'
@@ -7310,7 +7809,7 @@ def add_basemap(m: Any, name: str) -> None:
 
     style = MAP_STYLES[name]
     if style["tiles"] is None:
-        m.get_root().header.add_child(folium.Element(
+        m.get_root().header.add_child(_RawElement(
             "<style>.leaflet-container{background:#000 !important;}</style>"))
         return
     zoom = style.get("max_native_zoom")
@@ -7332,7 +7831,7 @@ def build_base_map(ctx: Ctx) -> Any:
     )
     add_basemap(m, ctx.show["map_style_name"])
     header = m.get_root().header
-    header.add_child(folium.Element(TOOLTIP_STYLE))
+    header.add_child(_RawElement(TOOLTIP_STYLE))
     # ---- เครื่องมือสำรวจทำเล ----
     Fullscreen(position="topleft").add_to(m)
     MeasureControl(
@@ -7347,7 +7846,7 @@ def build_base_map(ctx: Ctx) -> Any:
         num_digits=5,
         prefix="พิกัด:",
     ).add_to(m)
-    header.add_child(folium.Element(MAP_CHROME_CSS))
+    header.add_child(_RawElement(MAP_CHROME_CSS))
     return m
 
 
@@ -7889,7 +8388,10 @@ def _evidence_summary(evidence: Dict[str, Any], composite: Optional[Dict[str, An
                 layer, _tile_bbox(int(floor(x / tile_m)), int(floor(y / tile_m)), tile_m), px)
             if image is not None:
                 column.image(_evidence_thumbnail(image), caption=f"{title} · ไทล์ {tile_m / 1000:g} กม.")
-        st.download_button("ดาวน์โหลด Evidence JSON", json.dumps(evidence, ensure_ascii=False, indent=2),
+        cache = st.session_state.setdefault("layer_cache", OrderedDict())
+        ev_json = lru_get(cache, ("ev-json", id(evidence)), evidence,
+                          lambda: json.dumps(evidence, ensure_ascii=False, indent=2))
+        st.download_button("ดาวน์โหลด Evidence JSON", ev_json,
                            "automated_cbd_evidence.json", "application/json")
 
 
@@ -8000,10 +8502,16 @@ def _render_sidebar_anchor_panel(locked: bool) -> bool:
                    f"exact {timings['exact_s']:.2f})" if timings else "")
             )
             a1, a2 = st.columns(2)
+            cache = st.session_state.setdefault("layer_cache", OrderedDict())
+            anchor_json_key = ("anchor-json", id(result), id(closeness_result), id(evidence_result))
+            anchor_json = lru_get(
+                cache, anchor_json_key, shown,
+                lambda: json.dumps({"composite": result, "closeness": closeness_result,
+                                    "evidence": evidence_result}, ensure_ascii=False, indent=2),
+            )
             a1.download_button(
                 "⬇ Anchor JSON",
-                json.dumps({"composite": result, "closeness": closeness_result,
-                            "evidence": evidence_result}, ensure_ascii=False, indent=2),
+                anchor_json,
                 "automated_cbd_anchors.json",
                 "application/json",
                 width="stretch",
@@ -8700,7 +9208,19 @@ def view_space_syntax(ctx: Ctx) -> None:
         if np.isfinite(scaled["score"][nearest]):
             st.info(f"📍 จุดยึด CBD ของ Rent Gradient ({anchor['source']}) อยู่ใกล้ segment คะแนน "
                     f"**{scaled['score'][nearest]:.0f}/100** ({_segment_label(net, nearest)})")
-    st.plotly_chart(histogram_figure(scaled, palette, index_name), width="stretch")
+    stats_key = ("ss-stats", measure, rkey, palette, d["scale"], d["thick"])
+
+    def _build_ss_stats() -> Tuple[Any, pd.DataFrame, bytes, str]:
+        fig = histogram_figure(scaled, palette, index_name)
+        summary = highway_summary(net, scaled["score"], values, mask)
+        frame = segment_table(net, result, mask)
+        csv_bytes = frame.to_csv(index=False).encode("utf-8-sig")
+        columns = {**payload["columns"], **result_columns(net, result)}
+        geojson_str = json.dumps(segments_geojson(net, columns, mask), ensure_ascii=False)
+        return fig, summary, csv_bytes, geojson_str
+
+    hist_fig, summary, csv_bytes, geojson = lru_get(ctx.cache, stats_key, result, _build_ss_stats)
+    st.plotly_chart(hist_fig, width="stretch")
     if top:
         st.markdown(f"**🏆 จุดที่ {MEASURES[measure]['thai']}สูงสุด** (ห่างกันอย่างน้อย "
                     f"{top_spacing_m(net, mask):,.0f} m)")
@@ -8714,7 +9234,6 @@ def view_space_syntax(ctx: Ctx) -> None:
             "Lat": st.column_config.NumberColumn(format="%.5f"),
             "Lon": st.column_config.NumberColumn(format="%.5f")})
     with st.expander("🛣️ คะแนนเฉลี่ยตามประเภทถนน (ถ่วงด้วยความยาว)"):
-        summary = highway_summary(net, scaled["score"], values, mask)
         st.dataframe(summary.rename(columns={
             "highway": "highway", "segments": "segment", "length_km": "ยาว (km)", "mean_score": "คะแนนเฉลี่ย",
             "mean_value": f"{index_name} เฉลี่ย"}), hide_index=True, width="stretch", column_config={
@@ -8722,11 +9241,8 @@ def view_space_syntax(ctx: Ctx) -> None:
             "คะแนนเฉลี่ย": st.column_config.NumberColumn(format="%.1f"),
             f"{index_name} เฉลี่ย": st.column_config.NumberColumn(format="%.3f")})
     d1, d2 = st.columns(2)
-    frame = segment_table(net, result, mask)
-    d1.download_button("⬇️ CSV (ทุกรัศมี/ตัวชี้วัด)", frame.to_csv(index=False).encode("utf-8-sig"),
+    d1.download_button("⬇️ CSV (ทุกรัศมี/ตัวชี้วัด)", csv_bytes,
                        file_name="space_syntax_segments.csv", mime="text/csv")
-    columns = {**payload["columns"], **result_columns(net, result)}
-    geojson = json.dumps(segments_geojson(net, columns, mask), ensure_ascii=False)
     d2.download_button("⬇️ GeoJSON (พร้อมสี)", geojson, file_name="space_syntax_segments.geojson",
                        mime="application/geo+json")
 
@@ -8885,24 +9401,28 @@ def view_road_scenario(ctx: Ctx) -> None:
                     f"(**{cmp['pct'][nearest]:+.1f}%**) · คะแนน "
                     f"{_score_sum(cmp['score_before'][nearest], cmp['score_change'][nearest], cmp['score_after'][nearest])}")
 
-    frame = segment_table(net, view.result, mask)[["segment", "name", "highway", "length_m", "mid_lat", "mid_lon"]]
-    rows = frame["segment"].to_numpy()
-    frame = frame.assign(**{"road": "existing", f"{index_name}_before": np.round(cmp["before"][rows], 6),
-                            f"{index_name}_after": np.round(cmp["after"][rows], 6),
-                            "change_pct": np.round(cmp["pct"][rows], 3),
-                            "score_before": np.round(cmp["score_before"][rows], 1),
-                            "score_change": np.round(cmp["score_change"][rows], 1),
-                            "score_after": np.round(cmp["score_after"][rows], 1)})
-    new = np.flatnonzero(scenario.is_new)                # the new roads' own rows: no "before", only "after"
-    frame = pd.concat([frame, pd.DataFrame({
-        "segment": [f"new-{s}" for s in new], "name": [scenario.net.seg_name[s] for s in new],
-        "highway": [scenario.net.seg_highway[s] for s in new], "length_m": np.round(scenario.net.seg_len[new], 1),
-        "mid_lat": np.round(scenario.net.seg_mid_lonlat[new, 1], 6),
-        "mid_lon": np.round(scenario.net.seg_mid_lonlat[new, 0], 6), "road": "new",
-        f"{index_name}_after": np.round(cmp["after_all"][new], 6),
-        "score_after": np.round(cmp["score_after_all"][new], 1)})], ignore_index=True)
+    def _build_scn_csv() -> bytes:
+        frame = segment_table(net, view.result, mask)[["segment", "name", "highway", "length_m", "mid_lat", "mid_lon"]]
+        rows = frame["segment"].to_numpy()
+        frame = frame.assign(**{"road": "existing", f"{index_name}_before": np.round(cmp["before"][rows], 6),
+                                f"{index_name}_after": np.round(cmp["after"][rows], 6),
+                                "change_pct": np.round(cmp["pct"][rows], 3),
+                                "score_before": np.round(cmp["score_before"][rows], 1),
+                                "score_change": np.round(cmp["score_change"][rows], 1),
+                                "score_after": np.round(cmp["score_after"][rows], 1)})
+        new = np.flatnonzero(scenario.is_new)                # the new roads' own rows: no "before", only "after"
+        frame = pd.concat([frame, pd.DataFrame({
+            "segment": [f"new-{s}" for s in new], "name": [scenario.net.seg_name[s] for s in new],
+            "highway": [scenario.net.seg_highway[s] for s in new], "length_m": np.round(scenario.net.seg_len[new], 1),
+            "mid_lat": np.round(scenario.net.seg_mid_lonlat[new, 1], 6),
+            "mid_lon": np.round(scenario.net.seg_mid_lonlat[new, 0], 6), "road": "new",
+            f"{index_name}_after": np.round(cmp["after_all"][new], 6),
+            "score_after": np.round(cmp["score_after_all"][new], 1)})], ignore_index=True)
+        return frame.to_csv(index=False).encode("utf-8-sig")
+
+    scn_csv_bytes = lru_get(ctx.cache, ("scn-csv", d["measure"], d["rkey"], d["scale"]), scn.result, _build_scn_csv)
     st.download_button("⬇️ CSV ก่อน/หลัง ถนนเดิม + ถนนใหม่ (ตัวชี้วัด·รัศมีที่แสดง)",
-                       frame.to_csv(index=False).encode("utf-8-sig"),
+                       scn_csv_bytes,
                        file_name=f"road_scenario_{d['measure']}_{d['rkey']}.csv", mime="text/csv")
     with st.expander("📖 จำลองอย่างไร / อ่านผลอย่างไร"):
         _render_scenario_help()
@@ -9390,14 +9910,15 @@ def perform_calculation(
                 continue
 
             for f in features:
-                f["properties"].update(
+                props = dict(f.get("properties") or {})
+                props.update(
                     {
-                        "travel_time_minutes": f["properties"].get("value", 0) / 60,
+                        "travel_time_minutes": props.get("value", 0) / 60,
                         "original_index": orig_idx,
                         "active_index": act_idx,
                     }
                 )
-                all_features.append(f)
+                all_features.append({**f, "properties": props})
 
         # Display collected errors
         for error in errors:
