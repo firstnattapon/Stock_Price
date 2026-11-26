@@ -68,14 +68,19 @@ MODIFIED = {
     "StateManager": "cached remote defaults, config guard, layer/Space Syntax keys; no click-debounce state",
     "NETWORK_CONFIG": "the two click-debounce keys are gone (the map no longer adds pins)",
     "SESSION_KEYS_TO_SAVE": "the three anchor-detail layer checkboxes (and the Space Syntax settings)",
+    "_render_sidebar_config_section": "UI/UX redesign: width='stretch' buttons and clearer local vs GitHub grouping",
     "_render_sidebar_marker_input": "the only place a pin is entered: range-checked like the anchor centre, says where to read coordinates",
     "_render_sidebar_marker_list": "pin label readable on white and on black (CSS names such as black / pink were not)",
-    "_render_sidebar_network_panel": "the three layer checkboxes moved to the layers panel",
-    "_render_sidebar_rent_panel": "the two layer checkboxes moved to the layers panel",
-    "render_sidebar": "pipeline order (… Space Syntax before Rent), returns the intents as a dict",
-    "render_header": "one extra caption line about the Space Syntax layer",
-    "render_map": "draws the registry layers from a Ctx instead of one 350-line function",
-    "main": "stage table + Ctx + layers panel",
+    "_render_sidebar_network_panel": "the three layer checkboxes moved to the layers panel; progressive-disclosure accordion",
+    "_render_sidebar_anchor_panel": "UI/UX redesign: progressive-disclosure accordion, primary CTA, side-by-side download/clear",
+    "_render_sidebar_rent_panel": "the two layer checkboxes moved to the layers panel; progressive-disclosure accordion",
+    "render_sidebar": "pipeline order (… Space Syntax before Rent), progressive-disclosure accordions, returns the intents as a dict",
+    "render_header": "UI/UX redesign: cartographic masthead + live 5-step pipeline stepper + Space Syntax caption",
+    "render_metrics_row": "UI/UX redesign: adds neutral contextual delta subtitles on the 5 KPI cards (same labels/values/order)",
+    "_build_bid_rent_figure": "UI/UX redesign: translucent curve area fill, refined d½ annotation, and theme-adaptive Plotly styling (same math/traces)",
+    "_legend_swatch_row": "UI/UX redesign: adds flex-shrink guard and tighter swatch alignment in map legend",
+    "render_map": "draws the registry layers from a Ctx instead of one 350-line function, with active-layer context bar and framed map",
+    "main": "stage table + Ctx + layers panel + theme-adaptive APP_THEME_CSS",
 }
 # Replaced by new SHELL code (the behaviour moved into the layer registry / panels / views).
 REPLACED = {
@@ -1465,3 +1470,41 @@ def test_the_theory_cards_take_the_page_colours_instead_of_fixed_light_on_dark_o
     assert "rgba(" not in css and "color-mix(in srgb, currentColor" in css
     text_colours = set(re.findall(r"(?<![-\w])color:\s*([^;]+);", css))
     assert text_colours <= {"inherit", "var(--rg-muted)", "#fff"}, text_colours
+
+
+def test_app_theme_css_is_theme_adaptive_and_covers_all_studio_components():
+    css = v2.APP_THEME_CSS
+    assert "color-mix(in srgb, currentColor" in css
+    assert "color-mix(in srgb, #1f7a70" in css
+    # Never hardcode fixed dark/light app canvas backgrounds
+    assert "[data-testid=\"stAppViewContainer\"] { background" not in css
+    for token in (".rg-masthead", ".rg-stepper", ".rg-map-bar", ".st-key-rg_view_nav",
+                  ".st-key-rg_analytics_card", "[class*=\"st-key-rg_layer_opts_\"]", ".st-key-rg_kpi_strip"):
+        assert token in css, token
+
+
+def test_masthead_stepper_and_map_bar_reflect_live_progress_and_escape_html(monkeypatch):
+    state = make_state(monkeypatch)
+    state["markers"] = [{"lat": 20.24, "lng": 100.41, "active": True}]
+    html_calls = []
+    monkeypatch.setattr(v2.st, "html", lambda text: html_calls.append(text))
+    monkeypatch.setattr(v2.st, "caption", lambda *a, **k: None)
+
+    v2.render_header(make_ctx(markers=state["markers"]))
+    masthead = html_calls[-1]
+    assert masthead.count("rg-step ") + masthead.count('class="rg-step"') == 5
+    assert "is-done" not in masthead                                # cold start: 0 stages done
+    for title in ("หมุด &amp; Isochrone", "CBD / Anchor", "Network &amp; Golden", "Space Syntax", "Rent Gradient"):
+        assert title in masthead
+
+    ctx = rich_ctx()
+    state.update(isochrone_data=ctx.iso, intersection_data=ctx.inter, network_data=ctx.net, rent_gradient_data=ctx.rent)
+    v2.render_header(ctx)
+    assert html_calls[-1].count("is-done") == 4                     # 4 of 5 done (Space Syntax not run yet)
+
+    nasty_layer = v2.Layer("evil", "<img src=x onerror=1>", "บริบท & overlay", lambda c: None, lambda c: True)
+    v2._render_map_bar(make_ctx(show={"map_style_name": "<b>style</b>"}), [nasty_layer])
+    bar = html_calls[-1]
+    assert "<img src=x" not in bar and "<b>style</b>" not in bar
+    assert "&lt;img src=x onerror=1&gt;" in bar and "&lt;b&gt;style&lt;/b&gt;" in bar
+
